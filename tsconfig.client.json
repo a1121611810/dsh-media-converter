@@ -6,5 +6,11 @@
     // entry needs the Node types — so they stay on here.
     "types": ["node"]
   },
+  // The Vue SFCs are type-checked through the TypeScript 7 content-mapper
+  // protocol: the mapper turns each .vue into a virtual TypeScript file.
+  // It needs --runExternalCode, and it is a top-level tsconfig key.
+  "contentMappers": [
+    { "package": "@vue/content-mapper", "extensions": [".vue"] }
+  ],
   "include": ["src/client/**/*.ts", "src/client/**/*.vue", "vite.config.ts"]
 }

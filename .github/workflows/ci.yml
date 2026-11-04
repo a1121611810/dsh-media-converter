@@ -19,8 +19,9 @@ jobs:
       fail-fast: false
       matrix:
         # Two legs: the engines floor and the current runtime. The build needs
-        # Vite and the TypeScript toolchain (tsc + vue-tsc), whose floor is
-        # Node 20.19, so `20` resolves to the newest 20.x rather than 20.0.
+        # Vite and the TypeScript toolchain (tsrs + the Vue content mapper,
+        # which starts Node workers), whose floor is Node 20.19, so `20`
+        # resolves to the newest 20.x rather than 20.0.
         node-version: [20, 24]
     steps:
       - uses: actions/checkout@v7

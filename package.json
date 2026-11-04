@@ -59,16 +59,17 @@
   "devDependencies": {
     "@types/node": "^24.19.2",
     "@vitejs/plugin-vue": "^6.0.10",
-    "typescript": "^5.9.3",
+    "@vue/content-mapper": "^4.0.0-alpha.0",
+    "tsrs": "^0.21.0-ts7.1.0-beta",
+    "typescript": "^7.1.0-beta",
     "vite": "^8.3.5",
-    "vue": "^3.5.44",
-    "vue-tsc": "^3.3.14"
+    "vue": "^3.5.44"
   },
   "scripts": {
-    "build:host": "tsc -p tsconfig.json",
+    "build:host": "tsrs -p tsconfig.json",
     "build:client": "vite build && cp dist/client/client.js client.js && cp dist/client/client.js.map client.js.map",
     "build": "rm -rf dist && npm run build:host && npm run build:client",
-    "typecheck": "vue-tsc --noEmit -p tsconfig.client.json",
+    "typecheck": "tsrs -p tsconfig.client.json --noEmit --runExternalCode",
     "test": "npm run typecheck && npm run build && node test/client-bundle.test.mjs && node test/client-lib.test.mjs && node test/platform.test.mjs && node test/plan.test.mjs && node test/base64.test.mjs && node test/host.test.mjs",
     "check:build": "npm run build:client && git diff --exit-code -- client.js client.js.map",
     "release": "bash scripts/release.sh",

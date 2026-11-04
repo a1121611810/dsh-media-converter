@@ -72,19 +72,21 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 
 ```bash
 npm test              # 类型检查 + 构建（宿主 dist/ 与浏览器 client.js）+ 六套自检
-npm run build         # 构建：宿主 tsc → dist/，浏览器 vite → client.js
-npm run build:host    # 只构建宿主半边（tsc → dist/）
+npm run build         # 构建：宿主 tsrs → dist/，浏览器 vite → client.js
+npm run build:host    # 只构建宿主半边（tsrs → dist/）
 npm run build:client  # 只构建浏览器半边（vite → client.js + sourcemap）
-npm run typecheck     # 只做类型检查（vue-tsc，连 .vue 一起查）
+npm run typecheck     # 只做类型检查（tsrs，连 .vue 一起查）
 npm run check:build   # 改了源码却没重新构建时失败（CI 用）
 ```
 
 源码是 TypeScript（strict）：宿主是 `index.ts` + `lib/*.ts`，浏览器是 `src/client/*.ts` + `.vue`（`<script setup lang="ts">`）。类型只进编译期，**运行时零新增依赖**——npm 包里只有编译好的 JS。测试保持 `test/*.test.mjs` 不转，但改成跑**编译产物**，测的正是发布形态的代码。
 
+编译器用 [`tsrs`](https://github.com/oxc-project/tsrs)（TypeScript 7 的 Rust 移植版，drop-in 替换 `tsc`）：`.vue` 走 TypeScript 7 的 content-mapper 协议检查（`@vue/content-mapper` 把 SFC 变成虚拟 TS），所以**没有 `vue-tsc`**。副作用：检查时编译产物与 tsc 5.9 逐字节相同，宿主检查快约 3 倍。
+
 两半都是**构建产物**：
 
 - 浏览器半边：`src/client/` 是源码，`client.js` 提交进仓库（DSH 直接从包目录读它，链接安装不会触发构建）。改了 `src/client/` 之后必须 `npm run build:client`，否则 `check:build` 会红。
-- 宿主半边：源码是 `index.ts` + `lib/*.ts`，`tsc` 编到 `dist/`，npm 包的入口是 `dist/index.js`。改完必须 `npm run build:host`，再**重启 DSH**。
+- 宿主半边：源码是 `index.ts` + `lib/*.ts`，`tsrs` 编到 `dist/`，npm 包的入口是 `dist/index.js`。改完必须 `npm run build:host`，再**重启 DSH**。
 
 两半之间的 JSON 契约**没有单独一份文件**：类型就住在产出数据的那段代码旁边（`lib/plan.ts`、`index.ts`），能推导的就推导（`ReturnType<typeof parseMeta>`），只有被多状态改写的形状（Job 状态机）才手写一次。面板用 `import type` 引入——编译期完全擦除，浏览器包不会因此拖进 `node:fs`。
 
