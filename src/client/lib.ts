@@ -1,5 +1,7 @@
 // Framework-free helpers shared by the panel (App.vue) and its tests.
 // Nothing here touches the DOM except downloadText/previewUrl consumers.
+import type { MediaKind, TrimWindow } from '../../lib/plan.js';
+import type { DecodeResponse, UploadResponse } from '../../index.js';
 
 export const TAG_KEYS = ['title', 'artist', 'album', 'comment', 'date', 'genre'];
 
@@ -15,7 +17,21 @@ export const PLATFORM = typeof navigator === 'undefined'
       ? 'mac'
       : 'linux';
 
-export function formatSize(bytes) {
+// What the panel sends to the Host: the panel is the sender, so it declares
+// the shapes it sends.
+export interface ResultPayload { file: string; size: number; kind: MediaKind; text?: string }
+export interface ConvertRequest { id: string; name?: string; format?: string; quality?: number; mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta'; stream?: number; tags?: Record<string, string>; trim?: TrimWindow }
+export interface CancelRequest { id: string }
+export interface RevealRequest { file: string }
+export interface DecodeRequest { text: string }
+
+// The decode answer is either plain text or a file the Host wrote; the file
+// answer never carries the 'text' kind, so the panel can tell them apart.
+export type DecodedText = Extract<DecodeResponse, { text: string }>;
+export type DecodedFile = Omit<Extract<DecodeResponse, { file: string }>, 'kind'> & { kind: Exclude<MediaKind, 'text'> };
+export type DecodedPayload = DecodedText | DecodedFile;
+
+export function formatSize(bytes: number): string {
   if (!bytes) return '';
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1048576) return (bytes / 1024).toFixed(0) + ' KB';
@@ -23,13 +39,13 @@ export function formatSize(bytes) {
   return (bytes / 1073741824).toFixed(2) + ' GB';
 }
 
-export function formatDuration(seconds) {
+export function formatDuration(seconds: number): string {
   if (!seconds) return '';
   const s = Math.round(seconds);
   return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
 }
 
-export function formatClock(seconds) {
+export function formatClock(seconds?: number): string {
   const total = Math.max(0, Math.round((seconds || 0) * 10) / 10);
   const whole = Math.floor(total / 60);
   const rest = Math.round((total - whole * 60) * 10) / 10;
@@ -39,7 +55,7 @@ export function formatClock(seconds) {
 
 // "12", "0:12", "0:12.5", "00:00:12" -> seconds; null when empty, NaN when
 // unparseable. The Host only ever sees numbers.
-export function parseTimecode(text) {
+export function parseTimecode(text: string): number | null {
   const value = String(text || '').trim();
   if (!value) return null;
   const parts = value.split(':');
@@ -52,11 +68,11 @@ export function parseTimecode(text) {
   return total;
 }
 
-export function previewUrl(file) {
+export function previewUrl(file: string): string {
   return '/api/media-convert/preview?file=' + encodeURIComponent(file);
 }
 
-export function downloadText(name, text) {
+export function downloadText(name: string, text: string): void {
   const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
   const a = document.createElement('a');
   a.href = url;
@@ -65,10 +81,10 @@ export function downloadText(name, text) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-export async function readJson(resp) {
+export async function readJson<T>(resp: Response): Promise<T> {
   const text = await resp.text();
   try {
-    return JSON.parse(text);
+    return JSON.parse(text) as T;
   } catch {
     throw new Error(text.slice(0, 120) || 'HTTP ' + resp.status);
   }
@@ -76,12 +92,22 @@ export async function readJson(resp) {
 
 // Media without a picture still needs a probe; this mirrors the Host's rule so
 // the UI can grey out impossible targets before a request is made.
-export function unavailableTarget(file, target) {
+export function unavailableTarget(file: UploadResponse | null, target: string): boolean {
   return Boolean(file && file.kind === 'video' && AUDIO_TARGETS.includes(target) && file.streams && !file.streams.audio);
 }
 
 // The trim window described by the two fields; empty fields mean start/end.
-export function trimWindow({ file, trimStart, trimEnd, t }) {
+export type TrimState =
+  | { active: true; start: number; end: number; error: string }
+  | { active: false; error: string; start?: number; end?: number };
+export interface TrimInput {
+  file: UploadResponse | null;
+  trimStart: string;
+  trimEnd: string;
+  t: (key: string) => string;
+}
+
+export function trimWindow({ file, trimStart, trimEnd, t }: TrimInput): TrimState {
   if (!file || file.kind === 'image') return { active: false, start: 0, end: 0, error: '' };
   if (!trimStart.trim() && !trimEnd.trim()) return { active: false, start: 0, end: file.duration || 0, error: '' };
   const start = trimStart.trim() ? parseTimecode(trimStart) : 0;

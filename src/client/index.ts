@@ -9,12 +9,48 @@
 // itself is Vue (src/client/App.vue).
 import './vue/elements.js';
 
+    // React is handed in by the loader, so the bundle carries no React of its
+    // own: only the three hooks this file touches are declared here.
+    interface ReactRef<T> { current: T }
+    interface ReactSurface {
+      createElement(type: unknown, props?: Record<string, unknown> | null, ...children: unknown[]): unknown;
+      useRef<T>(initial: T): ReactRef<T>;
+      useEffect(effect: () => void | (() => void), deps?: unknown[]): void;
+    }
+    // The <media-panel> custom element carries the translator on the element.
+    interface PanelElement extends HTMLElement { t: (key: string) => string }
+
+    declare global {
+      // The loader's factory parks React here before the bundle runs.
+      var __dshReact: ReactSurface;
+    }
+
+    // The plugin services this page uses: the locale translator and the slots
+    // it registers into. Only the calls below are declared.
+    interface SlotRegistration {
+      name: string;
+      id?: string;
+      key?: string;
+      order?: number;
+      label?: () => string;
+    }
+    interface PluginContext {
+      locale: {
+        bind(namespace: string): (key: string) => string;
+        register(namespace: string, language: string, dictionary: Record<string, string>): () => void;
+      };
+      slots: {
+        inject(name: string, injector: () => void): void;
+        register(registration: SlotRegistration, component: unknown): () => void;
+      };
+      effect(effect: () => void | (() => void)): void;
+    }
     const React = globalThis.__dshReact;
     const h = React.createElement;
     const PANEL_ID = 'media-convert';
     const NS = 'media-convert';
 
-    const ZH = {
+    const ZH: Record<string, string> = {
       'nav.label': '媒体工具箱',
       'page.title': '媒体工具箱',
       'page.subtitle': '转换、裁剪、提取音轨、图片压缩、Base64——都在本机完成，文件不出本机。',
@@ -149,7 +185,7 @@ import './vue/elements.js';
       'b64.decoding': '还原中…',
       'b64.textResult': '还原为文本',
     };
-    const EN = {
+    const EN: Record<string, string> = {
       'nav.label': 'Media Tools',
       'page.title': 'Media Toolbox',
       'page.subtitle': 'Convert, trim, split tracks, compress images, and move files to/from Base64 — all locally.',
@@ -285,7 +321,7 @@ import './vue/elements.js';
       'b64.textResult': 'Restored as text',
     };
 
-    function PanelIcon({ size }) {
+    function PanelIcon({ size }: { size?: number }) {
       return h(
         'svg',
         {
@@ -427,14 +463,14 @@ import './vue/elements.js';
 
     // React face of the panel. Eight lines of React is the whole seam: the
     // element mounts once, owns its own DOM, and only receives the translator.
-    function Shell({ t }) {
-      const ref = React.useRef(null);
-      const panel = React.useRef(null);
+    function Shell({ t }: { t: (key: string) => string }) {
+      const ref = React.useRef<HTMLDivElement | null>(null);
+      const panel = React.useRef<PanelElement | null>(null);
       React.useEffect(() => {
-        const el = document.createElement('media-panel');
+        const el = document.createElement('media-panel') as PanelElement;
         el.t = t; // set before connect so the first render is already translated
         panel.current = el; // firstElementChild is the <style>, not the panel
-        ref.current.appendChild(el);
+        ref.current!.appendChild(el);
         return () => {
           panel.current = null;
           el.remove();
@@ -450,7 +486,7 @@ import './vue/elements.js';
 
     const plugin = {
       inject: ['slots', 'locale'],
-      apply(ctx) {
+      apply(ctx: PluginContext) {
         const t = ctx.locale.bind(NS);
         ctx.effect(() => {
           const offZh = ctx.locale.register(NS, 'zh', ZH);

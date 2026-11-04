@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   FORMATS, buildArgs, defaultFormat, extractPlan, kindOf, metaArgs, normalizeStderr, normalizeTrim,
   parseDuration, parseMeta, parseStreams, percentOf, progressSeconds, subtitlePlan, supportsQuality, trimArgs,
-} from '../lib/plan.js';
+} from '../dist/lib/plan.js';
 
 assert.equal(kindOf('movie.MOV'), 'video');
 assert.equal(kindOf('clip.gif'), 'image');

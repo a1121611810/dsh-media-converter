@@ -13,15 +13,15 @@ export default defineConfig({
   define: { 'process.env.NODE_ENV': '"production"' },
   build: {
     target: 'es2022',
-    // Build into dist/ (Vite refuses to write into the project root); the npm
-    // script copies client.js next to index.js, which is the path dsh.client
-    // resolves.
-    outDir: 'dist',
+    // Build into dist/client/ (Vite refuses to write into the project root);
+    // the npm script copies client.js next to package.json, which is the path
+    // dsh.client resolves.
+    outDir: 'dist/client',
     emptyOutDir: true,
     minify: 'oxc',
     sourcemap: true,
     lib: {
-      entry: 'src/client/index.js',
+      entry: 'src/client/index.ts',
       formats: ['iife'],
       name: '__media',
       fileName: () => 'client.js',

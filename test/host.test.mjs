@@ -8,8 +8,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
-import { apply, inject } from '../index.js';
-import { parseDuration } from '../lib/plan.js';
+import { apply, inject } from '../dist/index.js';
+import { parseDuration } from '../dist/lib/plan.js';
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-out-'));
 const routes = new Map();

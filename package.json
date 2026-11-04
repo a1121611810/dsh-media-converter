@@ -28,16 +28,16 @@
   },
   "type": "module",
   "exports": {
-    ".": "./index.js",
+    ".": "./dist/index.js",
     "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
-    "index.js",
+    "dist/index.js",
+    "dist/lib/**/*.js",
     "client.js",
     "client.js.map",
-    "lib/**/*.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
@@ -57,13 +57,19 @@
     }
   },
   "devDependencies": {
+    "@types/node": "^24.19.2",
     "@vitejs/plugin-vue": "^6.0.10",
+    "typescript": "^5.9.3",
     "vite": "^8.3.5",
-    "vue": "^3.5.44"
+    "vue": "^3.5.44",
+    "vue-tsc": "^3.3.14"
   },
   "scripts": {
-    "build:client": "vite build && cp dist/client.js client.js && cp dist/client.js.map client.js.map",
-    "test": "npm run build:client && node test/client-bundle.test.mjs && node test/client-lib.test.mjs && node test/platform.test.mjs && node test/plan.test.mjs && node test/base64.test.mjs && node test/host.test.mjs",
+    "build:host": "tsc -p tsconfig.json",
+    "build:client": "vite build && cp dist/client/client.js client.js && cp dist/client/client.js.map client.js.map",
+    "build": "rm -rf dist && npm run build:host && npm run build:client",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.client.json",
+    "test": "npm run typecheck && npm run build && node test/client-bundle.test.mjs && node test/client-lib.test.mjs && node test/platform.test.mjs && node test/plan.test.mjs && node test/base64.test.mjs && node test/host.test.mjs",
     "check:build": "npm run build:client && git diff --exit-code -- client.js client.js.map",
     "release": "bash scripts/release.sh",
     "prepublishOnly": "node -e \"if (!process.env.CI) { console.error('本仓库只通过 CI 发布：npm run release -- <version>；应急可在 CI=1 下直接发布'); process.exit(1); }\""

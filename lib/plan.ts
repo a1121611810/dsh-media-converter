@@ -2,13 +2,83 @@
 // stream probing, extraction targets, and the stderr/progress parsing the Host
 // needs. No I/O here, so the tests exercise all of it directly.
 
-export const FORMATS = {
+// The media kinds the toolbox knows. The browser panel imports these types
+// (type-only), so the names are part of the plugin's contract.
+export type MediaKind = 'video' | 'audio' | 'image' | 'text' | 'file';
+// The kinds that have output formats.
+export type ConvertKind = 'video' | 'audio' | 'image';
+export type FormatTable = Record<ConvertKind, string[]>;
+// A trim window in seconds.
+export interface TrimWindow { start: number; end: number; }
+
+// One stream record of the ffmpeg stderr: the fields every stream carries,
+// plus the ones only video or only audio streams carry.
+export interface StreamDetail {
+  index: number;
+  type: string;
+  codec: string;
+  profile: string;
+  tag: string;
+  language: string;
+  flags: string[];
+  tags: Record<string, string>;
+  bitrate?: number;
+  width?: number;
+  height?: number;
+  aspect?: string;
+  displayAspect?: string;
+  fps?: number;
+  pixFmt?: string;
+  sampleRate?: number;
+  channels?: string;
+  sampleFmt?: string;
+}
+
+// A chapter of the container.
+export interface ChapterDetail {
+  index: number;
+  start: number;
+  end: number;
+  tags: Record<string, string>;
+}
+
+// One subtitle track of the container.
+export interface SubtitleDetail {
+  index: number;
+  codec: string;
+  language: string;
+  title: string;
+}
+
+// The parseMeta() result, written ONCE here (it is a mutable structure, so it
+// cannot be inferred): parseMeta fills the fields one by one.
+export interface MediaMeta {
+  format: string; duration: number; start: number; bitrate: number;
+  streams: StreamDetail[]; chapters: ChapterDetail[]; tags: Record<string, string>;
+  video: StreamDetail | null; audio: StreamDetail | null; subtitles: SubtitleDetail[];
+}
+export type StreamMeta = MediaMeta['streams'][number];
+export type Chapter = MediaMeta['chapters'][number];
+export type SubtitleTrack = MediaMeta['subtitles'][number];
+// Derived from the real function, not re-declared:
+export type StreamInfo = ReturnType<typeof parseStreams>;
+
+// What one conversion job runs: the output extension, the kind of the result,
+// the ffmpeg argument tail, and the optional suffix of the output name.
+export interface ConvertPlan {
+  ext: string;
+  kind: MediaKind;
+  args: string[];
+  stemSuffix?: string;
+}
+
+export const FORMATS: FormatTable = {
   video: ['mp4', 'mov', 'mkv', 'webm', 'avi', 'flv', 'wmv', 'ts', 'ogv', 'gif', 'mp3', 'm4a'],
   audio: ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus', 'aiff'],
   image: ['png', 'jpg', 'webp', 'gif', 'bmp', 'tiff', 'avif'],
 };
 
-export const MIME_BY_EXT = {
+export const MIME_BY_EXT: Record<string, string> = {
   mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
   mkv: 'video/x-matroska', avi: 'video/x-msvideo', gif: 'image/gif',
   flv: 'video/x-flv', wmv: 'video/x-ms-wmv', ts: 'video/mp2t', ogv: 'video/ogg',
@@ -21,7 +91,7 @@ export const MIME_BY_EXT = {
   vtt: 'text/plain; charset=utf-8', ass: 'text/plain; charset=utf-8',
 };
 
-const KIND_BY_EXT = {
+const KIND_BY_EXT: Record<string, MediaKind> = {
   mp4: 'video', m4v: 'video', mov: 'video', mkv: 'video', webm: 'video',
   avi: 'video', flv: 'video', wmv: 'video', mpg: 'video', mpeg: 'video',
   ts: 'video', m2ts: 'video', '3gp': 'video',
@@ -32,22 +102,22 @@ const KIND_BY_EXT = {
   txt: 'text', json: 'text', srt: 'text', vtt: 'text', md: 'text',
 };
 
-export function extOf(filename) {
+export function extOf(filename: string): string {
   const m = /\.([a-z0-9]+)$/i.exec(String(filename || ''));
   return m ? m[1].toLowerCase() : '';
 }
 
-export function kindByExt(extension) {
+export function kindByExt(extension: string): MediaKind {
   return KIND_BY_EXT[String(extension || '').toLowerCase()] || 'file';
 }
 
-export function mimeOf(filename) {
+export function mimeOf(filename: string): string {
   return MIME_BY_EXT[extOf(filename)] || 'application/octet-stream';
 }
 
 // Extension first (an image is an image even though ffmpeg calls it a video
 // stream); the probe covers extensions we do not know.
-export function kindOf(filename, stderr = '') {
+export function kindOf(filename: string, stderr = ''): MediaKind | null {
   const known = KIND_BY_EXT[extOf(filename)];
   if (known) return known;
   const streams = parseStreams(stderr);
@@ -56,13 +126,18 @@ export function kindOf(filename, stderr = '') {
   return null;
 }
 
-export function defaultFormat(kind) {
-  return (FORMATS[kind] || [])[0] || 'mp4';
+// The output formats of a kind; the kinds without formats have none.
+export function formatsFor(kind: MediaKind): string[] {
+  return kind === 'video' || kind === 'audio' || kind === 'image' ? FORMATS[kind] : [];
+}
+
+export function defaultFormat(kind: MediaKind): string {
+  return formatsFor(kind)[0] || 'mp4';
 }
 
 const X264 = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p'];
 
-const VIDEO = {
+const VIDEO: Record<string, string[]> = {
   mp4: [...X264, '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'],
   mov: [...X264, '-c:a', 'aac', '-b:a', '192k'],
   mkv: [...X264, '-c:a', 'aac', '-b:a', '192k'],
@@ -77,7 +152,7 @@ const VIDEO = {
   m4a: ['-vn', '-c:a', 'aac', '-b:a', '192k'],
 };
 
-const AUDIO = {
+const AUDIO: Record<string, string[]> = {
   mp3: ['-vn', '-c:a', 'libmp3lame', '-b:a', '192k'],
   m4a: ['-vn', '-c:a', 'aac', '-b:a', '192k'],
   aac: ['-vn', '-c:a', 'aac', '-b:a', '192k', '-f', 'adts'],
@@ -88,7 +163,7 @@ const AUDIO = {
   aiff: ['-vn', '-c:a', 'pcm_s16be'],
 };
 
-const IMAGE = {
+const IMAGE: Record<string, string[]> = {
   png: ['-frames:v', '1', '-c:v', 'png'],
   jpg: ['-frames:v', '1'],
   webp: ['-frames:v', '1', '-c:v', 'libwebp'],
@@ -101,16 +176,16 @@ const IMAGE = {
 };
 
 // Lossy formats only: the UI shows its quality control for exactly these.
-export function supportsQuality(kind, format) {
+export function supportsQuality(kind: MediaKind, format: string): boolean {
   return kind === 'image' && (format === 'jpg' || format === 'webp');
 }
 
 // 1..100 user quality -> mjpeg qscale (2 best .. 31 worst) or libwebp quality.
-function jpegQscale(quality) {
+function jpegQscale(quality: number): string {
   return String(Math.max(2, Math.round(31 - quality * 0.29)));
 }
 
-export function buildArgs(kind, format, quality = 90) {
+export function buildArgs(kind: MediaKind, format: string, quality = 90): string[] {
   const table = kind === 'audio' ? AUDIO : kind === 'image' ? IMAGE : VIDEO;
   const base = table[format];
   if (!base) throw new Error(`不支持的输出格式: ${format}`);
@@ -124,7 +199,7 @@ export function buildArgs(kind, format, quality = 90) {
 
 // Trim window in seconds, or null when the request is not a trim. An invalid
 // or no-op window degrades to "no trim" instead of cutting a surprise range.
-export function normalizeTrim(trim, duration) {
+export function normalizeTrim(trim: { start?: unknown; end?: unknown } | null | undefined, duration: number): TrimWindow | null {
   if (!trim) return null;
   let start = Number(trim.start);
   let end = Number(trim.end);
@@ -140,7 +215,7 @@ export function normalizeTrim(trim, duration) {
 
 // `-ss`/`-t` before `-i` are input options: ffmpeg seeks first and reads only
 // the window, so the cost follows the cut length rather than the file size.
-export function trimArgs(trim) {
+export function trimArgs(trim: TrimWindow | null | undefined): string[] {
   if (!trim) return [];
   const start = Math.max(0, trim.start);
   const length = trim.end - start;
@@ -150,13 +225,13 @@ export function trimArgs(trim) {
 
 // ffmpeg writes CRLF line endings on Windows; the parsers below expect plain
 // lines, so every stderr sample goes through here first.
-export function normalizeStderr(text) {
+export function normalizeStderr(text: string): string {
   return String(text || '').replace(/\r\n/g, '\n');
 }
 
 // `ffmpeg -i file` exits non-zero without an output; its stderr is the only
 // metadata source, since this plugin ships no ffprobe.
-export function parseDuration(stderr) {
+export function parseDuration(stderr: string): number {
   const m = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(String(stderr || ''));
   if (!m) return 0;
   return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
@@ -168,11 +243,11 @@ export function parseDuration(stderr) {
 // best-effort; a missing piece stays empty instead of breaking the panel.
 const STREAM_FLAGS = /\((default|forced|dub|original|comment|attached_pic|hearing_impaired|visual_impaired|clean_effects|timed_thumbnails)\)/g;
 
-function parseStreamLine(index, language, type, descriptor) {
+function parseStreamLine(index: string, language: string, type: string, descriptor: string): StreamDetail {
   const chunks = descriptor.split(/,\s*/);
   const first = chunks[0] || '';
   const parens = [...first.matchAll(/\(([^()]+)\)/g)].map((m) => m[1]);
-  const stream = {
+  const stream: StreamDetail = {
     index: Number(index),
     type: String(type).toLowerCase(),
     codec: first.split(' ')[0],
@@ -211,9 +286,9 @@ function parseStreamLine(index, language, type, descriptor) {
   return stream;
 }
 
-export function parseMeta(stderr) {
+export function parseMeta(stderr: string): MediaMeta {
   const text = String(stderr || '');
-  const meta = { format: '', duration: 0, start: 0, bitrate: 0, streams: [], chapters: [], tags: {}, video: null, audio: null, subtitles: [] };
+  const meta: MediaMeta = { format: '', duration: 0, start: 0, bitrate: 0, streams: [], chapters: [], tags: {}, video: null, audio: null, subtitles: [] };
 
   const input = /^Input #0,\s*(.+?),\s*from\s/m.exec(text);
   if (input) meta.format = input[1].trim();
@@ -245,7 +320,7 @@ export function parseMeta(stderr) {
     const chapter = /^\s*Chapter #0:(\d+):\s*start\s*([\d.-]+),\s*end\s*([\d.-]+)/.exec(line);
     if (chapter) {
       inMetadata = false;
-      const entry = { index: Number(chapter[1]), start: Number(chapter[2]), end: Number(chapter[3]), tags: {} };
+      const entry: ChapterDetail = { index: Number(chapter[1]), start: Number(chapter[2]), end: Number(chapter[3]), tags: {} };
       meta.chapters.push(entry);
       target = entry.tags;
       continue;
@@ -273,7 +348,7 @@ export function parseMeta(stderr) {
   return meta;
 }
 
-export function parseStreams(stderr) {
+export function parseStreams(stderr: string) {
   const meta = parseMeta(stderr);
   return {
     video: Boolean(meta.video),
@@ -284,14 +359,14 @@ export function parseStreams(stderr) {
   };
 }
 
-const AUDIO_CONTAINER = {
+const AUDIO_CONTAINER: Record<string, string> = {
   aac: 'm4a', alac: 'm4a', mp3: 'mp3', ac3: 'ac3', eac3: 'eac3',
   opus: 'ogg', vorbis: 'ogg', flac: 'flac',
 };
-const VIDEO_CONTAINER = { h264: 'mp4', hevc: 'mp4', av1: 'mp4', mpeg4: 'mp4', mpeg2video: 'mp4', vp8: 'webm', vp9: 'webm', theora: 'webm' };
+const VIDEO_CONTAINER: Record<string, string> = { h264: 'mp4', hevc: 'mp4', av1: 'mp4', mpeg4: 'mp4', mpeg2video: 'mp4', vp8: 'webm', vp9: 'webm', theora: 'webm' };
 
 // Stream copy: separating the tracks costs a container rewrite, not an encode.
-export function extractPlan(streams, which) {
+export function extractPlan(streams: StreamInfo, which: 'audio' | 'video'): ConvertPlan {
   if (which === 'audio') {
     if (!streams || !streams.audio) throw new Error('该文件没有音轨');
     const codec = streams.audioCodec || '';
@@ -305,7 +380,7 @@ export function extractPlan(streams, which) {
 
 // Embedded subtitle track -> plain .srt; the language code keeps multi-track
 // exports distinguishable in the output folder.
-export function subtitlePlan(streams, ordinal) {
+export function subtitlePlan(streams: StreamInfo, ordinal: number | string | undefined): ConvertPlan {
   const track = streams && streams.subtitles ? streams.subtitles[Number(ordinal)] : null;
   if (!track) throw new Error('这条字幕轨不存在');
   return {
@@ -320,7 +395,7 @@ const TAG_KEYS = ['title', 'artist', 'album', 'comment', 'date', 'genre'];
 
 // Rewrite container tags without touching the streams. Only keys with content
 // are written, so an empty field never clears what the file already had.
-export function metaArgs(tags) {
+export function metaArgs(tags: Record<string, string> | null | undefined): string[] {
   const args = ['-map', '0', '-c', 'copy'];
   for (const key of TAG_KEYS) {
     const value = String((tags && tags[key]) || '').trim();
@@ -331,12 +406,12 @@ export function metaArgs(tags) {
 
 // One `-progress pipe:1` report line (`out_time_us=1234` / `out_time_ms=...`
 // is microseconds too on current ffmpeg) as seconds, or null.
-export function progressSeconds(line) {
+export function progressSeconds(line: string): number | null {
   const m = /^out_time_(?:us|ms)=(\d+)$/.exec(String(line || '').trim());
   return m ? Number(m[1]) / 1e6 : null;
 }
 
-export function percentOf(seconds, duration) {
+export function percentOf(seconds: number, duration: number): number | null {
   if (!duration) return null;
   return Math.max(0, Math.min(99, Math.round((seconds / duration) * 100)));
 }

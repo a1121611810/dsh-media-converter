@@ -71,15 +71,26 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 ## 开发
 
 ```bash
-npm test              # 构建 client.js + 五套自检
+npm test              # 类型检查 + 构建（宿主 dist/ 与浏览器 client.js）+ 六套自检
+npm run build         # 构建：宿主 tsc → dist/，浏览器 vite → client.js
+npm run build:host    # 只构建宿主半边（tsc → dist/）
 npm run build:client  # 只构建浏览器半边（vite → client.js + sourcemap）
+npm run typecheck     # 只做类型检查（vue-tsc，连 .vue 一起查）
 npm run check:build   # 改了源码却没重新构建时失败（CI 用）
 ```
 
-浏览器半边是**构建产物**：`src/client/` 是源码，`client.js` 提交进仓库（DSH 直接从包目录读它，链接安装不会触发构建）。改了 `src/client/` 之后必须 `npm run build:client`，否则 `check:build` 会红。
+源码是 TypeScript（strict）：宿主是 `index.ts` + `lib/*.ts`，浏览器是 `src/client/*.ts` + `.vue`（`<script setup lang="ts">`）。类型只进编译期，**运行时零新增依赖**——npm 包里只有编译好的 JS。测试保持 `test/*.test.mjs` 不转，但改成跑**编译产物**，测的正是发布形态的代码。
+
+两半都是**构建产物**：
+
+- 浏览器半边：`src/client/` 是源码，`client.js` 提交进仓库（DSH 直接从包目录读它，链接安装不会触发构建）。改了 `src/client/` 之后必须 `npm run build:client`，否则 `check:build` 会红。
+- 宿主半边：源码是 `index.ts` + `lib/*.ts`，`tsc` 编到 `dist/`，npm 包的入口是 `dist/index.js`。改完必须 `npm run build:host`，再**重启 DSH**。
+
+两半之间的 JSON 契约**没有单独一份文件**：类型就住在产出数据的那段代码旁边（`lib/plan.ts`、`index.ts`），能推导的就推导（`ReturnType<typeof parseMeta>`），只有被多状态改写的形状（Job 状态机）才手写一次。面板用 `import type` 引入——编译期完全擦除，浏览器包不会因此拖进 `node:fs`。
 
 ```bash
 node test/client-bundle.test.mjs  # 产物契约：loader 握手、React 注入、两个槽位
+node test/client-lib.test.mjs     # 面板纯函数：格式化、时间码、裁剪窗口
 node test/plan.test.mjs           # 格式表、参数、元数据解析、裁剪
 node test/base64.test.mjs         # 魔数嗅探、Base64 往返、文本回退
 node test/platform.test.mjs       # ffmpeg 查找顺序、文件管理器命令、文件名规则（含 Windows 分支）
@@ -99,17 +110,18 @@ npm run release -- 1.2.0
 ## 结构
 
 ```
-src/client/index.js       加载器握手 + React 8 行壳 + 侧边栏图标 + i18n 字典 + CSS
+src/client/index.ts       加载器握手 + React 8 行壳 + 侧边栏图标 + i18n 字典 + CSS
 src/client/App.vue        <media-panel>：状态机、动作面板、预览/对比、Base64、元数据
 src/client/vue/           CompareSlider、ResultBlock（普通 Vue 组件）
-src/client/lib.js         纯函数（格式化/时间码/裁剪窗口）+ fetch 封装，不碰 DOM
-vite.config.js            构建：IIFE + __ModuleLoader__ 握手 + React 走宿主模块表
+src/client/lib.ts         纯函数（格式化/时间码/裁剪窗口）+ fetch 封装，不碰 DOM
+vite.config.ts            构建：IIFE + __ModuleLoader__ 握手 + React 走宿主模块表
 client.js                 构建产物（提交进仓库，勿手改）
-index.js                  宿主：/api/media-convert/* 路由、ffmpeg 任务、预览与 Base64
-lib/plan.js               格式表、参数生成、元数据解析、裁剪
-lib/base64.js             Base64 嗅探与还原
-lib/platform.js           ffmpeg 查找、文件管理器、文件名规则（纯函数，跨平台分支可测）
-test/                     五套自检
+index.ts                  宿主：/api/media-convert/* 路由、ffmpeg 任务、预览与 Base64
+lib/plan.ts               格式表、参数生成、元数据解析、裁剪（也定义面板要用的媒体类型）
+lib/base64.ts             Base64 嗅探与还原
+lib/platform.ts           ffmpeg 查找、文件管理器、文件名规则（纯函数，跨平台分支可测）
+test/                     六套自检（.mjs，跑编译产物）
+dist/                     构建产物：宿主入口 dist/index.js（npm 包入口）+ dist/lib/、dist/src/
 ```
 
 React 只剩一个壳：把 `<media-panel>` 挂进槽位并传 `t`。面板本身是 Vue，`shadowRoot: false`（light DOM），样式由壳注入的 `<style>` 提供——Vue 的 `defineCustomElement` 在 light DOM 下不会注入 SFC 样式。
@@ -134,4 +146,4 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位并传 `t`。面板本�
 [dsh-media-converter] upload failed: aborted                                  # 连接中断
 ```
 
-宿主的这些行在 DSH 的日志里；改了 `index.js` 之后**必须重启 DSH**才会生效（运行中的宿主用的是启动时那份代码）。
+宿主的这些行在 DSH 的日志里；改了 `index.ts` 之后必须 `npm run build:host` 并**重启 DSH**才会生效（运行中的宿主用的是启动时那份代码）。

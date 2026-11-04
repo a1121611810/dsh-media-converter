@@ -13,7 +13,8 @@ fi
 [ "$(git branch --show-current)" = main ] || { echo "只在 main 上发版（当前 $(git branch --show-current)）" >&2; exit 1; }
 [ -z "$(git status --porcelain)" ] || { echo "工作区不干净，先提交或丢弃改动" >&2; exit 1; }
 
-# Builds client.js, then runs every suite, including the artifact contract.
+# Builds both halves (dist/ and client.js), then runs every suite, including the
+# artifact contract.
 npm test
 # The tree must already contain what the build produces; otherwise the tag
 # would point at a commit whose bundle differs from the published one.

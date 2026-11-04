@@ -1,6 +1,6 @@
 // Self-check for Base64 payload recognition: `node test/base64.test.mjs`.
 import assert from 'node:assert/strict';
-import { decodeBase64Payload, extForMime, looksLikeText, sniffMime } from '../lib/base64.js';
+import { decodeBase64Payload, extForMime, looksLikeText, sniffMime } from '../dist/lib/base64.js';
 
 const pngBytes = Buffer.concat([
   Buffer.from('89504e470d0a1a0a', 'hex'),

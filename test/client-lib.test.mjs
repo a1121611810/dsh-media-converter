@@ -1,7 +1,7 @@
 // The panel's pure helpers: formatting, timecodes, and the trim window.
 // Kept DOM-free so they can be checked without a browser.
 import assert from 'node:assert/strict';
-import { formatClock, formatDuration, formatSize, parseTimecode, trimWindow, unavailableTarget } from '../src/client/lib.js';
+import { formatClock, formatDuration, formatSize, parseTimecode, trimWindow, unavailableTarget } from '../dist/src/client/lib.js';
 
 assert.equal(formatSize(0), '');
 assert.equal(formatSize(512), '512 B');

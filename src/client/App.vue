@@ -1,40 +1,59 @@
-<script setup>
+<script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import type { PropType } from 'vue';
 import {
   PLATFORM, TAG_KEYS, downloadText, formatClock, formatDuration, formatSize,
   previewUrl, readJson, trimWindow, unavailableTarget,
 } from './lib.js';
+import type { ConvertRequest, DecodedPayload, ResultPayload } from './lib.js';
+import type { StreamMeta } from '../../lib/plan.js';
+import type {
+  Base64Response, ErrorResponse, Job, StatusResponse, UploadResponse,
+} from '../../index.js';
 import CompareSlider from './vue/CompareSlider.vue';
 import ResultBlock from './vue/ResultBlock.vue';
 
-const props = defineProps({ t: { type: Function, default: null } });
-const t = (key) => (props.t ? props.t(key) : key);
+const props = defineProps({
+  t: { type: Function as PropType<((key: string) => string) | null>, default: null },
+});
+const t = (key: string): string => (props.t ? props.t(key) : key);
 
-const status = ref(null);
-const rawFile = ref(null);
+// The panel's own states; the Host only ever sees numbers and strings.
+type Phase = 'idle' | 'uploading' | 'converting' | 'ready' | 'done';
+interface ActionItem {
+  id: string;
+  group: string;
+  label: string;
+  hint: string;
+  off?: boolean;
+  keys: string;
+}
+
+const status = ref<StatusResponse | null>(null);
+const rawFile = ref<File | null>(null);
 const blobUrl = ref('');
-const file = ref(null);
+const file = ref<UploadResponse | null>(null);
 const format = ref('');
 const outputName = ref('');
 const quality = ref(90);
-const phase = ref('idle');
-const percent = ref(null);
-const result = ref(null);
+const phase = ref<Phase>('idle');
+const percent = ref<number | null>(null);
+const result = ref<ResultPayload | null>(null);
 const error = ref('');
 const dragging = ref(false);
-const jobId = ref(null);
+const jobId = ref<string | null>(null);
 const jobAction = ref('');
 const trimStart = ref('');
 const trimEnd = ref('');
-const b64 = ref(null);
+const b64 = ref<Base64Response | null>(null);
 const cancelled = ref(false);
 const cancelling = ref(false);
-const metaTags = ref({});
+const metaTags = ref<Record<string, string>>({});
 const livePreview = ref('');
-const compareMode = ref('side');
+const compareMode = ref<'side' | 'slider'>('side');
 const b64Busy = ref(false);
 const decodeInput = ref('');
-const decoded = ref(null);
+const decoded = ref<DecodedPayload | null>(null);
 const decodeBusy = ref(false);
 const copied = ref(false);
 const query = ref('');
@@ -42,21 +61,24 @@ const action = ref('');
 const panelOpen = ref(false);
 const moreFormats = ref(false);
 
-const inputEl = ref(null);
-const mediaEl = ref(null);
-const searchEl = ref(null);
+const inputEl = ref<HTMLInputElement | null>(null);
+const mediaEl = ref<HTMLMediaElement | null>(null);
+const searchEl = ref<HTMLInputElement | null>(null);
 
-let closeTimer = 0;
-let uploadAbort = null;
-let pollTimer = 0;
-let stopAt = null;
+let closeTimer: ReturnType<typeof setTimeout> | 0 = 0;
+let uploadAbort: AbortController | null = null;
+let pollTimer: ReturnType<typeof setInterval> | 0 = 0;
+let stopAt: ((this: HTMLMediaElement, ev: Event) => void) | null = null;
 let objectUrl = '';
-let liveTimer = 0;
+let liveTimer: ReturnType<typeof setTimeout> | 0 = 0;
 let disposed = false;
 
 const busy = computed(() => phase.value === 'uploading' || phase.value === 'converting');
 const meta = computed(() => (file.value ? file.value.meta : null));
-const formats = computed(() => (status.value && file.value && status.value.formats[file.value.kind] ? status.value.formats[file.value.kind] : []));
+// The Host answers with the format table of the three convertible kinds; the
+// panel asks for the kind of the picked file, which may be none of them.
+const formatTable = computed<Record<string, string[]>>(() => (status.value ? status.value.formats as Record<string, string[]> : {}));
+const formats = computed(() => (formatTable.value[file.value ? file.value.kind : ''] || []));
 const trim = computed(() => trimWindow({ file: file.value, trimStart: trimStart.value, trimEnd: trimEnd.value, t }));
 const trimSummary = computed(() => (trim.value.error
   ? ''
@@ -73,12 +95,12 @@ const afterLabel = computed(() => (result.value && result.value.kind === 'image'
     ? t('compare.live') + ' · ' + (format.value ? format.value.toUpperCase() : '') + (usesQuality.value ? ' ' + quality.value : '')
     : t('compare.slot')));
 
-const joinParts = (parts) => parts.filter(Boolean).join(' · ');
-const typeLabel = (type) => t('meta.type.' + (['video', 'audio', 'subtitle', 'data', 'attachment'].includes(type) ? type : 'data'));
-const describeStream = (stream) => joinParts([
+const joinParts = (parts: (string | null | undefined)[]) => parts.filter(Boolean).join(' · ');
+const typeLabel = (type: string) => t('meta.type.' + (['video', 'audio', 'subtitle', 'data', 'attachment'].includes(type) ? type : 'data'));
+const describeStream = (stream: StreamMeta) => joinParts([
   stream.codec + (stream.profile ? ' ' + stream.profile : ''),
   stream.tag,
-  stream.width ? stream.width + '×' + stream.height : '',
+  stream.width ? stream.width + '×' + stream.height! : '',
   stream.pixFmt,
   stream.aspect ? 'SAR ' + stream.aspect : '',
   stream.displayAspect ? 'DAR ' + stream.displayAspect : '',
@@ -97,7 +119,7 @@ const containerRows = computed(() => (meta.value
       [t('meta.container'), meta.value.format || '—'],
       [t('meta.duration'), meta.value.duration ? formatClock(meta.value.duration) + ' · ' + meta.value.duration.toFixed(2) + 's' : '—'],
       [t('meta.bitrate'), meta.value.bitrate ? meta.value.bitrate + ' kb/s' : '—'],
-      [t('meta.size'), formatSize(file.value.size) || '—'],
+      [t('meta.size'), formatSize(file.value!.size) || '—'],
       [t('meta.start'), (meta.value.start || 0).toFixed(3) + ' s'],
     ]
   : []));
@@ -112,7 +134,7 @@ const tagRows = computed(() => (meta.value ? Object.entries(meta.value.tags) : [
 
 // Every action this file can offer, before the search filter.
 const actions = computed(() => {
-  const list = [];
+  const list: ActionItem[] = [];
   const searching = query.value.trim().length > 0;
   const showAll = moreFormats.value || searching;
   const popular = formats.value.slice(0, 4);
@@ -144,11 +166,11 @@ const groups = computed(() => [
   ['edit', t('group.edit'), '✂'],
   ['view', t('group.view'), '☰'],
 ]);
-const itemsOf = (key) => visible.value.filter((item) => item.group === key);
+const itemsOf = (key: string) => visible.value.filter((item) => item.group === key);
 
-async function fetchStatus() {
+async function fetchStatus(): Promise<StatusResponse | null> {
   try {
-    const data = await readJson(await fetch('/api/media-convert/status'));
+    const data = await readJson<StatusResponse | ErrorResponse>(await fetch('/api/media-convert/status'));
     if (!data.ok) return null;
     status.value = data;
     if (error.value === t('error.network')) error.value = '';
@@ -176,7 +198,7 @@ function resetResult() {
   phase.value = 'ready';
 }
 
-async function pick(picked) {
+async function pick(picked: File | null) {
   if (!picked) return;
   error.value = '';
   result.value = null;
@@ -195,7 +217,7 @@ async function pick(picked) {
   const controller = new AbortController();
   uploadAbort = controller;
   try {
-    const data = await readJson(await fetch('/api/media-convert/upload?name=' + encodeURIComponent(picked.name), {
+    const data = await readJson<UploadResponse | ErrorResponse>(await fetch('/api/media-convert/upload?name=' + encodeURIComponent(picked.name), {
       method: 'POST',
       body: picked,
       signal: controller.signal,
@@ -207,10 +229,10 @@ async function pick(picked) {
     // A Host that was still starting at mount left the format list empty; the
     // first successful pick fills it in.
     const active = status.value || (await fetchStatus());
-    if (active && active.formats[data.kind]) format.value = active.formats[data.kind][0];
+    if (active && formatTable.value[data.kind]) format.value = formatTable.value[data.kind][0];
     phase.value = 'ready';
   } catch (err) {
-    if (!controller.signal.aborted) error.value = String((err && err.message) || err);
+    if (!controller.signal.aborted) error.value = String((err && (err as Error).message) || err);
     rawFile.value = null;
     phase.value = 'idle';
   } finally {
@@ -222,7 +244,7 @@ function cancelUpload() {
   if (uploadAbort) uploadAbort.abort();
 }
 
-async function runJob(body, forAction) {
+async function runJob(body: Partial<ConvertRequest>, forAction: string) {
   error.value = '';
   result.value = null;
   percent.value = null;
@@ -231,15 +253,15 @@ async function runJob(body, forAction) {
   jobAction.value = forAction;
   phase.value = 'converting';
   try {
-    const data = await readJson(await fetch('/api/media-convert/convert', {
+    const data = await readJson<{ ok: true; job: Job } | ErrorResponse>(await fetch('/api/media-convert/convert', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: file.value.id, name: outputName.value.trim() || undefined, ...body }),
+      body: JSON.stringify({ id: file.value!.id, name: outputName.value.trim() || undefined, ...body }),
     }));
     if (!data.ok) throw new Error(data.error || t('error.title'));
     jobId.value = data.job.id;
   } catch (err) {
-    error.value = String((err && err.message) || err);
+    error.value = String((err && (err as Error).message) || err);
     phase.value = 'ready';
   }
 }
@@ -248,7 +270,7 @@ async function cancelJob() {
   if (!jobId.value) return;
   cancelling.value = true;
   try {
-    await readJson(await fetch('/api/media-convert/cancel', {
+    await readJson<{ ok: true } | ErrorResponse>(await fetch('/api/media-convert/cancel', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id: jobId.value }),
@@ -268,28 +290,28 @@ function applyTrim() {
   const window = trim.value;
   if (window.error) { error.value = window.error; return; }
   if (!window.active) { error.value = t('trim.full'); return; }
-  runJob({ format: format.value, quality: file.value.kind === 'image' ? quality.value : undefined, trim: { start: window.start, end: window.end } }, 'trim');
+  runJob({ format: format.value, quality: file.value!.kind === 'image' ? quality.value : undefined, trim: { start: window.start, end: window.end } }, 'trim');
 }
 
-function extract(which) {
+function extract(which: 'audio' | 'video') {
   if (!file.value) return;
   runJob({ mode: which === 'audio' ? 'extract-audio' : 'extract-video' }, 'extract-' + which);
 }
 
-async function reveal(target) {
+async function reveal(target: string) {
   try {
-    const data = await readJson(await fetch('/api/media-convert/reveal', {
+    const data = await readJson<{ ok: true } | ErrorResponse>(await fetch('/api/media-convert/reveal', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ file: target }),
     }));
     if (!data.ok) error.value = data.error || t('error.title');
   } catch (err) {
-    error.value = String((err && err.message) || err);
+    error.value = String((err && (err as Error).message) || err);
   }
 }
 
-function setTrimFromPlayer(which) {
+function setTrimFromPlayer(which: 'start' | 'end') {
   const el = mediaEl.value;
   if (!el) return;
   const value = String(Math.round((el.currentTime || 0) * 10) / 10);
@@ -324,7 +346,7 @@ async function toBase64() {
   b64Busy.value = true;
   error.value = '';
   try {
-    const data = await readJson(await fetch('/api/media-convert/base64', {
+    const data = await readJson<Base64Response | ErrorResponse>(await fetch('/api/media-convert/base64', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ id: file.value.id }),
@@ -332,7 +354,7 @@ async function toBase64() {
     if (!data.ok) throw new Error(data.error || t('error.title'));
     b64.value = data;
   } catch (err) {
-    error.value = String((err && err.message) || err);
+    error.value = String((err && (err as Error).message) || err);
   } finally {
     b64Busy.value = false;
   }
@@ -343,7 +365,7 @@ async function decode() {
   error.value = '';
   decoded.value = null;
   try {
-    const data = await readJson(await fetch('/api/media-convert/decode', {
+    const data = await readJson<DecodedPayload | ErrorResponse>(await fetch('/api/media-convert/decode', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text: decodeInput.value }),
@@ -351,13 +373,13 @@ async function decode() {
     if (!data.ok) throw new Error(data.error || t('error.title'));
     decoded.value = data;
   } catch (err) {
-    error.value = String((err && err.message) || err);
+    error.value = String((err && (err as Error).message) || err);
   } finally {
     decodeBusy.value = false;
   }
 }
 
-async function copy(text) {
+async function copy(text: string) {
   try {
     await navigator.clipboard.writeText(text);
     copied.value = true;
@@ -367,23 +389,24 @@ async function copy(text) {
   }
 }
 
-function onDrop(event) {
+function onDrop(event: DragEvent) {
   dragging.value = false;
   if (busy.value) return;
   const dropped = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
   if (dropped) pick(dropped);
 }
 
-function onPick(event) {
-  pick(event.target.files && event.target.files[0]);
-  event.target.value = '';
+function onPick(event: Event) {
+  const el = event.target as HTMLInputElement;
+  pick(el.files && el.files[0]);
+  el.value = '';
 }
 
 function openPicker() {
   if (inputEl.value) inputEl.value.click();
 }
 
-function onDropZoneKey(event) {
+function onDropZoneKey(event: KeyboardEvent) {
   if (event.key === 'Enter' || event.key === ' ') {
     event.preventDefault();
     openPicker();
@@ -416,7 +439,7 @@ function closePanel() {
   closeTimer = setTimeout(() => { action.value = ''; }, 200);
 }
 
-function openPanel(id) {
+function openPanel(id: string) {
   clearTimeout(closeTimer);
   if (action.value) {
     // Switching panels keeps the box open; only the contents swap.
@@ -429,7 +452,7 @@ function openPanel(id) {
   requestAnimationFrame(() => requestAnimationFrame(() => { panelOpen.value = true; }));
 }
 
-function toggleAction(id) {
+function toggleAction(id: string) {
   if (id === 'more') { moreFormats.value = true; return; }
   if (id === 'less') { moreFormats.value = false; return; }
   if (id.startsWith('fmt:')) format.value = id.slice(4);
@@ -437,16 +460,16 @@ function toggleAction(id) {
   else openPanel(id);
 }
 
-function onSearchKey(event) {
+function onSearchKey(event: KeyboardEvent) {
   if (event.key === 'Enter') {
     const first = visible.value.find((item) => !item.off);
     if (first) toggleAction(first.id);
   } else if (event.key === 'Escape') {
-    event.currentTarget.blur();
+    (event.currentTarget as HTMLInputElement).blur();
   }
 }
 
-function onWindowKey(event) {
+function onWindowKey(event: KeyboardEvent) {
   if ((event.metaKey || event.ctrlKey) && String(event.key).toLowerCase() === 'k') {
     event.preventDefault();
     if (searchEl.value) searchEl.value.focus();
@@ -501,7 +524,7 @@ watch([blobUrl, file, format, quality], () => {
         const canvas = document.createElement('canvas');
         canvas.width = Math.max(1, Math.round(width * scale));
         canvas.height = Math.max(1, Math.round(height * scale));
-        canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+        canvas.getContext('2d')!.drawImage(image, 0, 0, canvas.width, canvas.height);
         // GIF has no canvas encoder; a still frame is what the eye compares anyway.
         const mime = format.value === 'jpg' ? 'image/jpeg' : format.value === 'webp' ? 'image/webp' : 'image/png';
         livePreview.value = canvas.toDataURL(mime, Math.min(1, Math.max(0.05, quality.value / 100)));
@@ -520,11 +543,11 @@ watch([phase, jobId], () => {
   if (phase.value !== 'converting' || !jobId.value) return;
   pollTimer = setInterval(async () => {
     try {
-      const data = await readJson(await fetch('/api/media-convert/job?id=' + encodeURIComponent(jobId.value)));
+      const data = await readJson<Job & { ok: true } | ErrorResponse>(await fetch('/api/media-convert/job?id=' + encodeURIComponent(jobId.value!)));
       if (!data.ok) return;
       if (data.percent !== null) percent.value = data.percent;
       if (data.state === 'done') {
-        const done = { file: data.out, size: data.size, kind: data.kind };
+        const done: ResultPayload = { file: data.out, size: data.size, kind: data.kind };
         if (data.kind === 'text') {
           try {
             done.text = await (await fetch(previewUrl(data.out))).text();
@@ -723,7 +746,7 @@ watch([action, panelOpen], async () => {
 
                   <!-- subtitle tracks -->
                   <template v-else-if="item.id === 'subs'">
-                    <div v-for="(track, index) in meta.subtitles" :key="index" class="mc-row">
+                    <div v-for="(track, index) in meta!.subtitles" :key="index" class="mc-row">
                       <span>#{{ track.index }} · {{ track.language || '?' }} · {{ track.codec }}<template v-if="track.title"> · {{ track.title }}</template></span>
                       <button class="mc-btn mc-btn-ghost" style="margin-left: auto" :disabled="busy" @click="runJob({ mode: 'subtitle', stream: index }, 'subs')">{{ t('sub.extract') }}</button>
                     </div>

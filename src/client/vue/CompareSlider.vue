@@ -1,4 +1,4 @@
-<script setup>
+<script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue';
 
 const props = defineProps({
@@ -10,22 +10,22 @@ const props = defineProps({
 
 const position = ref(50);
 const dragging = ref(false);
-const frame = ref(null);
+const frame = ref<HTMLDivElement | null>(null);
 
-function moveTo(clientX) {
+function moveTo(clientX: number) {
   const rect = frame.value && frame.value.getBoundingClientRect();
   if (!rect || !rect.width) return;
   position.value = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
 }
 
-function onDown(event) {
+function onDown(event: PointerEvent) {
   event.preventDefault();
   dragging.value = true;
   moveTo(event.clientX);
 }
 
 // The pointer leaves the frame while dragging, so these listen on the window.
-function onMove(event) {
+function onMove(event: PointerEvent) {
   if (dragging.value) moveTo(event.clientX);
 }
 
@@ -33,7 +33,7 @@ function onUp() {
   dragging.value = false;
 }
 
-function onKey(event) {
+function onKey(event: KeyboardEvent) {
   if (event.key === 'ArrowLeft') position.value = Math.max(0, position.value - 2);
   if (event.key === 'ArrowRight') position.value = Math.min(100, position.value + 2);
 }

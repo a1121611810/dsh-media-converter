@@ -4,12 +4,17 @@
 
 import { MIME_BY_EXT } from './plan.js';
 
-function ascii(bytes, offset, length) {
+// What a decoded payload turned out to be: a file to write, or plain text.
+export type DecodedPayload =
+  | { kind: 'file'; bytes: Buffer; mime: string; ext: string }
+  | { kind: 'text'; text: string };
+
+function ascii(bytes: Buffer, offset: number, length: number): string {
   if (bytes.length < offset + length) return '';
   return bytes.toString('latin1', offset, offset + length);
 }
 
-const SIGNATURES = [
+const SIGNATURES: { mime: string; ext: string; match: (b: Buffer) => boolean }[] = [
   { mime: 'image/png', ext: 'png', match: (b) => b[0] === 0x89 && ascii(b, 1, 3) === 'PNG' },
   { mime: 'image/jpeg', ext: 'jpg', match: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
   { mime: 'image/gif', ext: 'gif', match: (b) => ascii(b, 0, 3) === 'GIF' },
@@ -23,20 +28,20 @@ const SIGNATURES = [
   { mime: 'audio/mpeg', ext: 'mp3', match: (b) => ascii(b, 0, 3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) },
 ];
 
-export function sniffMime(bytes) {
+export function sniffMime(bytes: Buffer): { mime: string; ext: string } | null {
   if (!bytes || bytes.length < 4) return null;
   const hit = SIGNATURES.find((signature) => signature.match(bytes));
   return hit ? { mime: hit.mime, ext: hit.ext } : null;
 }
 
-export function extForMime(mime) {
+export function extForMime(mime: string): string {
   const wanted = String(mime || '').toLowerCase().split(';')[0].trim();
   const hit = Object.keys(MIME_BY_EXT).find((ext) => MIME_BY_EXT[ext].split(';')[0] === wanted);
   return hit || 'bin';
 }
 
 // Valid UTF-8 with no control bytes: show it as text instead of writing a file.
-export function looksLikeText(bytes) {
+export function looksLikeText(bytes: Buffer): boolean {
   if (!bytes || !bytes.length || bytes.includes(0)) return false;
   const text = bytes.toString('utf8');
   if (!Buffer.from(text, 'utf8').equals(bytes)) return false;
@@ -44,7 +49,7 @@ export function looksLikeText(bytes) {
 }
 
 // data URL or raw Base64 -> { kind: 'file', bytes, mime, ext } | { kind: 'text', text }
-export function decodeBase64Payload(input) {
+export function decodeBase64Payload(input: string | undefined): DecodedPayload {
   const raw = String(input || '').trim();
   if (!raw) throw new Error('还没有粘贴内容');
 

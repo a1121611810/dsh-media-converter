@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // The panel imports the Host's response types (type-only), and the Host
+    // entry needs the Node types — so they stay on here.
+    "types": ["node"]
+  },
+  "include": ["src/client/**/*.ts", "src/client/**/*.vue", "vite.config.ts"]
+}

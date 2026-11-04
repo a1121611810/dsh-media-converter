@@ -6,7 +6,7 @@
 import { defineCustomElement } from 'vue';
 import App from '../App.vue';
 
-const define = (name, component) => {
+const define = (name: string, component: typeof App) => {
   // Guarded: the artifact is also loaded in Node by test/client-bundle.
   if (typeof customElements === 'undefined' || customElements.get(name)) return;
   customElements.define(name, defineCustomElement(component, { shadowRoot: false }));

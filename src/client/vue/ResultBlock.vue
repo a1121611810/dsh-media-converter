@@ -1,17 +1,20 @@
-<script setup>
+<script setup lang="ts">
 import { computed } from 'vue';
+import type { PropType } from 'vue';
 import { PLATFORM, formatSize, previewUrl } from '../lib.js';
+import type { ResultPayload } from '../lib.js';
+import type { UploadResponse } from '../../../index.js';
 
 const props = defineProps({
   actionId: { type: String, required: true },
   jobAction: { type: String, default: '' },
-  result: { type: Object, default: null },
-  percent: { type: Number, default: null },
+  result: { type: Object as PropType<ResultPayload | null>, default: null },
+  percent: { type: Number as PropType<number | null>, default: null },
   converting: { type: Boolean, default: false },
   cancelling: { type: Boolean, default: false },
   cancelled: { type: Boolean, default: false },
-  file: { type: Object, default: null },
-  t: { type: Function, required: true },
+  file: { type: Object as PropType<UploadResponse | null>, default: null },
+  t: { type: Function as PropType<(key: string) => string>, required: true },
 });
 
 defineEmits(['cancel', 'reveal', 'again']);

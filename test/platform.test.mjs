@@ -8,7 +8,7 @@ import {
   imageioPatterns,
   revealCommand,
   safeBaseName,
-} from '../lib/platform.js';
+} from '../dist/lib/platform.js';
 
 // --- ffmpeg discovery ------------------------------------------------------
 assert.deepEqual(binaryNames('win32'), ['ffmpeg.exe']);
