@@ -88,6 +88,14 @@ node test/host.test.mjs           # 真 ffmpeg 端到端：27 种格式矩阵 + 
 
 `test/host.test.mjs` 需要本机有 ffmpeg；没有会**失败**（不是跳过——静默跳过等于假绿）。
 
+### 发版
+
+```bash
+npm run release -- 1.2.0
+```
+
+一条命令做完全部步骤：校验在 main、工作区干净、跑 `npm test`、确认产物不是旧的、bump 版本、打 tag、push。**tag 推上去之后由 CI 发布**——本地 `npm publish` 会被 `prepublishOnly` 拒绝，所以不存在"手动发一半"的状态。CI 发布前会重跑全部测试并比对 tag 与 `package.json` 的版本。
+
 ## 结构
 
 ```
