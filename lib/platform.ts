@@ -102,6 +102,14 @@ export function revealCommand(file: string, platform = process.platform): { comm
   return { command: 'xdg-open', args: [pathFor(platform).dirname(file)] };
 }
 
+// Whether a file really sits inside a directory. A plain string-prefix check
+// is defeated by a '..' segment, so both sides are resolved first.
+export function isInsideDir(dir: string, file: string, platform = process.platform): boolean {
+  const p = pathFor(platform);
+  const rel = p.relative(p.resolve(dir), p.resolve(file));
+  return rel !== '' && !rel.startsWith('..') && !p.isAbsolute(rel);
+}
+
 // A file name every file system accepts: no separators, no control characters,
 // and none of the names Windows reserves for devices.
 export function safeBaseName(raw: string, platform = process.platform): string {

@@ -8,11 +8,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
-import { apply, inject } from '../dist/index.js';
+import { apply, inject, resolveGroups } from '../dist/index.js';
 import { parseDuration } from '../dist/lib/plan.js';
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-out-'));
 const routes = new Map();
+const tools = new Map();
+const settingsCalls = [];
 const webServer = {
   getOrigin: () => 'http://127.0.0.1:65533',
   register: (route) => {
@@ -24,6 +26,21 @@ const cleanups = [];
 apply(
   {
     get: (key) => (key === 'webServer' ? webServer : undefined),
+    tools: {
+      register: (definition) => {
+        tools.set(definition.name, definition);
+        return () => tools.delete(definition.name);
+      },
+    },
+    settings: {
+      configure: (presentation) => {
+        settingsCalls.push(['configure', presentation]);
+        return () => {};
+      },
+      update: async (ns, patch) => {
+        settingsCalls.push(['update', ns, patch]);
+      },
+    },
     effect: (fn) => cleanups.push(fn()),
   },
   { outputDir: outDir },
@@ -94,10 +111,23 @@ async function waitJob(job) {
 
 // Without this the plugin can apply before the web server exists, take its
 // early return, and register no routes at all.
-assert.deepEqual(inject, ['webServer'], 'the web server is a declared dependency');
+assert.deepEqual(
+  inject,
+  ['webServer', 'tools', 'settings'],
+  'the web server, the tool registry, and settings are declared dependencies',
+);
+assert.ok(
+  settingsCalls.some((call) => call[0] === 'configure' && call[1].auto === true),
+  'the instance opts into the generated config form',
+);
 
 const status = await call('status');
 assert.equal(status.data.ok, true);
+assert.equal(status.data.maxUploadMb, 2048, 'the default upload cap is reported');
+assert.equal(status.data.composerButton, true, 'the composer button defaults on');
+assert.equal(typeof status.data.version, 'string', 'the plugin version is reported');
+assert.ok(status.data.version.length > 0, 'a version is present');
+assert.deepEqual(status.data.groups, ['convert', 'edit', 'view'], 'the built-in group order is reported');
 assert.deepEqual(status.data.formats.image, ['png', 'jpg', 'webp', 'gif', 'bmp', 'tiff', 'avif']);
 if (!status.data.ffmpegPath) {
   // A silent skip is a green run that tested nothing; CI installs ffmpeg, so
@@ -135,6 +165,12 @@ assert.ok(preview.body.length > 0);
 
 const previewOutside = await fetchBinary('preview?file=' + encodeURIComponent('/etc/hosts'));
 assert.equal(previewOutside.status, 403);
+
+// A '..' segment inside the name used to walk out of the output directory.
+const previewEscape = await fetchBinary(
+  'preview?file=' + encodeURIComponent(path.join(outDir, '..', '..', 'etc', 'hosts')),
+);
+assert.equal(previewEscape.status, 403, 'a traversal out of the output directory is refused');
 
 const bad = await call('convert', { method: 'POST', body: JSON.stringify({ id: upload.data.id, format: 'mp4' }) });
 assert.equal(bad.data.ok, false); // image sources have no mp4 target
@@ -425,6 +461,132 @@ assert.match(truncated.data.error, /上传不完整/);
 const garbage = await call('upload?name=clip.xyz', { method: 'POST', body: Buffer.from('not a media file') });
 assert.equal(garbage.data.ok, false, JSON.stringify(garbage.data));
 assert.match(garbage.data.error, /无法识别/);
+
+// --- the agent tool ---------------------------------------------------------
+const media = tools.get('media_toolbox');
+assert.ok(media, 'the agent tool is registered');
+const exec = { signal: new AbortController().signal };
+
+const probed = await media.execute({ path: clip, action: 'probe' }, exec);
+assert.equal(probed.kind, 'video');
+assert.ok(Math.abs(probed.duration - 2) < 0.3, `probed duration ${probed.duration}`);
+assert.equal(probed.meta.streams.length, 2, 'the probe lists both streams');
+
+const convertedByTool = await media.execute({ path: clip, action: 'convert', format: 'mp3' }, exec);
+assert.ok(fs.existsSync(convertedByTool.file), 'the tool wrote its output');
+assert.equal(path.extname(convertedByTool.file), '.mp3');
+assert.ok(convertedByTool.sizeBytes > 0);
+
+const trimmedByTool = await media.execute(
+  { path: clip, action: 'convert', format: 'mp4', trim: { start: 0.5, end: 1.5 } },
+  exec,
+);
+const toolTrimDuration = parseDuration(
+  spawnSync(ffmpeg, ['-hide_banner', '-i', trimmedByTool.file], { encoding: 'utf8' }).stderr,
+);
+assert.ok(Math.abs(toolTrimDuration - 1) < 0.25, `trimmed duration ${toolTrimDuration}`);
+
+await assert.rejects(
+  () => media.execute({ path: path.join(outDir, 'nope.mp4'), action: 'probe' }, exec),
+  /文件不存在/,
+  'a missing file is reported, not silently ignored',
+);
+await assert.rejects(
+  () => media.execute({ path: clip, action: 'convert', format: 'exe' }, exec),
+  /不支持的输出格式/,
+  'an impossible target is refused',
+);
+
+// A call that is aborted while it runs stops the ffmpeg and leaves no output.
+const aborted = new AbortController();
+aborted.abort();
+await assert.rejects(() => media.execute({ path: clip, action: 'convert', format: 'mp4' }, { signal: aborted.signal }));
+
+// --- the upload cap ---------------------------------------------------------
+// A body over the cap is refused instead of filling the disk.
+const capRoutes = new Map();
+const capOut = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-cap-'));
+const capCleanups = [];
+apply(
+  {
+    get: () => ({
+      getOrigin: () => 'http://127.0.0.1:65533',
+      register: (route) => {
+        capRoutes.set(route.path, route.handler);
+        return () => capRoutes.delete(route.path);
+      },
+    }),
+    tools: { register: () => () => {} },
+    settings: { configure: () => () => {}, update: async () => {} },
+    effect: (fn) => capCleanups.push(fn()),
+  },
+  { outputDir: capOut, maxUploadMb: 0.001 },
+);
+const capRes = makeRes();
+await capRoutes.get('/api/media-convert/upload')(
+  fakeReq({ method: 'POST', url: '/api/media-convert/upload?name=big.mp4', body: Buffer.alloc(4096, 7) }),
+  capRes,
+);
+await capRes.done;
+const capData = JSON.parse(Buffer.concat(capRes.chunks).toString('utf8'));
+assert.equal(capData.ok, false, JSON.stringify(capData));
+assert.match(capData.error, /超过上限/);
+capCleanups.forEach((dispose) => dispose());
+fs.rmSync(capOut, { recursive: true, force: true });
+
+// --- the settings route -----------------------------------------------------
+// Saving merges the defined keys into the entry's config through the settings
+// service; the loader hot-replaces the plugin with the new values.
+const before = settingsCalls.length;
+const saved = await call('config', {
+  method: 'POST',
+  body: JSON.stringify({ outputDir: '~/Movies/converted', maxUploadMb: 100 }),
+});
+assert.equal(saved.data.ok, true, JSON.stringify(saved.data));
+const updateCall = settingsCalls.find((call) => call[0] === 'update');
+assert.ok(updateCall, 'the settings service received the update');
+assert.equal(updateCall[1], 'media-converter');
+assert.deepEqual(updateCall[2], { outputDir: '~/Movies/converted', maxUploadMb: 100 });
+assert.ok(settingsCalls.length > before);
+
+const badSave = await call('config', { method: 'POST', body: JSON.stringify({ maxUploadMb: 0 }) });
+assert.equal(badSave.data.ok, false, 'an impossible cap is refused');
+assert.match(badSave.data.error, /maxUploadMb/);
+
+const emptySave = await call('config', { method: 'POST', body: JSON.stringify({}) });
+assert.equal(emptySave.data.ok, false, 'an empty patch is reported');
+
+// The new settings ride the same route; the service records them like any
+// other merge.
+await call('config', { method: 'POST', body: JSON.stringify({ composerButton: false, groups: 'view,convert' }) });
+const uiUpdate = settingsCalls.filter((call) => call[0] === 'update').at(-1);
+assert.deepEqual(uiUpdate[2], { composerButton: false, groups: 'view,convert' });
+
+// The save applies to the running instance: the very next status read serves
+// the new values, with no restart and no reload.
+const after = await call('status');
+assert.equal(after.data.composerButton, false, 'the toggle applies to the running instance');
+assert.deepEqual(after.data.groups, ['view', 'convert', 'edit'], 'the group order applies live');
+
+// A later save stacks on the earlier ones instead of restarting from the
+// load-time values.
+await call('config', { method: 'POST', body: JSON.stringify({ maxUploadMb: 100 }) });
+const stacked = await call('status');
+assert.equal(stacked.data.maxUploadMb, 100, 'a later save applies too');
+assert.equal(stacked.data.composerButton, false, 'an earlier save is not clobbered by the merge');
+
+// --- group order resolution -------------------------------------------------
+assert.deepEqual(
+  resolveGroups('view,convert'),
+  ['view', 'convert', 'edit'],
+  'the configured order wins, missing keys follow',
+);
+assert.deepEqual(
+  resolveGroups('bogus,edit,edit'),
+  ['edit', 'convert', 'view'],
+  'unknown tokens and duplicates are dropped',
+);
+assert.deepEqual(resolveGroups(''), ['convert', 'edit', 'view'], 'an empty config keeps the built-in order');
 
 cleanups.forEach((dispose) => dispose());
 fs.rmSync(outDir, { recursive: true, force: true });

@@ -19,6 +19,22 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 
 界面是一个「动作面板」：选文件 → 搜索或点动作 → 参数就地展开 → 结果就地显示。支持 `⌘K` 聚焦搜索、回车执行第一个动作、Esc 收起。
 
+## 给 Agent 用的工具
+
+同一个引擎也注册成工具 `media_toolbox`，助手可以直接调用：
+
+| action | 作用 |
+| --- | --- |
+| `probe` | 读时长、分辨率、编码、音轨、字幕轨、标签 |
+| `convert` | 转格式（可带 `trim` 裁剪、`quality` 图片质量） |
+| `extract-audio` / `extract-video` | 抽音轨 / 抽画面，不重编码 |
+| `subtitle` | 导出内嵌字幕为 `.srt` |
+| `rewrite-tags` | 改写标题/作者/专辑/备注/日期/流派 |
+
+工具吃的是**本机绝对路径**，不走上传：产物写在同一个输出目录，返回新文件路径。调用被取消或超时（30 分钟）时，ffmpeg 会被终止，半成品会被清掉。
+
+输入框工具排（「+」按钮那一排）有一个「媒体工具箱」按钮：点一下把示例指令 `把 xx.mov 裁 0:10 到 1:00 转成 mp4` 插进输入框，改成你的文件和区间后发送即可。
+
 ## 大文件
 
 - **不整文件进内存**：上传边收边落盘；Base64 结果边编码边发回；预览走 HTTP Range，拖进度条不会整段下载。
@@ -56,7 +72,9 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 
 ## 配置
 
-在 profile 的 `cordis.patch.yml` 里覆盖插件行：
+设置弹窗侧边栏的「媒体工具箱」页可直接编辑配置：保存经宿主的 settings 服务校验并写入 profile（`cordis.patch.yml` 里会出现对应的 `config` 块），同时**立即应用到运行中的插件**——宿主加载器不会热重载，是插件在保存后自行应用合并，所以无需重启；直接手改 `cordis.patch.yml` 才需要重启。留空的字段保持默认（输出目录默认 `~/Downloads/media-toolbox`，ffmpeg 自动查找，上传上限 2048 MB）。
+
+同一个配置也驱动「内置插件」页里本插件行的官方配置表单（来自插件导出的 Schemastery schema，字段标记 `volatile()` 才可编辑）：
 
 ```yaml
 - id: media-converter
@@ -64,9 +82,17 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
   config:
     outputDir: ~/Movies/converted
     ffmpegPath: /opt/homebrew/bin/ffmpeg
+    maxUploadMb: 2048
 ```
 
-默认输出到 `~/Downloads/media-toolbox`；上传的临时文件放 `$TMPDIR/dsh-media-toolbox`，插件卸载时清理。
+- `outputDir`：`~` 会展开成主目录，路径会被解析成绝对路径。
+- `ffmpegPath`：找不到 ffmpeg 时手动指定。
+- `maxUploadMb`：单次上传上限（默认 2048 MB），超了直接拒绝，不写盘。
+- `composerButton`：是否在输入框工具排显示「媒体工具箱」按钮（默认开）。
+- `groups`：动作面板的模块顺序与显隐（`convert,edit,view`，写进字符串的才显示）。
+- 设置页右上角还有版本号显示与「刷新界面」（等同 Ctrl+R）。
+
+插件导出 `Config` schema 供宿主的 settings 服务投影表单（这是唯一的运行时依赖 `@deepseek-ai/schemastery`，由 npm 正常安装）。
 
 ## 开发
 
@@ -95,8 +121,8 @@ node test/client-bundle.test.mjs  # 产物契约：loader 握手、React 注入�
 node test/client-lib.test.mjs     # 面板纯函数：格式化、时间码、裁剪窗口
 node test/plan.test.mjs           # 格式表、参数、元数据解析、裁剪
 node test/base64.test.mjs         # 魔数嗅探、Base64 往返、文本回退
-node test/platform.test.mjs       # ffmpeg 查找顺序、文件管理器命令、文件名规则（含 Windows 分支）
-node test/host.test.mjs           # 真 ffmpeg 端到端：27 种格式矩阵 + 字幕 + 标签改写 + 取消 + 失败路径
+node test/platform.test.mjs       # ffmpeg 查找顺序、文件管理器命令、文件名规则、目录归属判定（含 Windows 分支）
+node test/host.test.mjs           # 真 ffmpeg 端到端：27 种格式矩阵 + 字幕 + 标签改写 + 取消 + 失败路径 + Agent 工具 + 上传上限
 ```
 
 `test/host.test.mjs` 需要本机有 ffmpeg；没有会**失败**（不是跳过——静默跳过等于假绿）。
@@ -133,7 +159,7 @@ src/client/vue/           CompareSlider、ResultBlock（普通 Vue 组件）
 src/client/lib.ts         纯函数（格式化/时间码/裁剪窗口）+ fetch 封装，不碰 DOM
 vite.config.ts            构建：IIFE + __ModuleLoader__ 握手 + React 走宿主模块表
 client.js                 构建产物（提交进仓库，勿手改）
-index.ts                  宿主：/api/media-convert/* 路由、ffmpeg 任务、预览与 Base64
+index.ts                  宿主：/api/media-convert/* 路由、ffmpeg 任务、预览与 Base64、Agent 工具 media_toolbox
 lib/plan.ts               格式表、参数生成、元数据解析、裁剪（也定义面板要用的媒体类型）
 lib/base64.ts             Base64 嗅探与还原
 lib/platform.ts           ffmpeg 查找、文件管理器、文件名规则（纯函数，跨平台分支可测）
@@ -146,6 +172,7 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位并传 `t`。面板本�
 ## 限制
 
 - Base64 单文件上限 24 MB。
+- 上传单文件上限 2048 MB（`maxUploadMb` 可调）。
 - 裁剪区间必须落在文件时长内；区间无效时按钮不可用。
 - 视频转 GIF 会缩到宽 640、12 fps。
 - 上传的临时副本保留 2 小时后自动删除。

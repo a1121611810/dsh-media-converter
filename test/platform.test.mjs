@@ -6,6 +6,7 @@ import {
   expandDirs,
   ffmpegCandidates,
   imageioPatterns,
+  isInsideDir,
   revealCommand,
   safeBaseName,
 } from '../dist/lib/platform.js';
@@ -69,6 +70,18 @@ assert.deepEqual(
 assert.deepEqual(revealCommand('/tmp/a.mp4', 'darwin'), { command: 'open', args: ['-R', '/tmp/a.mp4'] });
 assert.deepEqual(revealCommand('C:\\out\\a.mp4', 'win32'), { command: 'explorer', args: ['/select,C:\\out\\a.mp4'] });
 assert.deepEqual(revealCommand('/tmp/out/a.mp4', 'linux'), { command: 'xdg-open', args: ['/tmp/out'] });
+
+// --- staying inside a directory --------------------------------------------
+// A prefix check alone is defeated by a '..' segment.
+assert.equal(isInsideDir('/out/box', '/out/box/a.mp4'), true);
+assert.equal(isInsideDir('/out/box', '/out/box/sub/a.mp4'), true);
+assert.equal(isInsideDir('/out/box', '/out/box/../secret.txt'), false);
+assert.equal(isInsideDir('/out/box', '/out/box/../../etc/hosts'), false);
+assert.equal(isInsideDir('/out/box', '/etc/hosts'), false);
+assert.equal(isInsideDir('/out/box', '/out/box-2/a.mp4'), false, 'a sibling with the same prefix is outside');
+assert.equal(isInsideDir('/out/box', '/out/box'), false, 'the directory itself is not a file in it');
+assert.equal(isInsideDir('C:\\out', 'C:\\out\\a.mp4', 'win32'), true);
+assert.equal(isInsideDir('C:\\out', 'C:\\out\\..\\secret.txt', 'win32'), false);
 
 // --- output names ----------------------------------------------------------
 assert.equal(safeBaseName('evil name.png', 'darwin'), 'evil name');

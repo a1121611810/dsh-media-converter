@@ -8,6 +8,7 @@
 // React only parks the <media-panel> custom element in the slot; the panel
 // itself is Vue (src/client/App.vue).
 import './vue/elements.js';
+import type { StatusResponse } from '../../index.js';
 
 // React is handed in by the loader, so the bundle carries no React of its
 // own: only the three hooks this file touches are declared here.
@@ -18,6 +19,7 @@ interface ReactSurface {
   createElement(type: unknown, props?: Record<string, unknown> | null, ...children: unknown[]): unknown;
   useRef<T>(initial: T): ReactRef<T>;
   useEffect(effect: () => void | (() => void), deps?: unknown[]): void;
+  useState<T>(initial: T): [T, (value: T | ((current: T) => T)) => void];
 }
 // The <media-panel> custom element carries the translator on the element.
 interface PanelElement extends HTMLElement {
@@ -188,6 +190,31 @@ const ZH: Record<string, string> = {
   'b64.decode': '还原',
   'b64.decoding': '还原中…',
   'b64.textResult': '还原为文本',
+  'composer.label': '媒体工具箱',
+  'composer.title': '把一条媒体处理指令插入输入框，改完发送即可',
+  'settings.label': '媒体工具箱',
+  'settings.title': '工具箱配置',
+  'settings.current': '当前生效',
+  'settings.field.outputDir': '输出目录',
+  'settings.field.outputDir.hint': '留空则保持当前值',
+  'settings.field.ffmpeg': 'ffmpeg 路径',
+  'settings.field.ffmpeg.hint': '留空则自动查找',
+  'settings.field.maxUpload': '上传上限（MB）',
+  'settings.save': '保存',
+  'settings.saving': '保存中…',
+  'settings.saved': '已保存并立即生效',
+  'settings.error': '保存失败，请重试',
+  'settings.hint':
+    '保存写入 profile 配置并立即对本插件生效（无需重启）；直接手动编辑 cordis.patch.yml 则需要重启。同样的配置也驱动「内置插件」页里本插件的官方配置表单。',
+  'settings.version': '版本',
+  'settings.refresh': '刷新界面',
+  'settings.refresh.title': '重新加载整个界面，等同于按 Ctrl+R（未保存的修改会丢失）',
+  'settings.composerButton': '在输入框工具排显示「媒体工具箱」按钮',
+  'settings.groups': '动作面板模块',
+  'settings.groups.show': '显示',
+  'settings.groups.up': '上移',
+  'settings.groups.down': '下移',
+  'settings.groups.hint': '勾选控制显示，箭头调整顺序；隐藏的模块在面板中不显示。',
 };
 const EN: Record<string, string> = {
   'nav.label': 'Media Tools',
@@ -323,6 +350,31 @@ const EN: Record<string, string> = {
   'b64.decode': 'Restore',
   'b64.decoding': 'Restoring…',
   'b64.textResult': 'Restored as text',
+  'composer.label': 'Media Toolbox',
+  'composer.title': 'Insert a media-processing prompt into the input; edit and send',
+  'settings.label': 'Media Toolbox',
+  'settings.title': 'Toolbox configuration',
+  'settings.current': 'Currently in effect',
+  'settings.field.outputDir': 'Output directory',
+  'settings.field.outputDir.hint': 'Leave empty to keep the current one',
+  'settings.field.ffmpeg': 'ffmpeg path',
+  'settings.field.ffmpeg.hint': 'Empty finds it automatically',
+  'settings.field.maxUpload': 'Upload limit (MB)',
+  'settings.save': 'Save',
+  'settings.saving': 'Saving…',
+  'settings.saved': 'Saved and applied immediately',
+  'settings.error': 'Save failed, try again',
+  'settings.hint':
+    'Saving writes the profile config and applies to this plugin at once (no restart); editing cordis.patch.yml by hand does need one. It also drives this plugin’s generated form on the Built-in Plugins page.',
+  'settings.version': 'Version',
+  'settings.refresh': 'Refresh page',
+  'settings.refresh.title': 'Reload the whole app, the same as pressing Ctrl+R (unsaved edits are lost)',
+  'settings.composerButton': 'Show the Media Toolbox button in the composer tool row',
+  'settings.groups': 'Action panel modules',
+  'settings.groups.show': 'Show',
+  'settings.groups.up': 'Up',
+  'settings.groups.down': 'Down',
+  'settings.groups.hint': 'Tick to show, arrows to order; hidden modules do not appear in the panel.',
 };
 
 function PanelIcon({ size }: { size?: number }) {
@@ -343,6 +395,297 @@ function PanelIcon({ size }: { size?: number }) {
     h('path', { d: 'm14 4.5 3.5 3.5L14 11.5' }),
     h('path', { d: 'M20 16H7' }),
     h('path', { d: 'm10 12.5L6.5 16l3.5 3.5' }),
+  );
+}
+
+// The composer slot entries receive its own edit face: undoable text
+// insertion, not DOM poking.
+interface InputActions {
+  captureInsertion(): { start: number; end: number };
+  insertText(text: string, span: { start: number; end: number }): boolean;
+}
+
+// Dropped into the draft on click; the user edits the placeholders (file,
+// range, format) and sends. Chinese works for the model either way.
+const COMPOSER_TEMPLATE = '把 xx.mov 裁 0:10 到 1:00 转成 mp4';
+
+// One status read shared by every mount of the composer button, so disabling
+// the button in settings actually removes it from the tool row.
+let buttonStatusPromise: Promise<StatusResponse | null> | null = null;
+const buttonConfig = () => {
+  if (!buttonStatusPromise) {
+    buttonStatusPromise = fetch('/api/media-convert/status')
+      .then((resp) => resp.json())
+      .then((data) => data as StatusResponse)
+      .catch(() => null);
+  }
+  return buttonStatusPromise;
+};
+
+const COMPOSER_CSS = `
+.mc-composer-btn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 0.5px solid var(--dsw-alias-border-l4, var(--dsw-alias-border-l2)); border-radius: var(--dsw-radius-sm, 6px); background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; cursor: pointer; transition: background-color .2s, color .2s; }
+.mc-composer-btn:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.mc-settings { padding: 4px 2px; display: flex; flex-direction: column; gap: 14px; font-size: 13px; color: var(--dsw-alias-label-primary, inherit); max-width: 560px; }
+.mc-settings-title { margin: 0; font-size: 15px; font-weight: 600; }
+.mc-settings-list { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
+.mc-settings-list dt { color: var(--dsw-alias-label-secondary, inherit); }
+.mc-settings-list dd { margin: 0; word-break: break-all; }
+.mc-settings-form { display: flex; flex-direction: column; gap: 12px; }
+.mc-settings-field { display: flex; flex-direction: column; gap: 4px; }
+.mc-settings-field > span { color: var(--dsw-alias-label-secondary, inherit); }
+.mc-settings-field > small { color: var(--dsw-alias-label-tertiary, inherit); font-size: 12px; }
+.mc-settings-input { box-sizing: border-box; width: 100%; max-width: 420px; padding: 6px 10px; border: 0.5px solid var(--dsw-alias-border-l4, var(--dsw-alias-border-l2)); border-radius: 6px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font: inherit; }
+.mc-settings-input:focus { outline: none; border-color: var(--dsw-static-deepseek-500, #4d6bfe); }
+.mc-settings-save { align-self: flex-start; padding: 6px 16px; border: 0; border-radius: 6px; background: var(--dsw-static-deepseek-500, #4d6bfe); color: #fff; font: inherit; font-size: 12px; cursor: pointer; }
+.mc-settings-save:disabled { opacity: 0.6; cursor: default; }
+.mc-settings-note { margin: 0; font-size: 12px; }
+.mc-settings-note.ok { color: var(--dsw-alias-state-success-fg, #2ba471); }
+.mc-settings-note.err { color: var(--dsw-alias-state-danger-fg, #d54941); }
+.mc-settings-hint { margin: 0; color: var(--dsw-alias-label-secondary, inherit); line-height: 1.6; }
+.mc-settings-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.mc-settings-refresh { padding: 5px 12px; border: 0.5px solid var(--dsw-alias-border-l4, var(--dsw-alias-border-l2)); border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; cursor: pointer; transition: background-color .2s, color .2s; }
+.mc-settings-refresh:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.mc-settings-grouprow { display: flex; align-items: center; gap: 8px; }
+.mc-settings-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.mc-settings-rowtail { margin-left: auto; display: inline-flex; gap: 6px; }
+.mc-settings-mini { width: 24px; height: 24px; border: 0.5px solid var(--dsw-alias-border-l4, var(--dsw-alias-border-l2)); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; }
+.mc-settings-mini:disabled { opacity: 0.4; cursor: default; }
+`;
+
+// Editable form backed by the settings service: the POST merges into the
+// profile document (validated against the exported Config schema) and the
+// host applies it to its running state, so a save is effective at once —
+// the desktop loader alone would not re-apply the plugin.
+const GROUP_KEYS = ['convert', 'edit', 'view'];
+
+function SettingsPage({ t }: { t: (key: string) => string }) {
+  const [status, setStatus] = React.useState<StatusResponse | null>(null);
+  const [form, setForm] = React.useState({
+    outputDir: '',
+    ffmpegPath: '',
+    maxUploadMb: '2048',
+    composerButton: true,
+  });
+  const [rows, setRows] = React.useState<{ key: string; on: boolean }[]>([]);
+  const [phase, setPhase] = React.useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const readyRef = React.useRef(false);
+
+  const load = () => {
+    fetch('/api/media-convert/status')
+      .then((resp) => resp.json())
+      .then((data) => {
+        const next = data as StatusResponse;
+        setStatus(next);
+        // Initialize the editable state once per page open; later refreshes
+        // only update the "currently in effect" display.
+        if (!readyRef.current) {
+          readyRef.current = true;
+          setForm({
+            outputDir: '',
+            ffmpegPath: '',
+            maxUploadMb: String(next.maxUploadMb),
+            composerButton: next.composerButton !== false,
+          });
+          setRows(
+            [...next.groups, ...GROUP_KEYS.filter((key) => !next.groups.includes(key))].map((key) => ({
+              key,
+              on: next.groups.includes(key),
+            })),
+          );
+        }
+      })
+      .catch(() => {});
+  };
+  React.useEffect(load, []);
+
+  const save = () => {
+    setPhase('saving');
+    fetch('/api/media-convert/config', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        outputDir: form.outputDir,
+        ffmpegPath: form.ffmpegPath,
+        maxUploadMb: Number(form.maxUploadMb),
+        composerButton: form.composerButton,
+        groups: rows
+          .filter((row) => row.on)
+          .map((row) => row.key)
+          .join(','),
+      }),
+    })
+      .then((resp) => resp.json())
+      .then((data) => {
+        if (!data.ok) throw new Error(data.error || 'save failed');
+        setPhase('saved');
+        // The host applies the save to its running state, so re-reading shows
+        // the now-effective values in the "currently in effect" block.
+        setTimeout(() => {
+          load();
+          setPhase('idle');
+        }, 700);
+      })
+      .catch(() => setPhase('error'));
+  };
+
+  if (!status) {
+    return h('div', { className: 'mc-settings' }, h('p', { className: 'mc-settings-hint' }, t('error.network')));
+  }
+  const set = (key: 'outputDir' | 'ffmpegPath' | 'maxUploadMb') => (event: { target: { value: string } }) =>
+    setForm((current) => ({ ...current, [key]: event.target.value }));
+  const field = (label: string, hint: string, key: 'outputDir' | 'ffmpegPath' | 'maxUploadMb', placeholder: string) =>
+    h(
+      'label',
+      { className: 'mc-settings-field' },
+      h('span', null, label),
+      h('input', { className: 'mc-settings-input', value: form[key], placeholder, onInput: set(key) }),
+      h('small', null, hint),
+    );
+  const move = (index: number, delta: number) =>
+    setRows((current) => {
+      const next = [...current];
+      const target = index + delta;
+      if (target < 0 || target >= next.length) return current;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  const toggle = (index: number) =>
+    setRows((current) => current.map((row, i) => (i === index ? { ...row, on: !row.on } : row)));
+  return h(
+    'div',
+    { className: 'mc-settings' },
+    h(
+      'div',
+      { className: 'mc-settings-head' },
+      h(
+        'h3',
+        { className: 'mc-settings-title' },
+        t('settings.title') + (status.version ? ` · v${status.version}` : ''),
+      ),
+      h(
+        'button',
+        {
+          type: 'button',
+          className: 'mc-settings-refresh',
+          title: t('settings.refresh.title'),
+          onClick: () => location.reload(),
+        },
+        t('settings.refresh'),
+      ),
+    ),
+    h(
+      'dl',
+      { className: 'mc-settings-list' },
+      h('dt', null, `${t('settings.field.outputDir')}（${t('settings.current')}）`),
+      h('dd', null, status.outputDir),
+      h('dt', null, `${t('settings.field.ffmpeg')}（${t('settings.current')}）`),
+      h('dd', null, status.ffmpegPath || '—'),
+      h('dt', null, `${t('settings.field.maxUpload')}（${t('settings.current')}）`),
+      h('dd', null, String(status.maxUploadMb)),
+    ),
+    h(
+      'div',
+      { className: 'mc-settings-form' },
+      field(t('settings.field.outputDir'), t('settings.field.outputDir.hint'), 'outputDir', status.outputDir),
+      field(t('settings.field.ffmpeg'), t('settings.field.ffmpeg.hint'), 'ffmpegPath', status.ffmpegPath || ''),
+      field(t('settings.field.maxUpload'), '', 'maxUploadMb', String(status.maxUploadMb)),
+      h(
+        'label',
+        { className: 'mc-settings-check' },
+        h('input', {
+          type: 'checkbox',
+          checked: form.composerButton,
+          onChange: (event: { target: { checked: boolean } }) =>
+            setForm((current) => ({ ...current, composerButton: event.target.checked })),
+        }),
+        t('settings.composerButton'),
+      ),
+    ),
+    h(
+      'div',
+      { className: 'mc-settings-field' },
+      h('span', null, t('settings.groups')),
+      rows.map((row, index) =>
+        h(
+          'div',
+          { className: 'mc-settings-grouprow', key: row.key },
+          h(
+            'label',
+            { className: 'mc-settings-check' },
+            h('input', { type: 'checkbox', checked: row.on, onChange: () => toggle(index) }),
+            t(`group.${row.key}`),
+          ),
+          h(
+            'span',
+            { className: 'mc-settings-rowtail' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'mc-settings-mini',
+                disabled: index === 0,
+                title: t('settings.groups.up'),
+                onClick: () => move(index, -1),
+              },
+              '↑',
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'mc-settings-mini',
+                disabled: index === rows.length - 1,
+                title: t('settings.groups.down'),
+                onClick: () => move(index, 1),
+              },
+              '↓',
+            ),
+          ),
+        ),
+      ),
+      h('small', null, t('settings.groups.hint')),
+    ),
+    h(
+      'button',
+      {
+        type: 'button',
+        className: 'mc-settings-save',
+        disabled: phase === 'saving',
+        onClick: save,
+      },
+      t(phase === 'saving' ? 'settings.saving' : 'settings.save'),
+    ),
+    phase === 'saved' ? h('p', { className: 'mc-settings-note ok' }, t('settings.saved')) : null,
+    phase === 'error' ? h('p', { className: 'mc-settings-note err' }, t('settings.error')) : null,
+    h('p', { className: 'mc-settings-hint' }, t('settings.hint')),
+  );
+}
+
+function ComposerButton({ inputActions, t }: { inputActions?: InputActions; t: (key: string) => string }) {
+  const [enabled, setEnabled] = React.useState<boolean | null>(null);
+  React.useEffect(() => {
+    let disposed = false;
+    buttonConfig().then((status) => {
+      // A failed read defaults to showing the button: availability first.
+      if (!disposed) setEnabled(status ? status.composerButton !== false : true);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, []);
+  const onClick = () => {
+    if (!inputActions || typeof inputActions.insertText !== 'function') return;
+    const applied = inputActions.insertText(COMPOSER_TEMPLATE, inputActions.captureInsertion());
+    if (!applied) return;
+    const composer = document.querySelector('[data-composer-input]');
+    if (composer instanceof HTMLElement) composer.focus({ preventScroll: true });
+  };
+  if (enabled !== true) return null;
+  return h(
+    'button',
+    { type: 'button', className: 'mc-composer-btn', title: t('composer.title'), onClick },
+    h(PanelIcon, { size: 14 }),
+    t('composer.label'),
   );
 }
 
@@ -508,6 +851,32 @@ const plugin = {
       ),
     );
     ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, () => h(Shell, { t })));
+
+    // A compact button in the composer tool row (the "+" button's row): one
+    // click puts the media instruction into the draft.
+    ctx.effect(() => {
+      // The loader also evaluates the bundle in a document-less sandbox (the
+      // contract test); there is nothing to style there.
+      if (typeof document === 'undefined') return () => {};
+      const style = document.createElement('style');
+      style.textContent = COMPOSER_CSS;
+      document.head.appendChild(style);
+      return () => style.remove();
+    });
+    ctx.slots.inject('conversation.input.left', () =>
+      ctx.slots.register(
+        { name: 'conversation.input.left', id: PANEL_ID + '-composer', order: 30, label: () => t('composer.label') },
+        function ComposerEntry(props: { inputActions?: InputActions }) {
+          return h(ComposerButton, { inputActions: props.inputActions, t });
+        },
+      ),
+    );
+    ctx.slots.inject('settings.section', () =>
+      ctx.slots.register(
+        { name: 'settings.section', id: PANEL_ID + '-settings', order: 50, label: () => t('settings.label') },
+        () => h(SettingsPage, { t }),
+      ),
+    );
   },
 };
 

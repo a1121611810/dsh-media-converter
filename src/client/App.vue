@@ -246,11 +246,21 @@ const visible = computed(() => {
   const needle = query.value.trim().toLowerCase();
   return needle ? actions.value.filter((a) => (a.label + ' ' + a.keys).toLowerCase().includes(needle)) : actions.value;
 });
-const groups = computed(() => [
-  ['convert', t('group.convert'), '⇄'],
-  ['edit', t('group.edit'), '✂'],
-  ['view', t('group.view'), '☰'],
-]);
+// The configured order wins (settings page: show/hide/reorder); a group the
+// config omits is hidden, and the built-in order is the fallback before the
+// first status read.
+const GROUP_DEFS: [string, string, string][] = [
+  ['convert', 'group.convert', '⇄'],
+  ['edit', 'group.edit', '✂'],
+  ['view', 'group.view', '☰'],
+];
+const groups = computed(() => {
+  const order = status.value?.groups ?? GROUP_DEFS.map(([key]) => key);
+  return order
+    .map((key) => GROUP_DEFS.find(([defKey]) => defKey === key))
+    .filter((def): def is [string, string, string] => Boolean(def))
+    .map(([key, labelKey, icon]) => [key, t(labelKey), icon]);
+});
 const itemsOf = (key: string) => visible.value.filter((item) => item.group === key);
 
 async function fetchStatus(): Promise<StatusResponse | null> {

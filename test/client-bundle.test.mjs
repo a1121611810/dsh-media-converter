@@ -47,6 +47,10 @@ const ctx = {
   locale: { bind: () => (key) => key, register: () => () => {} },
 };
 plugin.apply(ctx);
-assert.deepEqual(registered.sort(), ['main', 'sidebar.panellist'], 'both slots are registered');
+assert.deepEqual(
+  registered.sort(),
+  ['conversation.input.left', 'main', 'settings.section', 'sidebar.panellist'],
+  'the sidebar entry, the main panel, the composer button, and the settings page are registered',
+);
 
 console.log('client-bundle.test.mjs: ok');

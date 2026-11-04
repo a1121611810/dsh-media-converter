@@ -20,10 +20,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import Schema from '@deepseek-ai/schemastery';
 import { decodeBase64Payload } from './lib/base64.js';
 import {
   FORMATS,
   buildArgs,
+  defaultFormat,
   extOf,
   extractPlan,
   formatsFor,
@@ -42,11 +44,18 @@ import {
   trimArgs,
 } from './lib/plan.js';
 import type { ConvertPlan, MediaKind, MediaMeta, StreamInfo, TrimWindow } from './lib/plan.js';
-import { expandDirs, ffmpegCandidates, imageioPatterns, revealCommand, safeBaseName } from './lib/platform.js';
+import {
+  expandDirs,
+  ffmpegCandidates,
+  imageioPatterns,
+  isInsideDir,
+  revealCommand,
+  safeBaseName,
+} from './lib/platform.js';
 
-// The Cordis context of this plugin: only the webServer service is used. The
-// plugin ships no Cordis type package, so the part of the surface the code
-// touches is declared here.
+// The Cordis context of this plugin: only the webServer service and the tool
+// registry are used. The plugin ships no Cordis type package, so the part of
+// the surface the code touches is declared here.
 interface WebServerRoute {
   kind: 'exact';
   path: string;
@@ -58,7 +67,69 @@ interface WebServer {
 }
 interface HostContext {
   get(key: 'webServer'): WebServer | undefined;
+  tools: Tools;
+  settings: SettingsForms;
   effect(fn: () => void | (() => void)): void;
+}
+
+// The settings service the host projects from the exported Config schema:
+// configure() opts this instance into the generated form, update() persists
+// a merge into the profile document and hot-replaces this plugin.
+interface SettingsForms {
+  configure(presentation: { auto?: boolean }): () => void;
+  update(ns: string, patch: Record<string, unknown>, expectedRevision?: number): Promise<void>;
+}
+
+// The plugin's tunables. volatile() marks a field runtime-editable: the
+// settings service projects only volatile fields into forms, and update()
+// refuses anything else. Empty strings mean "the built-in default" (see
+// apply's resolution); `groups` is a comma-separated order of the panel's
+// action groups — a string, not an array, because update() merge semantics
+// for arrays are undocumented.
+export interface Config {
+  outputDir: string;
+  ffmpegPath: string;
+  maxUploadMb: number;
+  composerButton: boolean;
+  groups: string;
+}
+
+export const Config = Schema.object({
+  outputDir: Schema.string().default('').volatile(),
+  ffmpegPath: Schema.string().default('').volatile(),
+  maxUploadMb: Schema.number().default(2048).volatile(),
+  composerButton: Schema.boolean().default(true).volatile(),
+  groups: Schema.string().default('convert,edit,view').volatile(),
+});
+
+// The action panel's module keys, in their built-in order. A configured
+// `groups` string reorders them and omits hidden ones; unknown tokens and
+// duplicates are dropped, missing keys keep their built-in place at the end.
+const GROUP_KEYS = ['convert', 'edit', 'view'];
+export function resolveGroups(raw: unknown): string[] {
+  const tokens = String(raw ?? '')
+    .split(',')
+    .map((token) => token.trim())
+    .filter((token) => GROUP_KEYS.includes(token));
+  const ordered = [...new Set(tokens)];
+  return [...ordered, ...GROUP_KEYS.filter((key) => !ordered.includes(key))];
+}
+
+// The tool registry the agent calls into. Only the parts this plugin uses
+// are declared: a definition, its schema, and the text it renders.
+interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  output: {
+    schema: Record<string, unknown>;
+    render(args: unknown, value: unknown): { type: string; text: string }[];
+  };
+  timeoutMs?: number;
+  execute(args: unknown, exec: { signal: AbortSignal }): Promise<unknown>;
+}
+interface Tools {
+  register(definition: ToolDefinition): () => void;
 }
 
 // The job as the page sees it while it polls for progress.
@@ -72,6 +143,8 @@ export interface Job {
   error: string | null;
   kind: MediaKind;
   trim: TrimWindow | null;
+  // When the job started, so finished ones can be dropped from the map.
+  at: number;
 }
 export interface ErrorResponse {
   ok: false;
@@ -102,14 +175,30 @@ interface JsonBody {
   tags?: Record<string, string>;
   text?: string;
   file?: string;
+  outputDir?: unknown;
+  ffmpegPath?: unknown;
+  maxUploadMb?: unknown;
+  composerButton?: unknown;
+  groups?: unknown;
 }
 
 // The answers of the routes, each built by a small function so the exported
 // type is derived from what is actually sent.
-const statusPayload = (ffmpegPath: string | null, outputDir: string) => ({
+const statusPayload = (
+  ffmpegPath: string | null,
+  outputDir: string,
+  maxUploadMb: number,
+  version: string,
+  composerButton: boolean,
+  groups: string[],
+) => ({
   ok: true as const,
   ffmpegPath,
   outputDir,
+  maxUploadMb,
+  version,
+  composerButton,
+  groups,
   formats: FORMATS,
 });
 export type StatusResponse = ReturnType<typeof statusPayload>;
@@ -149,6 +238,10 @@ const MAX_BASE64_BYTES = 24 * 1024 * 1024;
 // Uploaded copies live in a temp directory. Big videos are big, so anything
 // older than this is dropped instead of filling the disk over a long session.
 const UPLOAD_TTL_MS = 2 * 60 * 60 * 1000;
+// A finished job only has to outlive the poll that reads it.
+const JOB_TTL_MS = 30 * 60 * 1000;
+// An upload bigger than this is refused instead of filling the disk.
+const MAX_UPLOAD_MB = 2048;
 
 function isExecutable(candidate: string): boolean {
   try {
@@ -157,6 +250,19 @@ function isExecutable(candidate: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+// The version the host serves to the settings page, read from the shipped
+// package.json next to dist/.
+function pluginVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version?: string;
+    };
+    return String(pkg.version || '');
+  } catch {
+    return '';
   }
 }
 
@@ -241,17 +347,54 @@ function base64Encoder(): Transform {
   });
 }
 
-// The web server is the whole point of this plugin, so declare it as a hard
-// dependency: Cordis then runs apply only once the service is ready. Reading it
-// once with ctx.get let apply run before the server existed, take the early
-// return below, and silently register no routes at all.
-export const inject = ['webServer'];
+// The web server is the panel's home and the tool registry serves the agent;
+// settings makes the exported Config schema editable in the UI. All three are
+// hard dependencies: Cordis runs apply only once every service is ready, so a
+// half-registered plugin is impossible.
+export const inject = ['webServer', 'tools', 'settings'];
 
-export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPath?: string }): void {
-  const cfg = config || {};
-  const outDir = cfg.outputDir || path.join(os.homedir(), 'Downloads', 'media-toolbox');
+export function apply(ctx: HostContext, config?: Partial<Config>): void {
+  // The loaded config, updated by the config route after each save so the
+  // live merge accumulates across saves instead of restarting from the
+  // load-time values.
+  let cfg: Partial<Config> = config || {};
+  // Volatile fields arrive wrapped (cosmokit Volatile, read via .get()); the
+  // host test feeds plain values, so unwrap by shape rather than type.
+  const unwrap = (value: unknown): unknown =>
+    value && typeof value === 'object' && typeof (value as { get?: unknown }).get === 'function'
+      ? (value as { get: () => unknown }).get()
+      : value;
+  // The desktop loader does not re-apply a plugin when its config changes
+  // (verified live: the document updates, the running instance keeps the
+  // values it loaded with). These bindings are therefore `let`, and the
+  // config route re-resolves them after a save, so a change takes effect
+  // without a restart. The saved document stays the source of truth across
+  // restarts. Every consumer reads the bindings at request time, so nothing
+  // captures a stale copy.
+  let outDir = '';
+  let ffmpeg: string | null = null;
+  let maxUploadBytes = MAX_UPLOAD_MB * 1048576;
+  let uploadLimit = `${MAX_UPLOAD_MB} MB`;
+  let composerButton = true;
+  let groups: string[] = [...GROUP_KEYS];
+  const resolveConfig = (raw: Partial<Config>) => {
+    // A configured '~/Movies/x' means the home directory, not a folder literally
+    // named '~' under the working directory.
+    const cfgOutputDir = unwrap(raw.outputDir);
+    const configured = cfgOutputDir ? String(cfgOutputDir).replace(/^~(?=$|[/\\])/, os.homedir()) : '';
+    outDir = path.resolve(configured || path.join(os.homedir(), 'Downloads', 'media-toolbox'));
+    const cfgFfmpeg = unwrap(raw.ffmpegPath);
+    ffmpeg = findFfmpeg(cfgFfmpeg ? String(cfgFfmpeg) : undefined);
+    // An upload bigger than this is refused instead of filling the disk.
+    const cfgMaxMb = unwrap(raw.maxUploadMb);
+    maxUploadBytes = Math.max(1, Math.round((cfgMaxMb === undefined ? MAX_UPLOAD_MB : Number(cfgMaxMb)) * 1048576));
+    uploadLimit = maxUploadBytes >= 1048576 ? `${Math.round(maxUploadBytes / 1048576)} MB` : `${maxUploadBytes} B`;
+    composerButton = unwrap(raw.composerButton) !== false;
+    groups = resolveGroups(unwrap(raw.groups));
+  };
+  resolveConfig(cfg);
   const tmpDir = path.join(os.tmpdir(), 'dsh-media-toolbox');
-  const ffmpeg = findFfmpeg(cfg.ffmpegPath);
+  const version = pluginVersion();
 
   const uploads = new Map<string, Upload>();
   const jobs = new Map<string, Job>();
@@ -290,8 +433,10 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
     }
   };
 
-  const insideOutput = (file: unknown): file is string =>
-    typeof file === 'string' && file.startsWith(outDir + path.sep);
+  // The preview and the reveal may only reach into the output directory. The
+  // check resolves both sides first: a plain prefix check is defeated by a
+  // '..' segment inside the file name.
+  const insideOutput = (file: unknown): file is string => typeof file === 'string' && isInsideDir(outDir, file);
 
   const uniqueOutput = async (name: string, extension: string, suffix = ''): Promise<string> => {
     const stem = safeBaseName(name) + suffix;
@@ -303,7 +448,12 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
     return taken ? path.join(outDir, `${stem}-${Date.now().toString(36)}.${extension}`) : candidate;
   };
 
-  const startJob = async (upload: Upload, plan: ConvertPlan, trim: TrimWindow | null, name: string): Promise<Job> => {
+  const startJob = async (
+    upload: Upload,
+    plan: ConvertPlan,
+    trim: TrimWindow | null,
+    name: string,
+  ): Promise<{ job: Job; done: Promise<void> }> => {
     await fsp.mkdir(outDir, { recursive: true });
     const out = await uniqueOutput(name || upload.name, plan.ext, plan.stemSuffix || '');
     const job: Job = {
@@ -315,9 +465,16 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
       error: null,
       kind: plan.kind,
       trim,
+      at: Date.now(),
     };
     jobs.set(job.id, job);
     const span = trim ? trim.end - trim.start : upload.duration;
+    // Resolves when the job reaches its final state, so a caller that has to
+    // wait (the agent tool) does not have to poll.
+    let settle!: () => void;
+    const done = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
 
     const args = [
       '-y',
@@ -365,30 +522,35 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
       job.error = String((err && err.message) || err);
     });
     child.on('close', async (code) => {
-      children.delete(child);
-      const entry = controllers.get(job.id);
-      if (entry && entry.killTimer) clearTimeout(entry.killTimer);
-      controllers.delete(job.id);
-      if (job.state === 'cancelling') {
-        // ffmpeg can have written half an output before the kill landed.
-        await fsp.rm(out, { force: true }).catch(() => {});
-        job.state = 'cancelled';
-        return;
-      }
-      if (job.state !== 'running') return;
       try {
-        if (code !== 0) throw new Error(`ffmpeg 退出码 ${code}`);
-        job.size = (await fsp.stat(out)).size;
-        job.state = 'done';
-        job.percent = 100;
-      } catch (err) {
-        // ffmpeg can create the output before failing; never report that as done.
-        await fsp.rm(out, { force: true }).catch(() => {});
-        job.state = 'error';
-        job.error = tail.trim().split('\n').slice(-3).join(' ') || errorText(err);
+        children.delete(child);
+        const entry = controllers.get(job.id);
+        if (entry && entry.killTimer) clearTimeout(entry.killTimer);
+        controllers.delete(job.id);
+        if (job.state === 'cancelling') {
+          // ffmpeg can have written half an output before the kill landed.
+          await fsp.rm(out, { force: true }).catch(() => {});
+          job.state = 'cancelled';
+          return;
+        }
+        if (job.state !== 'running') return;
+        try {
+          if (code !== 0) throw new Error(`ffmpeg 退出码 ${code}`);
+          job.size = (await fsp.stat(out)).size;
+          job.state = 'done';
+          job.percent = 100;
+        } catch (err) {
+          // ffmpeg can create the output before failing; never report that as done.
+          await fsp.rm(out, { force: true }).catch(() => {});
+          job.state = 'error';
+          job.error = tail.trim().split('\n').slice(-3).join(' ') || errorText(err);
+        }
+      } finally {
+        // The job has its final state now: whoever waits for it can go on.
+        settle();
       }
     });
-    return job;
+    return { job, done };
   };
 
   const planFor = (upload: Upload, body: JsonBody): ConvertPlan => {
@@ -403,6 +565,67 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
       throw new Error(`不支持的输出格式: ${format}`);
     }
     return { ext: format, kind: kindByExt(format), args: buildArgs(upload.kind, format, body.quality) };
+  };
+
+  // Opt this instance into the generated config form (its bundle row in the
+  // Plugins settings section gains a configure page driven by the Config
+  // schema above); edits persist through the profile document and
+  // hot-replace this plugin, so they take effect without a restart.
+  ctx.effect(() => ctx.settings.configure({ auto: true }));
+
+  // The agent half: the same engine, reachable from a conversation. The tool
+  // works on a local path, so it never copies the file into the temp folder.
+  const runMediaTool = async (args: unknown, exec: { signal: AbortSignal }): Promise<unknown> => {
+    if (!ffmpeg) throw new Error(noFfmpeg.error);
+    const a = (args || {}) as Record<string, unknown>;
+    const file = String(a.path || '');
+    if (!file) throw new Error('缺少 path：需要本机文件的绝对路径');
+    const stat = await fsp.stat(file).catch(() => null);
+    if (!stat || !stat.isFile()) throw new Error(`文件不存在或不是普通文件：${file}`);
+    const stderr = await probe(ffmpeg, file);
+    const name = path.basename(file);
+    const kind = kindOf(name, stderr);
+    if (!kind) throw new Error(`无法识别的媒体文件：${file}`);
+    // The tool's own view of the file. It is deliberately not put in `uploads`:
+    // that map is wiped on unload, and this path is the user's own file.
+    const upload: Upload = {
+      id: 'tool',
+      name,
+      path: file,
+      kind,
+      duration: parseDuration(stderr),
+      size: stat.size,
+      streams: parseStreams(stderr),
+      at: Date.now(),
+    };
+    const action = String(a.action || 'convert');
+    if (action === 'probe') {
+      return { file, kind, duration: upload.duration, sizeBytes: stat.size, meta: parseMeta(stderr) };
+    }
+    const body: JsonBody = {
+      mode: action === 'rewrite-tags' ? 'meta' : action,
+      format: String(a.format || defaultFormat(kind)),
+      quality: Number(a.quality || 90),
+      stream: Number(a.stream || 0),
+      tags: (a.tags || {}) as Record<string, string>,
+      trim: a.trim as { start?: unknown; end?: unknown } | undefined,
+    };
+    const { job, done } = await startJob(upload, planFor(upload, body), normalizeTrim(body.trim, upload.duration), '');
+    // The agent can walk away or the call can time out: either way the ffmpeg
+    // process dies and the half-written output is removed.
+    const abort = () => {
+      const entry = controllers.get(job.id);
+      if (entry && job.state === 'running') {
+        job.state = 'cancelling';
+        entry.controller.abort();
+      }
+    };
+    if (exec.signal.aborted) abort();
+    else exec.signal.addEventListener('abort', abort, { once: true });
+    await done;
+    if (job.state === 'error') throw new Error(job.error || '处理失败');
+    if (job.state !== 'done') throw new Error(`任务没有完成（${job.state}）`);
+    return { file: job.out, kind: job.kind, duration: upload.duration, sizeBytes: job.size };
   };
 
   // Byte range support keeps the preview player's scrub bar working.
@@ -444,6 +667,103 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
     fs.createReadStream(file).pipe(res);
   };
 
+  // The tool the agent calls. One tool with an action, not one tool per
+  // action: the engine behind it is the same plan the panel builds.
+  ctx.effect(() =>
+    ctx.tools.register({
+      name: 'media_toolbox',
+      description:
+        '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
+        '③extract-audio 抽音轨、④extract-video 抽画面（不重编码）；⑤subtitle 导出内嵌字幕为 .srt；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）。' +
+        'convert 可带 trim（秒，{start,end}）裁剪，图片 jpg/webp 可带 quality（1-100）。产物写在输出目录，返回新文件路径。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '本机文件的绝对路径。' },
+          action: {
+            type: 'string',
+            enum: ['probe', 'convert', 'extract-audio', 'extract-video', 'subtitle', 'rewrite-tags'],
+            description: '要做的动作，默认 convert。',
+          },
+          format: {
+            type: 'string',
+            description: 'convert 的目标格式；不填则用该类型的默认格式（视频 mp4、音频 mp3、图片 png）。',
+          },
+          trim: {
+            type: 'object',
+            properties: { start: { type: 'number' }, end: { type: 'number' } },
+            description: '裁剪区间（秒）。',
+          },
+          quality: { type: 'number', description: '图片质量 1-100（jpg/webp 有效）。' },
+          tags: {
+            type: 'object',
+            properties: {
+              title: { type: 'string' },
+              artist: { type: 'string' },
+              album: { type: 'string' },
+              comment: { type: 'string' },
+              date: { type: 'string' },
+              genre: { type: 'string' },
+            },
+            description: 'rewrite-tags 要写入的标签，空值不会清空原标签。',
+          },
+          stream: { type: 'number', description: 'subtitle 的字幕轨序号，默认 0。' },
+        },
+        required: ['path'],
+      },
+      output: {
+        schema: {
+          type: 'object',
+          properties: {
+            file: { type: 'string' },
+            kind: { type: 'string' },
+            duration: { type: 'number' },
+            sizeBytes: { type: 'number' },
+            meta: { type: 'object' },
+          },
+          required: ['file'],
+        },
+        render(_args, value) {
+          const v = (value || {}) as Record<string, unknown>;
+          const lines = [`文件: ${String(v.file || '')}`];
+          const bytes = Number(v.sizeBytes) || 0;
+          if (bytes) {
+            // A 26 KB file is "0.0 MB"; below a megabyte the KB figure is the honest one.
+            lines.push(
+              `大小: ${bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(bytes / 1024)) + ' KB'}`,
+            );
+          }
+          if (v.kind) lines.push(`类型: ${String(v.kind)}`);
+          if (v.duration) lines.push(`时长: ${Math.round(Number(v.duration))} 秒`);
+          // probe 的价值就在这些事实里：不画出来模型等于白探。
+          const meta = v.meta as
+            | {
+                video?: { codec?: string; width?: number; height?: number } | null;
+                audio?: { codec?: string } | null;
+                subtitles?: unknown[];
+                tags?: Record<string, string>;
+              }
+            | undefined;
+          if (meta) {
+            if (meta.video) {
+              lines.push(
+                `视频: ${meta.video.codec || '?'}${meta.video.width ? ` ${meta.video.width}x${meta.video.height}` : ''}`,
+              );
+            }
+            if (meta.audio) lines.push(`音频: ${meta.audio.codec || '?'}`);
+            if (meta.subtitles && meta.subtitles.length) lines.push(`字幕轨: ${meta.subtitles.length} 条`);
+            const tags = Object.entries(meta.tags || {}).filter(([, value]) => value);
+            if (tags.length) lines.push(`标签: ${tags.map(([key, value]) => `${key}=${value}`).join(' ')}`);
+          }
+          return [{ type: 'text', text: lines.join('\n') }];
+        },
+      },
+      // A long clip can take a while; the abort kills ffmpeg and cleans up.
+      timeoutMs: 1800000,
+      execute: (args, exec) => runMediaTool(args, exec),
+    }),
+  );
+
   ctx.effect(() => {
     fs.mkdirSync(tmpDir, { recursive: true });
     // Drop stale uploads so a session with many big files does not fill the
@@ -457,6 +777,10 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
             fs.rm(upload.path, { force: true }, () => {});
           }
         }
+        // Finished jobs are only kept so the poll that reads them still works.
+        for (const [id, job] of jobs) {
+          if (job.state !== 'running' && now - job.at > JOB_TTL_MS) jobs.delete(id);
+        }
       },
       10 * 60 * 1000,
     );
@@ -468,7 +792,58 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
         path: `${PREFIX}/status`,
         handler: (req, res) => {
           if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
-          json(res, 200, statusPayload(ffmpeg, outDir));
+          json(
+            res,
+            200,
+            statusPayload(ffmpeg, outDir, Math.round(maxUploadBytes / 1048576), version, composerButton, groups),
+          );
+        },
+      }),
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/config`,
+        handler: async (req, res) => {
+          if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
+          if (!sameOrigin(req)) return json(res, 403, errorPayload('forbidden origin'));
+          try {
+            const body = await readJson(req);
+            // Only defined keys are merged; an empty string resets that key to
+            // the built-in default on the next load.
+            const patch: Record<string, unknown> = {};
+            if (body.outputDir !== undefined) {
+              if (typeof body.outputDir !== 'string') throw new Error('outputDir 必须是字符串');
+              patch.outputDir = body.outputDir;
+            }
+            if (body.ffmpegPath !== undefined) {
+              if (typeof body.ffmpegPath !== 'string') throw new Error('ffmpegPath 必须是字符串');
+              patch.ffmpegPath = body.ffmpegPath;
+            }
+            if (body.maxUploadMb !== undefined) {
+              const mb = Number(body.maxUploadMb);
+              if (!Number.isFinite(mb) || mb < 1) throw new Error('maxUploadMb 必须是 ≥ 1 的数字');
+              patch.maxUploadMb = mb;
+            }
+            if (body.composerButton !== undefined) {
+              if (typeof body.composerButton !== 'boolean') throw new Error('composerButton 必须是布尔值');
+              patch.composerButton = body.composerButton;
+            }
+            if (body.groups !== undefined) {
+              if (typeof body.groups !== 'string') throw new Error('groups 必须是字符串');
+              patch.groups = body.groups;
+            }
+            if (Object.keys(patch).length === 0) return json(res, 200, errorPayload('没有要保存的字段'));
+            // No expectedRevision: last write wins; the service validates the
+            // whole Config schema before persisting. The loader does not
+            // actually re-apply on this desktop build, so the running
+            // instance applies the merge itself; cfg accumulates the patch so
+            // consecutive saves stack correctly.
+            await ctx.settings.update('media-converter', patch);
+            cfg = { ...cfg, ...patch };
+            resolveConfig(cfg);
+            json(res, 200, { ok: true as const });
+          } catch (err) {
+            json(res, 200, errorPayload(errorText(err)));
+          }
         },
       }),
       webServer.register({
@@ -483,11 +858,25 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
             const name = path.basename(requestUrl(req).searchParams.get('name') || 'input');
             const id = `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
             file = path.join(tmpDir, id + path.extname(name).toLowerCase());
-            await pipeline(req, fs.createWriteStream(file));
+            // A body that announces more than the cap is refused before a byte
+            // is written; the counter below catches the ones that do not.
+            const announced = Number(req.headers['content-length'] || 0);
+            if (announced > maxUploadBytes) {
+              return json(res, 200, errorPayload(`文件超过上限（${uploadLimit}）`));
+            }
+            let received = 0;
+            const counter = new Transform({
+              transform(chunk, _encoding, done) {
+                received += chunk.length;
+                if (received > maxUploadBytes) done(new Error(`文件超过上限（${uploadLimit}）`));
+                else done(null, chunk);
+              },
+            });
+            await pipeline(req, counter, fs.createWriteStream(file));
             // A body that stops early would only fail later as an
             // "unrecognisable media file", so compare it with what was promised.
             const written = (await fsp.stat(file)).size;
-            const expected = Number(req.headers['content-length'] || 0);
+            const expected = announced;
             if (expected && written !== expected) {
               await fsp.rm(file, { force: true }).catch(() => {});
               console.error(`[dsh-media-converter] upload truncated: ${name} got ${written} of ${expected} bytes`);
@@ -539,7 +928,7 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
             const body = await readJson(req);
             const upload = body.id ? uploads.get(body.id) : undefined;
             if (!upload) return json(res, 200, errorPayload('文件已失效，请重新选择'));
-            const job = await startJob(
+            const { job } = await startJob(
               upload,
               planFor(upload, body),
               normalizeTrim(body.trim, upload.duration),
