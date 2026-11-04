@@ -1,6 +1,6 @@
 {
   "name": "dsh-media-converter",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Local media toolbox for DeepSeek Harness: convert, trim, split tracks, export subtitles, compress images, edit metadata, and Base64 — all through local ffmpeg.",
   "keywords": [
     "dsh",
