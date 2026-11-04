@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "媒体工具箱",
+    "description": "转换、裁剪、提取音轨、图片压缩、Base64 编解码（mp4/webm/gif/mp3/png…），本机 ffmpeg 完成。"
+  }
+}

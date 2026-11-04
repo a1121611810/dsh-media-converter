@@ -1,0 +1,4 @@
+- insert:
+    - id: media-converter
+      name: '@local/dsh-media-converter'
+      config: {}

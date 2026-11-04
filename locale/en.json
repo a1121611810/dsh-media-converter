@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Media Toolbox",
+    "description": "Convert, trim, split tracks, compress images, and encode/decode Base64 (mp4/webm/gif/mp3/png…) with local ffmpeg."
+  }
+}
