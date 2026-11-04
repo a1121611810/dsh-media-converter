@@ -1,0 +1,39 @@
+# Checks main and pull requests, so a broken tree is caught before a release tag
+# is pushed. The tag-triggered Publish workflow keeps its own copy of this chain
+# and additionally publishes; this file exists so a red main never waits for a
+# tag to be noticed.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two legs: the engines floor and the current runtime. The client build
+        # needs Vite, whose own floor is Node 20.19, so `20` resolves to the
+        # newest 20.x rather than 20.0.
+        node-version: [20, 24]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      # The host test drives real ffmpeg and fails without it; a silent skip
+      # would be a green run that tested nothing.
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: npm test
+      # Fails when client.js in the tree is not what src/client builds.
+      - run: npm run check:build

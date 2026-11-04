@@ -64,6 +64,8 @@
   "scripts": {
     "build:client": "vite build && cp dist/client.js client.js && cp dist/client.js.map client.js.map",
     "test": "npm run build:client && node test/client-bundle.test.mjs && node test/client-lib.test.mjs && node test/platform.test.mjs && node test/plan.test.mjs && node test/base64.test.mjs && node test/host.test.mjs",
-    "check:build": "npm run build:client && git diff --exit-code -- client.js client.js.map"
+    "check:build": "npm run build:client && git diff --exit-code -- client.js client.js.map",
+    "release": "bash scripts/release.sh",
+    "prepublishOnly": "node -e \"if (!process.env.CI) { console.error('本仓库只通过 CI 发布：npm run release -- <version>，由 tag 触发工作流'); process.exit(1); }\""
   }
 }
