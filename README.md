@@ -20,16 +20,23 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 
 ## 安装
 
-这是 Harness 的本地 bundle，通过 profile 的 bundle 机制装载。
+已发布到 npm（`dsh-media-converter`）。在 Harness 里用 `plugin_manager` 的 `install_bundle` 装，或在 profile 目录里：
 
-```bash
-# 在仓库目录之外执行，或用 plugin_manager 安装
-dsh plugin install /path/to/dsh-media-converter
+```sh
+dsh plugin add dsh-media-converter --profile <profile>
 ```
 
-或在 Harness 里用 `plugin_manager` 的 `install_bundle`，target 指向本仓库目录；它会做两件事：在 `~/.dsh/profiles/<profile>/package.json` 里登记 `@local/dsh-media-converter`，并在 `node_modules/@local/` 下建一条软链指向本目录。
+从源码装（开发用）：`plugin_manager` 的 `install_bundle`，target 指向本仓库目录——它会在 profile 的 `package.json` 里登记包名，并在 `node_modules/` 下建一条软链指向本目录。
+
+从 GitHub 装（未发布 npm 时的退路）：
+
+```sh
+dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
+```
 
 装好后左侧栏出现「媒体工具箱」。
+
+> 换包名后需要**重启应用**：运行中的 Host 会缓存旧包名的客户端条目，热装清不掉。
 
 ## 依赖
 
@@ -42,7 +49,7 @@ dsh plugin install /path/to/dsh-media-converter
 
 ```yaml
 - id: media-converter
-  name: '@local/dsh-media-converter'
+  name: 'dsh-media-converter'
   config:
     outputDir: ~/Movies/converted
     ffmpegPath: /opt/homebrew/bin/ffmpeg

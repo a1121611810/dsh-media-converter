@@ -150,3 +150,6 @@ vite.config.ts.timestamp-*
 
 # prototype/dev artifacts
 .playwright-cli/
+
+# npm pack output
+*.tgz

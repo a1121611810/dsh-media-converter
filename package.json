@@ -1,9 +1,32 @@
 {
-  "name": "@local/dsh-media-converter",
+  "name": "dsh-media-converter",
   "version": "1.0.0",
-  "private": true,
+  "description": "Local media toolbox for DeepSeek Harness: convert, trim, split tracks, export subtitles, compress images, edit metadata, and Base64 — all through local ffmpeg.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek",
+    "harness",
+    "ffmpeg",
+    "media",
+    "converter",
+    "transcode",
+    "trim",
+    "base64"
+  ],
+  "homepage": "https://github.com/a1121611810/dsh-media-converter",
+  "bugs": {
+    "url": "https://github.com/a1121611810/dsh-media-converter/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/a1121611810/dsh-media-converter.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
-  "description": "Local media toolbox: convert, trim, split tracks, compress images, and move media to/from Base64.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -16,7 +39,9 @@
     "lib/**/*.js",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {

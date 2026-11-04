@@ -1,4 +1,4 @@
-// Browser half of @local/dsh-media-converter — the media toolbox page.
+// Browser half of dsh-media-converter — the media toolbox page.
 //
 // Layout: an action list (converted from the "contextual command palette"
 // pattern) instead of stacked forms. The file and its stage sit on top; below is
@@ -10,7 +10,7 @@
 // the page polls the job for progress. Styling uses --dsw-alias-* theme tokens.
 
 window.__ModuleLoader__.load({
-  id: '@local/dsh-media-converter',
+  id: 'dsh-media-converter',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
