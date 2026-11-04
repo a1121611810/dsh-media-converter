@@ -30,7 +30,8 @@ export default defineConfig({
       output: {
         // The factory body cannot see the loader's `require` argument from
         // inside the IIFE, so React is parked on a global the bundle reads.
-        banner: "window.__ModuleLoader__.load({id:'dsh-media-converter',factory(require){globalThis.__dshReact=require('react');",
+        banner:
+          "window.__ModuleLoader__.load({id:'dsh-media-converter',factory(require){globalThis.__dshReact=require('react');",
         footer: 'return __media;}})',
       },
     },

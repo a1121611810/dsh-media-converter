@@ -9,7 +9,10 @@ export type MediaKind = 'video' | 'audio' | 'image' | 'text' | 'file';
 export type ConvertKind = 'video' | 'audio' | 'image';
 export type FormatTable = Record<ConvertKind, string[]>;
 // A trim window in seconds.
-export interface TrimWindow { start: number; end: number; }
+export interface TrimWindow {
+  start: number;
+  end: number;
+}
 
 // One stream record of the ffmpeg stderr: the fields every stream carries,
 // plus the ones only video or only audio streams carry.
@@ -53,9 +56,16 @@ export interface SubtitleDetail {
 // The parseMeta() result, written ONCE here (it is a mutable structure, so it
 // cannot be inferred): parseMeta fills the fields one by one.
 export interface MediaMeta {
-  format: string; duration: number; start: number; bitrate: number;
-  streams: StreamDetail[]; chapters: ChapterDetail[]; tags: Record<string, string>;
-  video: StreamDetail | null; audio: StreamDetail | null; subtitles: SubtitleDetail[];
+  format: string;
+  duration: number;
+  start: number;
+  bitrate: number;
+  streams: StreamDetail[];
+  chapters: ChapterDetail[];
+  tags: Record<string, string>;
+  video: StreamDetail | null;
+  audio: StreamDetail | null;
+  subtitles: SubtitleDetail[];
 }
 export type StreamMeta = MediaMeta['streams'][number];
 export type Chapter = MediaMeta['chapters'][number];
@@ -79,27 +89,81 @@ export const FORMATS: FormatTable = {
 };
 
 export const MIME_BY_EXT: Record<string, string> = {
-  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
-  mkv: 'video/x-matroska', avi: 'video/x-msvideo', gif: 'image/gif',
-  flv: 'video/x-flv', wmv: 'video/x-ms-wmv', ts: 'video/mp2t', ogv: 'video/ogg',
-  mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', wav: 'audio/wav',
-  flac: 'audio/flac', ogg: 'audio/ogg', opus: 'audio/ogg', ac3: 'audio/ac3',
-  eac3: 'audio/eac3', mka: 'audio/x-matroska', aiff: 'audio/aiff',
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
-  bmp: 'image/bmp', tiff: 'image/tiff', tif: 'image/tiff', avif: 'image/avif',
-  txt: 'text/plain; charset=utf-8', srt: 'text/plain; charset=utf-8',
-  vtt: 'text/plain; charset=utf-8', ass: 'text/plain; charset=utf-8',
+  mp4: 'video/mp4',
+  m4v: 'video/mp4',
+  mov: 'video/quicktime',
+  webm: 'video/webm',
+  mkv: 'video/x-matroska',
+  avi: 'video/x-msvideo',
+  gif: 'image/gif',
+  flv: 'video/x-flv',
+  wmv: 'video/x-ms-wmv',
+  ts: 'video/mp2t',
+  ogv: 'video/ogg',
+  mp3: 'audio/mpeg',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  wav: 'audio/wav',
+  flac: 'audio/flac',
+  ogg: 'audio/ogg',
+  opus: 'audio/ogg',
+  ac3: 'audio/ac3',
+  eac3: 'audio/eac3',
+  mka: 'audio/x-matroska',
+  aiff: 'audio/aiff',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  tiff: 'image/tiff',
+  tif: 'image/tiff',
+  avif: 'image/avif',
+  txt: 'text/plain; charset=utf-8',
+  srt: 'text/plain; charset=utf-8',
+  vtt: 'text/plain; charset=utf-8',
+  ass: 'text/plain; charset=utf-8',
 };
 
 const KIND_BY_EXT: Record<string, MediaKind> = {
-  mp4: 'video', m4v: 'video', mov: 'video', mkv: 'video', webm: 'video',
-  avi: 'video', flv: 'video', wmv: 'video', mpg: 'video', mpeg: 'video',
-  ts: 'video', m2ts: 'video', '3gp': 'video',
-  mp3: 'audio', m4a: 'audio', aac: 'audio', wav: 'audio', flac: 'audio',
-  ogg: 'audio', opus: 'audio', aiff: 'audio', aif: 'audio', wma: 'audio',
-  png: 'image', jpg: 'image', jpeg: 'image', webp: 'image', gif: 'image',
-  bmp: 'image', tif: 'image', tiff: 'image', heic: 'image', avif: 'image',
-  txt: 'text', json: 'text', srt: 'text', vtt: 'text', md: 'text',
+  mp4: 'video',
+  m4v: 'video',
+  mov: 'video',
+  mkv: 'video',
+  webm: 'video',
+  avi: 'video',
+  flv: 'video',
+  wmv: 'video',
+  mpg: 'video',
+  mpeg: 'video',
+  ts: 'video',
+  m2ts: 'video',
+  '3gp': 'video',
+  mp3: 'audio',
+  m4a: 'audio',
+  aac: 'audio',
+  wav: 'audio',
+  flac: 'audio',
+  ogg: 'audio',
+  opus: 'audio',
+  aiff: 'audio',
+  aif: 'audio',
+  wma: 'audio',
+  png: 'image',
+  jpg: 'image',
+  jpeg: 'image',
+  webp: 'image',
+  gif: 'image',
+  bmp: 'image',
+  tif: 'image',
+  tiff: 'image',
+  heic: 'image',
+  avif: 'image',
+  txt: 'text',
+  json: 'text',
+  srt: 'text',
+  vtt: 'text',
+  md: 'text',
 };
 
 export function extOf(filename: string): string {
@@ -199,7 +263,10 @@ export function buildArgs(kind: MediaKind, format: string, quality = 90): string
 
 // Trim window in seconds, or null when the request is not a trim. An invalid
 // or no-op window degrades to "no trim" instead of cutting a surprise range.
-export function normalizeTrim(trim: { start?: unknown; end?: unknown } | null | undefined, duration: number): TrimWindow | null {
+export function normalizeTrim(
+  trim: { start?: unknown; end?: unknown } | null | undefined,
+  duration: number,
+): TrimWindow | null {
   if (!trim) return null;
   let start = Number(trim.start);
   let end = Number(trim.end);
@@ -241,7 +308,8 @@ export function parseDuration(stderr: string): number {
 // ffprobe ships here). Captures the container line, one record per stream with
 // its own tag block, chapters, and the container tags. Everything is
 // best-effort; a missing piece stays empty instead of breaking the panel.
-const STREAM_FLAGS = /\((default|forced|dub|original|comment|attached_pic|hearing_impaired|visual_impaired|clean_effects|timed_thumbnails)\)/g;
+const STREAM_FLAGS =
+  /\((default|forced|dub|original|comment|attached_pic|hearing_impaired|visual_impaired|clean_effects|timed_thumbnails)\)/g;
 
 function parseStreamLine(index: string, language: string, type: string, descriptor: string): StreamDetail {
   const chunks = descriptor.split(/,\s*/);
@@ -288,7 +356,18 @@ function parseStreamLine(index: string, language: string, type: string, descript
 
 export function parseMeta(stderr: string): MediaMeta {
   const text = String(stderr || '');
-  const meta: MediaMeta = { format: '', duration: 0, start: 0, bitrate: 0, streams: [], chapters: [], tags: {}, video: null, audio: null, subtitles: [] };
+  const meta: MediaMeta = {
+    format: '',
+    duration: 0,
+    start: 0,
+    bitrate: 0,
+    streams: [],
+    chapters: [],
+    tags: {},
+    video: null,
+    audio: null,
+    subtitles: [],
+  };
 
   const input = /^Input #0,\s*(.+?),\s*from\s/m.exec(text);
   if (input) meta.format = input[1].trim();
@@ -320,12 +399,20 @@ export function parseMeta(stderr: string): MediaMeta {
     const chapter = /^\s*Chapter #0:(\d+):\s*start\s*([\d.-]+),\s*end\s*([\d.-]+)/.exec(line);
     if (chapter) {
       inMetadata = false;
-      const entry: ChapterDetail = { index: Number(chapter[1]), start: Number(chapter[2]), end: Number(chapter[3]), tags: {} };
+      const entry: ChapterDetail = {
+        index: Number(chapter[1]),
+        start: Number(chapter[2]),
+        end: Number(chapter[3]),
+        tags: {},
+      };
       meta.chapters.push(entry);
       target = entry.tags;
       continue;
     }
-    const stream = /^\s*Stream #0:(\d+)(?:\[[^\]]*\])?(?:\(([a-z]{3})\))?:\s*(Video|Audio|Subtitle|Data|Attachment):\s*(.+)$/.exec(line);
+    const stream =
+      /^\s*Stream #0:(\d+)(?:\[[^\]]*\])?(?:\(([a-z]{3})\))?:\s*(Video|Audio|Subtitle|Data|Attachment):\s*(.+)$/.exec(
+        line,
+      );
     if (stream) {
       inMetadata = false;
       const entry = parseStreamLine(stream[1], stream[2], stream[3], stream[4]);
@@ -360,10 +447,25 @@ export function parseStreams(stderr: string) {
 }
 
 const AUDIO_CONTAINER: Record<string, string> = {
-  aac: 'm4a', alac: 'm4a', mp3: 'mp3', ac3: 'ac3', eac3: 'eac3',
-  opus: 'ogg', vorbis: 'ogg', flac: 'flac',
+  aac: 'm4a',
+  alac: 'm4a',
+  mp3: 'mp3',
+  ac3: 'ac3',
+  eac3: 'eac3',
+  opus: 'ogg',
+  vorbis: 'ogg',
+  flac: 'flac',
 };
-const VIDEO_CONTAINER: Record<string, string> = { h264: 'mp4', hevc: 'mp4', av1: 'mp4', mpeg4: 'mp4', mpeg2video: 'mp4', vp8: 'webm', vp9: 'webm', theora: 'webm' };
+const VIDEO_CONTAINER: Record<string, string> = {
+  h264: 'mp4',
+  hevc: 'mp4',
+  av1: 'mp4',
+  mpeg4: 'mp4',
+  mpeg2video: 'mp4',
+  vp8: 'webm',
+  vp9: 'webm',
+  theora: 'webm',
+};
 
 // Stream copy: separating the tracks costs a container rewrite, not an encode.
 export function extractPlan(streams: StreamInfo, which: 'audio' | 'video'): ConvertPlan {

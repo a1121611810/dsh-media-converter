@@ -70,7 +70,12 @@ export function imageioPatterns(platform: string, env: Record<string, string | u
 
 // Expand a pattern into the directories it names. `listDir` returns the names
 // of the directories inside a directory, so this function touches no files.
-export function expandDirs(root: string, segments: string[], listDir: (dir: string) => string[], platform = process.platform): string[] {
+export function expandDirs(
+  root: string,
+  segments: string[],
+  listDir: (dir: string) => string[],
+  platform = process.platform,
+): string[] {
   const p = pathFor(platform);
   let current = [root];
   for (const segment of segments) {
@@ -103,6 +108,7 @@ export function safeBaseName(raw: string, platform = process.platform): string {
   const p = pathFor(platform);
   const base = p.basename(String(raw || 'input'));
   let stem = base.replace(/\.[^.]*$/, '') || 'output';
+  // oxlint-disable-next-line no-control-regex -- the control characters are what we strip
   stem = stem.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 120) || 'output';
   if (platform === 'win32' && WIN_RESERVED.test(stem)) stem = '_' + stem;
   return stem;

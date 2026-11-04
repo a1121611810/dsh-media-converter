@@ -26,7 +26,7 @@ apply(
     get: (key) => (key === 'webServer' ? webServer : undefined),
     effect: (fn) => cleanups.push(fn()),
   },
-  { outputDir: outDir }
+  { outputDir: outDir },
 );
 
 // Minimal IncomingMessage stand-in: the handlers only use method/url/headers and
@@ -111,13 +111,19 @@ const ffmpeg = status.data.ffmpegPath;
 const sample = path.join(outDir, 'sample.png');
 execFileSync(ffmpeg, ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=64x64', '-frames:v', '1', sample]);
 
-const upload = await call('upload?name=' + encodeURIComponent('../evil name.png'), { method: 'POST', body: fs.readFileSync(sample) });
+const upload = await call('upload?name=' + encodeURIComponent('../evil name.png'), {
+  method: 'POST',
+  body: fs.readFileSync(sample),
+});
 assert.equal(upload.data.ok, true, JSON.stringify(upload.data));
 assert.equal(upload.data.kind, 'image');
 assert.equal(upload.data.name, 'evil name.png'); // basename wins, no traversal
 assert.equal(upload.data.streams.video, true); // ffmpeg calls a still image a video stream
 
-const converted = await call('convert', { method: 'POST', body: JSON.stringify({ id: upload.data.id, format: 'jpg', quality: 60 }) });
+const converted = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: upload.data.id, format: 'jpg', quality: 60 }),
+});
 assert.equal(converted.data.ok, true, JSON.stringify(converted.data));
 const imageJob = await waitJob(converted.data.job);
 assert.equal(imageJob.kind, 'image');
@@ -136,15 +142,40 @@ assert.equal(bad.data.ok, false); // image sources have no mp4 target
 // --- clip: trim, extract audio, extract video ----------------------------
 const clip = path.join(outDir, 'clip.mp4');
 execFileSync(ffmpeg, [
-  '-y', '-loglevel', 'error',
-  '-f', 'lavfi', '-t', '2', '-i', 'testsrc=size=64x64:rate=10',
-  '-f', 'lavfi', '-t', '2', '-i', 'sine=frequency=440',
-  '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', clip,
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'testsrc=size=64x64:rate=10',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'sine=frequency=440',
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  '-c:a',
+  'aac',
+  '-shortest',
+  clip,
 ]);
 const clipUpload = await call('upload?name=clip.mp4', { method: 'POST', body: fs.readFileSync(clip) });
 assert.equal(clipUpload.data.kind, 'video');
 assert.ok(Math.abs(clipUpload.data.duration - 2) < 0.3, `duration ${clipUpload.data.duration}`);
-assert.deepEqual(clipUpload.data.streams, { video: true, audio: true, videoCodec: 'h264', audioCodec: 'aac', subtitles: [] });
+assert.deepEqual(clipUpload.data.streams, {
+  video: true,
+  audio: true,
+  videoCodec: 'h264',
+  audioCodec: 'aac',
+  subtitles: [],
+});
 
 const trimmed = await call('convert', {
   method: 'POST',
@@ -153,7 +184,9 @@ const trimmed = await call('convert', {
 assert.equal(trimmed.data.ok, true, JSON.stringify(trimmed.data));
 assert.deepEqual(trimmed.data.job.trim, { start: 0.5, end: 1.5 });
 const trimJob = await waitJob(trimmed.data.job);
-const trimmedDuration = parseDuration(spawnSync(ffmpeg, ['-hide_banner', '-i', trimJob.out], { encoding: 'utf8' }).stderr);
+const trimmedDuration = parseDuration(
+  spawnSync(ffmpeg, ['-hide_banner', '-i', trimJob.out], { encoding: 'utf8' }).stderr,
+);
 assert.ok(Math.abs(trimmedDuration - 1) < 0.25, `trimmed duration ${trimmedDuration}`);
 
 // An inverted window degrades to "no trim" rather than cutting a surprise range.
@@ -163,7 +196,10 @@ const inverted = await call('convert', {
 });
 assert.equal(inverted.data.job.trim, null);
 
-const audioOnly = await call('convert', { method: 'POST', body: JSON.stringify({ id: clipUpload.data.id, mode: 'extract-audio' }) });
+const audioOnly = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, mode: 'extract-audio' }),
+});
 assert.equal(audioOnly.data.ok, true, JSON.stringify(audioOnly.data));
 const audioJob = await waitJob(audioOnly.data.job);
 assert.equal(audioJob.kind, 'audio');
@@ -172,7 +208,10 @@ const audioProbe = spawnSync(ffmpeg, ['-hide_banner', '-i', audioJob.out], { enc
 assert.match(audioProbe, /Audio: aac/);
 assert.doesNotMatch(audioProbe, /Video:/);
 
-const videoOnly = await call('convert', { method: 'POST', body: JSON.stringify({ id: clipUpload.data.id, mode: 'extract-video' }) });
+const videoOnly = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, mode: 'extract-video' }),
+});
 assert.equal(videoOnly.data.ok, true, JSON.stringify(videoOnly.data));
 const videoJob = await waitJob(videoOnly.data.job);
 assert.equal(videoJob.kind, 'video');
@@ -182,7 +221,10 @@ assert.match(videoProbe, /Video: h264/);
 assert.doesNotMatch(videoProbe, /Audio:/);
 
 // Extracting from a file without the track reports it instead of failing oddly.
-const still = await call('convert', { method: 'POST', body: JSON.stringify({ id: upload.data.id, mode: 'extract-video' }) });
+const still = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: upload.data.id, mode: 'extract-video' }),
+});
 assert.equal(still.data.ok, true); // an image does have a video stream, so this is allowed
 
 // --- base64 both ways ----------------------------------------------------
@@ -198,7 +240,10 @@ assert.equal(restored.data.mime, 'image/png');
 assert.ok(fs.existsSync(restored.data.file));
 assert.ok(fs.readFileSync(restored.data.file).equals(fs.readFileSync(sample)));
 
-const decodedText = await call('decode', { method: 'POST', body: JSON.stringify({ text: Buffer.from('你好，世界').toString('base64') }) });
+const decodedText = await call('decode', {
+  method: 'POST',
+  body: JSON.stringify({ text: Buffer.from('你好，世界').toString('base64') }),
+});
 assert.equal(decodedText.data.ok, true);
 assert.deepEqual({ kind: decodedText.data.kind, text: decodedText.data.text }, { kind: 'text', text: '你好，世界' });
 
@@ -209,14 +254,36 @@ assert.equal(badDecode.data.ok, false);
 const srtPath = path.join(outDir, 'sub.srt');
 fs.writeFileSync(srtPath, '1\n00:00:00,000 --> 00:00:01,500\n你好，世界\n\n');
 const subbed = path.join(outDir, 'subbed.mkv');
-execFileSync(ffmpeg, ['-y', '-loglevel', 'error', '-i', clip, '-i', srtPath, '-map', '0', '-map', '1', '-c', 'copy', '-c:s', 'srt', '-metadata:s:s:0', 'language=chi', subbed]);
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-i',
+  clip,
+  '-i',
+  srtPath,
+  '-map',
+  '0',
+  '-map',
+  '1',
+  '-c',
+  'copy',
+  '-c:s',
+  'srt',
+  '-metadata:s:s:0',
+  'language=chi',
+  subbed,
+]);
 const subUpload = await call('upload?name=subbed.mkv', { method: 'POST', body: fs.readFileSync(subbed) });
 assert.equal(subUpload.data.meta.subtitles.length, 1, JSON.stringify(subUpload.data.meta.subtitles));
 assert.equal(subUpload.data.meta.subtitles[0].language, 'chi');
 assert.ok(subUpload.data.meta.video.width > 0, 'video width parsed');
 assert.match(subUpload.data.meta.format, /matroska/);
 
-const subJob = await call('convert', { method: 'POST', body: JSON.stringify({ id: subUpload.data.id, mode: 'subtitle', stream: 0 }) });
+const subJob = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: subUpload.data.id, mode: 'subtitle', stream: 0 }),
+});
 assert.equal(subJob.data.ok, true, JSON.stringify(subJob.data));
 const doneSub = await waitJob(subJob.data.job);
 assert.ok(doneSub.out.endsWith('.chi.srt'), doneSub.out);
@@ -224,7 +291,11 @@ assert.match(fs.readFileSync(doneSub.out, 'utf8'), /你好，世界/);
 
 const metaJob = await call('convert', {
   method: 'POST',
-  body: JSON.stringify({ id: clipUpload.data.id, mode: 'meta', tags: { title: '片头测试', artist: '小火山', album: '' } }),
+  body: JSON.stringify({
+    id: clipUpload.data.id,
+    mode: 'meta',
+    tags: { title: '片头测试', artist: '小火山', album: '' },
+  }),
 });
 assert.equal(metaJob.data.ok, true, JSON.stringify(metaJob.data));
 const doneMeta = await waitJob(metaJob.data.job);
@@ -236,7 +307,20 @@ assert.equal(rewritten.data.meta.tags.title, '片头测试');
 
 // --- every advertised format must actually convert -----------------------
 const audioSrc = path.join(outDir, 'tone.m4a');
-execFileSync(ffmpeg, ['-y', '-loglevel', 'error', '-f', 'lavfi', '-t', '1', '-i', 'sine=frequency=440', '-c:a', 'aac', audioSrc]);
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '1',
+  '-i',
+  'sine=frequency=440',
+  '-c:a',
+  'aac',
+  audioSrc,
+]);
 const audioUpload = await call('upload?name=tone.m4a', { method: 'POST', body: fs.readFileSync(audioSrc) });
 assert.equal(audioUpload.data.kind, 'audio');
 
@@ -267,7 +351,11 @@ assert.equal(crossOrigin.status, 403);
 
 // A broken input still has a known extension, so the job must fail cleanly and
 // leave no truncated output behind.
-const broken = await call('upload?name=broken.mp4', { method: 'POST', body: Buffer.from('not a video') });const brokenJob = await call('convert', { method: 'POST', body: JSON.stringify({ id: broken.data.id, format: 'mp4' }) });
+const broken = await call('upload?name=broken.mp4', { method: 'POST', body: Buffer.from('not a video') });
+const brokenJob = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: broken.data.id, format: 'mp4' }),
+});
 let brokenState = brokenJob.data.job;
 for (let attempt = 0; attempt < 100 && brokenState.state === 'running'; attempt += 1) {
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -281,10 +369,28 @@ assert.ok(brokenState.error.length > 0);
 // A slow encode gives the cancel a wide window: VP9 is far slower than the
 // x264 the other fixtures use.
 const slowClip = path.join(outDir, 'slow.mp4');
-execFileSync(ffmpeg, ['-y', '-loglevel', 'error', '-f', 'lavfi', '-t', '8', '-i', 'testsrc=size=640x360:rate=30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', slowClip]);
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '8',
+  '-i',
+  'testsrc=size=640x360:rate=30',
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  slowClip,
+]);
 const slowUpload = await call('upload?name=slow.mp4', { method: 'POST', body: fs.readFileSync(slowClip) });
 assert.equal(slowUpload.data.ok, true, JSON.stringify(slowUpload.data));
-const slowJob = await call('convert', { method: 'POST', body: JSON.stringify({ id: slowUpload.data.id, format: 'webm' }) });
+const slowJob = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: slowUpload.data.id, format: 'webm' }),
+});
 assert.equal(slowJob.data.ok, true, JSON.stringify(slowJob.data));
 
 const cancelled = await call('cancel', { method: 'POST', body: JSON.stringify({ id: slowJob.data.job.id }) });

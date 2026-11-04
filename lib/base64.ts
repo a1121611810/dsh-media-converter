@@ -25,7 +25,11 @@ const SIGNATURES: { mime: string; ext: string; match: (b: Buffer) => boolean }[]
   { mime: 'video/webm', ext: 'webm', match: (b) => b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3 },
   { mime: 'audio/ogg', ext: 'ogg', match: (b) => ascii(b, 0, 4) === 'OggS' },
   { mime: 'audio/flac', ext: 'flac', match: (b) => ascii(b, 0, 4) === 'fLaC' },
-  { mime: 'audio/mpeg', ext: 'mp3', match: (b) => ascii(b, 0, 3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) },
+  {
+    mime: 'audio/mpeg',
+    ext: 'mp3',
+    match: (b) => ascii(b, 0, 3) === 'ID3' || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0),
+  },
 ];
 
 export function sniffMime(bytes: Buffer): { mime: string; ext: string } | null {
@@ -35,7 +39,10 @@ export function sniffMime(bytes: Buffer): { mime: string; ext: string } | null {
 }
 
 export function extForMime(mime: string): string {
-  const wanted = String(mime || '').toLowerCase().split(';')[0].trim();
+  const wanted = String(mime || '')
+    .toLowerCase()
+    .split(';')[0]
+    .trim();
   const hit = Object.keys(MIME_BY_EXT).find((ext) => MIME_BY_EXT[ext].split(';')[0] === wanted);
   return hit || 'bin';
 }
@@ -45,6 +52,7 @@ export function looksLikeText(bytes: Buffer): boolean {
   if (!bytes || !bytes.length || bytes.includes(0)) return false;
   const text = bytes.toString('utf8');
   if (!Buffer.from(text, 'utf8').equals(bytes)) return false;
+  // oxlint-disable-next-line no-control-regex -- the control characters are what we look for
   return !/[\u0001-\u0008\u000b\u000c\u000e-\u001f]/.test(text);
 }
 
@@ -74,5 +82,10 @@ export function decodeBase64Payload(input: string | undefined): DecodedPayload {
     return { kind: 'file', bytes, mime: sniffed.mime, ext: sniffed.ext };
   }
   if (looksLikeText(bytes)) return { kind: 'text', text: bytes.toString('utf8') };
-  return { kind: 'file', bytes, mime: sniffed ? sniffed.mime : 'application/octet-stream', ext: sniffed ? sniffed.ext : 'bin' };
+  return {
+    kind: 'file',
+    bytes,
+    mime: sniffed ? sniffed.mime : 'application/octet-stream',
+    ext: sniffed ? sniffed.ext : 'bin',
+  };
 }

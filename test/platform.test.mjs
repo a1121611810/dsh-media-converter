@@ -34,18 +34,36 @@ assert.ok(!mac.some((candidate) => candidate.endsWith('.exe')), 'no exe suffix o
 
 // --- imageio-ffmpeg layouts ------------------------------------------------
 assert.deepEqual(imageioPatterns('darwin', {}, '/Users/me')[0], [
-  '/Users/me/Library/Python', '*', 'lib', 'python', 'site-packages', 'imageio_ffmpeg', 'binaries',
+  '/Users/me/Library/Python',
+  '*',
+  'lib',
+  'python',
+  'site-packages',
+  'imageio_ffmpeg',
+  'binaries',
 ]);
 assert.deepEqual(imageioPatterns('win32', { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' }, 'C:\\Users\\me')[0], [
   'C:\\Users\\me\\AppData\\Local\\imageio_ffmpeg\\binaries',
 ]);
 assert.deepEqual(imageioPatterns('win32', { APPDATA: 'C:\\Users\\me\\AppData\\Roaming' }, 'C:\\Users\\me')[1], [
-  'C:\\Users\\me\\AppData\\Roaming\\Python', 'Python*', 'site-packages', 'imageio_ffmpeg', 'binaries',
+  'C:\\Users\\me\\AppData\\Roaming\\Python',
+  'Python*',
+  'site-packages',
+  'imageio_ffmpeg',
+  'binaries',
 ]);
 
-const expanded = expandDirs('/root', ['*', 'site-packages'], (dir) => (dir === '/root' ? ['py3', 'other'] : []), 'darwin');
+const expanded = expandDirs(
+  '/root',
+  ['*', 'site-packages'],
+  (dir) => (dir === '/root' ? ['py3', 'other'] : []),
+  'darwin',
+);
 assert.deepEqual(expanded, ['/root/py3/site-packages', '/root/other/site-packages']);
-assert.deepEqual(expandDirs('/root', ['a', 'b'], () => [], 'darwin'), ['/root/a/b']);
+assert.deepEqual(
+  expandDirs('/root', ['a', 'b'], () => [], 'darwin'),
+  ['/root/a/b'],
+);
 
 // --- opening the file manager ---------------------------------------------
 assert.deepEqual(revealCommand('/tmp/a.mp4', 'darwin'), { command: 'open', args: ['-R', '/tmp/a.mp4'] });

@@ -21,7 +21,9 @@ defineEmits(['cancel', 'reveal', 'again']);
 
 // The result lives inside the panel that started it, so cause and effect stay
 // in one place.
-const visible = computed(() => props.jobAction === props.actionId && Boolean(props.result || props.converting || props.cancelled));
+const visible = computed(
+  () => props.jobAction === props.actionId && Boolean(props.result || props.converting || props.cancelled),
+);
 
 const saved = computed(() => {
   if (!props.file || !props.result || !props.result.size) return '';
@@ -47,12 +49,27 @@ const saved = computed(() => {
 
     <template v-if="result">
       <span class="mc-ok">{{ t('result.done') }}</span>
-      <video v-if="result.kind === 'video'" class="mc-player" :src="previewUrl(result.file)" controls playsinline preload="metadata"></video>
-      <audio v-if="result.kind === 'audio'" :src="previewUrl(result.file)" controls preload="metadata" style="width: 100%"></audio>
+      <video
+        v-if="result.kind === 'video'"
+        class="mc-player"
+        :src="previewUrl(result.file)"
+        controls
+        playsinline
+        preload="metadata"
+      ></video>
+      <audio
+        v-if="result.kind === 'audio'"
+        :src="previewUrl(result.file)"
+        controls
+        preload="metadata"
+        style="width: 100%"
+      ></audio>
       <pre v-if="result.kind === 'text' && result.text" class="mc-pre">{{ result.text.slice(0, 4000) }}</pre>
       <span class="mc-path">{{ result.file }}</span>
       <div class="mc-row">
-        <button class="mc-btn mc-btn-primary" @click="$emit('reveal', result.file)">{{ t('action.reveal.' + PLATFORM) }}</button>
+        <button class="mc-btn mc-btn-primary" @click="$emit('reveal', result.file)">
+          {{ t('action.reveal.' + PLATFORM) }}
+        </button>
         <span v-if="saved" class="mc-muted">{{ t('result.size') }}: {{ formatSize(result.size) }} · {{ saved }}</span>
         <span class="mc-grow"></span>
         <button class="mc-btn mc-btn-ghost" @click="$emit('again')">{{ t('action.again') }}</button>

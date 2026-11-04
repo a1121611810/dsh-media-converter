@@ -9,340 +9,344 @@
 // itself is Vue (src/client/App.vue).
 import './vue/elements.js';
 
-    // React is handed in by the loader, so the bundle carries no React of its
-    // own: only the three hooks this file touches are declared here.
-    interface ReactRef<T> { current: T }
-    interface ReactSurface {
-      createElement(type: unknown, props?: Record<string, unknown> | null, ...children: unknown[]): unknown;
-      useRef<T>(initial: T): ReactRef<T>;
-      useEffect(effect: () => void | (() => void), deps?: unknown[]): void;
-    }
-    // The <media-panel> custom element carries the translator on the element.
-    interface PanelElement extends HTMLElement { t: (key: string) => string }
+// React is handed in by the loader, so the bundle carries no React of its
+// own: only the three hooks this file touches are declared here.
+interface ReactRef<T> {
+  current: T;
+}
+interface ReactSurface {
+  createElement(type: unknown, props?: Record<string, unknown> | null, ...children: unknown[]): unknown;
+  useRef<T>(initial: T): ReactRef<T>;
+  useEffect(effect: () => void | (() => void), deps?: unknown[]): void;
+}
+// The <media-panel> custom element carries the translator on the element.
+interface PanelElement extends HTMLElement {
+  t: (key: string) => string;
+}
 
-    declare global {
-      // The loader's factory parks React here before the bundle runs.
-      var __dshReact: ReactSurface;
-    }
+declare global {
+  // The loader's factory parks React here before the bundle runs.
+  var __dshReact: ReactSurface;
+}
 
-    // The plugin services this page uses: the locale translator and the slots
-    // it registers into. Only the calls below are declared.
-    interface SlotRegistration {
-      name: string;
-      id?: string;
-      key?: string;
-      order?: number;
-      label?: () => string;
-    }
-    interface PluginContext {
-      locale: {
-        bind(namespace: string): (key: string) => string;
-        register(namespace: string, language: string, dictionary: Record<string, string>): () => void;
-      };
-      slots: {
-        inject(name: string, injector: () => void): void;
-        register(registration: SlotRegistration, component: unknown): () => void;
-      };
-      effect(effect: () => void | (() => void)): void;
-    }
-    const React = globalThis.__dshReact;
-    const h = React.createElement;
-    const PANEL_ID = 'media-convert';
-    const NS = 'media-convert';
+// The plugin services this page uses: the locale translator and the slots
+// it registers into. Only the calls below are declared.
+interface SlotRegistration {
+  name: string;
+  id?: string;
+  key?: string;
+  order?: number;
+  label?: () => string;
+}
+interface PluginContext {
+  locale: {
+    bind(namespace: string): (key: string) => string;
+    register(namespace: string, language: string, dictionary: Record<string, string>): () => void;
+  };
+  slots: {
+    inject(name: string, injector: () => void): void;
+    register(registration: SlotRegistration, component: unknown): () => void;
+  };
+  effect(effect: () => void | (() => void)): void;
+}
+const React = globalThis.__dshReact;
+const h = React.createElement;
+const PANEL_ID = 'media-convert';
+const NS = 'media-convert';
 
-    const ZH: Record<string, string> = {
-      'nav.label': '媒体工具箱',
-      'page.title': '媒体工具箱',
-      'page.subtitle': '转换、裁剪、提取音轨、图片压缩、Base64——都在本机完成，文件不出本机。',
-      'page.caps': '转换 · 裁剪 · 提取音轨 · 字幕 · 元数据 · Base64',
-      'drop.title': '拖入文件，或点击选择',
-      'drop.hint': '视频 · 音频 · 图片',
-      'kind.video': '视频',
-      'kind.audio': '音频',
-      'kind.image': '图片',
-      'kind.file': '文件',
-      'kind.text': '文本',
-      'action.change': '换一个',
-      'action.convert': '开始转换',
-      'action.converting': '转换中…',
-      'action.cancel': '取消',
-      'action.cancelling': '正在取消…',
-      'action.cancelled': '已取消',
-      'action.reveal.mac': '在 Finder 中显示',
-      'action.reveal.win': '在资源管理器中显示',
-      'action.reveal.linux': '在文件管理器中显示',
-      'action.again': '再转一个',
-      'action.toFormat': '转成 %s',
-      'action.moreFormats': '更多格式…',
-      'action.less': '收起',
-      'action.trim': '裁一段',
-      'action.extractAudio': '提取音频',
-      'action.extractVideo': '提取画面',
-      'action.subs': '提取字幕',
-      'action.meta': '查看元数据',
-      'action.b64': '转成 Base64',
-      'act.empty': '没有匹配的动作',
-      'group.convert': '转换',
-      'group.edit': '编辑',
-      'group.view': '查看',
-      'search.placeholder': '想做什么？转成 MP4、裁一段、提取字幕…',
-      'status.uploading': '正在读取文件…',
-      'result.done': '完成',
-      'result.size': '大小',
-      'error.title': '出错了',
-      'error.noffmpeg': '未找到 ffmpeg。先运行 brew install ffmpeg，或用 FFMPEG_PATH 指定路径。',
-      'error.network': '无法连接到本地服务，请确认插件已启用。',
-      'footer.out': '输出目录',
-      'hint.formats': '输出格式',
-      'name.label': '文件名',
-      'hint.mp4': 'H.264 通用',
-      'hint.webm': 'VP9 网页',
-      'hint.mov': 'QuickTime',
-      'hint.gif': '动图',
-      'hint.mp3': '音频',
-      'hint.m4a': 'AAC',
-      'hint.wav': '无损 PCM',
-      'hint.flac': '无损',
-      'hint.png': '无损',
-      'hint.jpg': '有损照片',
-      'hint.webp': '网页图片',
-      'hint.mkv': '万能封装',
-      'hint.avi': '老设备',
-      'hint.flv': 'Flash 流',
-      'hint.wmv': 'Windows',
-      'hint.ts': '流媒体',
-      'hint.ogv': 'Theora',
-      'hint.aac': '裸音频流',
-      'hint.ogg': 'Vorbis',
-      'hint.opus': '低码率语音',
-      'hint.aiff': 'Apple 无损',
-      'hint.bmp': '位图',
-      'hint.tiff': '印刷',
-      'hint.avif': '新一代压缩',
-      'hint.noAudio': '没有音轨',
-      'trim.title': '裁剪（可选）',
-      'trim.start': '从',
-      'trim.end': '到',
-      'trim.full': '整段',
-      'trim.invalid': '时间格式不对，用 秒 或 分:秒',
-      'trim.order': '“到”必须晚于“从”',
-      'trim.over': '“到”超出文件时长',
-      'trim.setStart': '设为起点',
-      'trim.setEnd': '设为终点',
-      'trim.play': '试看选中段',
-      'trim.apply': '裁剪并转换',
-      'quality.label': '质量',
-      'quality.hint': '越小文件越小',
-      'extract.note': '直接拷贝轨道，不重新编码，速度很快',
-      'sub.title': '字幕轨',
-      'sub.extract': '提取字幕',
-      'meta.title': '元数据',
-      'meta.edit': '编辑元数据（另存为新文件）',
-      'meta.save': '保存元数据',
-      'meta.container': '容器',
-      'meta.duration': '时长',
-      'meta.size': '体积',
-      'meta.bitrate': '码率',
-      'meta.video': '视频',
-      'meta.audio': '音频',
-      'meta.subtitles': '字幕',
-      'meta.tags': '标签',
-      'meta.tracks': '轨道',
-      'meta.chapters': '章节',
-      'meta.chapter': '章节',
-      'meta.start': '起始偏移',
-      'meta.type.video': '视频',
-      'meta.type.audio': '音频',
-      'meta.type.subtitle': '字幕',
-      'meta.type.data': '数据',
-      'meta.type.attachment': '附件',
-      'meta.key.title': '标题',
-      'meta.key.artist': '作者',
-      'meta.key.album': '专辑',
-      'meta.key.comment': '备注',
-      'meta.key.date': '日期',
-      'meta.key.genre': '流派',
-      'extract.audio': '只保留音频',
-      'extract.video': '只保留画面（无声）',
-      'compare.before': '原图',
-      'compare.after': '输出',
-      'compare.slot': '对比预览',
-      'compare.live': '实时预览',
-      'compare.pending': '正在生成预览…',
-      'compare.mode': '对比方式',
-      'compare.side': '并排对比',
-      'compare.slider': '滑块对比',
-      'compare.saved': '省了',
-      'b64.title': 'Base64',
-      'b64.encode': '当前文件 → Base64',
-      'b64.encoding': '转换中…',
-      'b64.copy': '复制',
-      'b64.copied': '已复制',
-      'b64.save': '保存为 .txt',
-      'b64.decodeTitle': '从 Base64 还原',
-      'b64.placeholder': '粘贴 data:image/png;base64,... 或纯 Base64 文本',
-      'b64.decode': '还原',
-      'b64.decoding': '还原中…',
-      'b64.textResult': '还原为文本',
-    };
-    const EN: Record<string, string> = {
-      'nav.label': 'Media Tools',
-      'page.title': 'Media Toolbox',
-      'page.subtitle': 'Convert, trim, split tracks, compress images, and move files to/from Base64 — all locally.',
-      'page.caps': 'convert · trim · split tracks · subtitles · metadata · Base64',
-      'drop.title': 'Drop a file here, or click to choose',
-      'drop.hint': 'video · audio · image',
-      'kind.video': 'Video',
-      'kind.audio': 'Audio',
-      'kind.image': 'Image',
-      'kind.file': 'File',
-      'kind.text': 'Text',
-      'action.change': 'Change file',
-      'action.convert': 'Convert',
-      'action.converting': 'Converting…',
-      'action.cancel': 'Cancel',
-      'action.cancelling': 'Cancelling…',
-      'action.cancelled': 'Cancelled',
-      'action.reveal.mac': 'Show in Finder',
-      'action.reveal.win': 'Show in Explorer',
-      'action.reveal.linux': 'Show in file manager',
-      'action.again': 'Do it again',
-      'action.toFormat': 'Convert to %s',
-      'action.moreFormats': 'More formats…',
-      'action.less': 'Show less',
-      'action.trim': 'Trim a clip',
-      'action.extractAudio': 'Extract audio',
-      'action.extractVideo': 'Extract video',
-      'action.subs': 'Extract subtitles',
-      'action.meta': 'Inspect metadata',
-      'action.b64': 'To Base64',
-      'act.empty': 'No matching actions',
-      'group.convert': 'Convert',
-      'group.edit': 'Edit',
-      'group.view': 'Inspect',
-      'search.placeholder': 'What do you need? Convert to MP4, trim, extract subtitles…',
-      'status.uploading': 'Reading file…',
-      'result.done': 'Done',
-      'result.size': 'Size',
-      'error.title': 'Something went wrong',
-      'error.noffmpeg': 'ffmpeg not found. Run `brew install ffmpeg`, or point FFMPEG_PATH at it.',
-      'error.network': 'Cannot reach the local service; check that the plugin is enabled.',
-      'footer.out': 'Output folder',
-      'hint.formats': 'Output format',
-      'name.label': 'File name',
-      'hint.mp4': 'H.264',
-      'hint.webm': 'VP9 web',
-      'hint.mov': 'QuickTime',
-      'hint.gif': 'animation',
-      'hint.mp3': 'audio',
-      'hint.m4a': 'AAC',
-      'hint.wav': 'lossless PCM',
-      'hint.flac': 'lossless',
-      'hint.png': 'lossless',
-      'hint.jpg': 'photo',
-      'hint.webp': 'web image',
-      'hint.mkv': 'container',
-      'hint.avi': 'legacy',
-      'hint.flv': 'Flash',
-      'hint.wmv': 'Windows',
-      'hint.ts': 'streaming',
-      'hint.ogv': 'Theora',
-      'hint.aac': 'raw stream',
-      'hint.ogg': 'Vorbis',
-      'hint.opus': 'voice',
-      'hint.aiff': 'Apple PCM',
-      'hint.bmp': 'bitmap',
-      'hint.tiff': 'print',
-      'hint.avif': 'next-gen',
-      'hint.noAudio': 'no audio track',
-      'trim.title': 'Trim (optional)',
-      'trim.start': 'From',
-      'trim.end': 'To',
-      'trim.full': 'Whole clip',
-      'trim.invalid': 'Invalid time — use seconds or m:ss',
-      'trim.order': '"To" must be after "From"',
-      'trim.over': '"To" is past the end of the clip',
-      'trim.setStart': 'Set start',
-      'trim.setEnd': 'Set end',
-      'trim.play': 'Play selection',
-      'trim.apply': 'Trim & convert',
-      'quality.label': 'Quality',
-      'quality.hint': 'lower means smaller',
-      'extract.note': 'stream copy — no re-encode, instant',
-      'sub.title': 'Subtitle tracks',
-      'sub.extract': 'Extract subtitles',
-      'meta.title': 'Metadata',
-      'meta.edit': 'Edit metadata (saved as a new file)',
-      'meta.save': 'Save metadata',
-      'meta.container': 'Container',
-      'meta.duration': 'Duration',
-      'meta.size': 'Size',
-      'meta.bitrate': 'Bitrate',
-      'meta.video': 'Video',
-      'meta.audio': 'Audio',
-      'meta.subtitles': 'Subtitles',
-      'meta.tags': 'Tags',
-      'meta.tracks': 'Streams',
-      'meta.chapters': 'Chapters',
-      'meta.chapter': 'Chapter',
-      'meta.start': 'Start offset',
-      'meta.type.video': 'Video',
-      'meta.type.audio': 'Audio',
-      'meta.type.subtitle': 'Subtitle',
-      'meta.type.data': 'Data',
-      'meta.type.attachment': 'Attachment',
-      'meta.key.title': 'Title',
-      'meta.key.artist': 'Artist',
-      'meta.key.album': 'Album',
-      'meta.key.comment': 'Comment',
-      'meta.key.date': 'Date',
-      'meta.key.genre': 'Genre',
-      'extract.audio': 'Audio only',
-      'extract.video': 'Video only (silent)',
-      'compare.before': 'Original',
-      'compare.after': 'Output',
-      'compare.slot': 'Comparison',
-      'compare.live': 'Live preview',
-      'compare.pending': 'Rendering preview…',
-      'compare.mode': 'Compare',
-      'compare.side': 'Side by side',
-      'compare.slider': 'Slider',
-      'compare.saved': 'saved',
-      'b64.title': 'Base64',
-      'b64.encode': 'Current file → Base64',
-      'b64.encoding': 'Encoding…',
-      'b64.copy': 'Copy',
-      'b64.copied': 'Copied',
-      'b64.save': 'Save as .txt',
-      'b64.decodeTitle': 'Restore from Base64',
-      'b64.placeholder': 'Paste data:image/png;base64,... or raw Base64 text',
-      'b64.decode': 'Restore',
-      'b64.decoding': 'Restoring…',
-      'b64.textResult': 'Restored as text',
-    };
+const ZH: Record<string, string> = {
+  'nav.label': '媒体工具箱',
+  'page.title': '媒体工具箱',
+  'page.subtitle': '转换、裁剪、提取音轨、图片压缩、Base64——都在本机完成，文件不出本机。',
+  'page.caps': '转换 · 裁剪 · 提取音轨 · 字幕 · 元数据 · Base64',
+  'drop.title': '拖入文件，或点击选择',
+  'drop.hint': '视频 · 音频 · 图片',
+  'kind.video': '视频',
+  'kind.audio': '音频',
+  'kind.image': '图片',
+  'kind.file': '文件',
+  'kind.text': '文本',
+  'action.change': '换一个',
+  'action.convert': '开始转换',
+  'action.converting': '转换中…',
+  'action.cancel': '取消',
+  'action.cancelling': '正在取消…',
+  'action.cancelled': '已取消',
+  'action.reveal.mac': '在 Finder 中显示',
+  'action.reveal.win': '在资源管理器中显示',
+  'action.reveal.linux': '在文件管理器中显示',
+  'action.again': '再转一个',
+  'action.toFormat': '转成 %s',
+  'action.moreFormats': '更多格式…',
+  'action.less': '收起',
+  'action.trim': '裁一段',
+  'action.extractAudio': '提取音频',
+  'action.extractVideo': '提取画面',
+  'action.subs': '提取字幕',
+  'action.meta': '查看元数据',
+  'action.b64': '转成 Base64',
+  'act.empty': '没有匹配的动作',
+  'group.convert': '转换',
+  'group.edit': '编辑',
+  'group.view': '查看',
+  'search.placeholder': '想做什么？转成 MP4、裁一段、提取字幕…',
+  'status.uploading': '正在读取文件…',
+  'result.done': '完成',
+  'result.size': '大小',
+  'error.title': '出错了',
+  'error.noffmpeg': '未找到 ffmpeg。先运行 brew install ffmpeg，或用 FFMPEG_PATH 指定路径。',
+  'error.network': '无法连接到本地服务，请确认插件已启用。',
+  'footer.out': '输出目录',
+  'hint.formats': '输出格式',
+  'name.label': '文件名',
+  'hint.mp4': 'H.264 通用',
+  'hint.webm': 'VP9 网页',
+  'hint.mov': 'QuickTime',
+  'hint.gif': '动图',
+  'hint.mp3': '音频',
+  'hint.m4a': 'AAC',
+  'hint.wav': '无损 PCM',
+  'hint.flac': '无损',
+  'hint.png': '无损',
+  'hint.jpg': '有损照片',
+  'hint.webp': '网页图片',
+  'hint.mkv': '万能封装',
+  'hint.avi': '老设备',
+  'hint.flv': 'Flash 流',
+  'hint.wmv': 'Windows',
+  'hint.ts': '流媒体',
+  'hint.ogv': 'Theora',
+  'hint.aac': '裸音频流',
+  'hint.ogg': 'Vorbis',
+  'hint.opus': '低码率语音',
+  'hint.aiff': 'Apple 无损',
+  'hint.bmp': '位图',
+  'hint.tiff': '印刷',
+  'hint.avif': '新一代压缩',
+  'hint.noAudio': '没有音轨',
+  'trim.title': '裁剪（可选）',
+  'trim.start': '从',
+  'trim.end': '到',
+  'trim.full': '整段',
+  'trim.invalid': '时间格式不对，用 秒 或 分:秒',
+  'trim.order': '“到”必须晚于“从”',
+  'trim.over': '“到”超出文件时长',
+  'trim.setStart': '设为起点',
+  'trim.setEnd': '设为终点',
+  'trim.play': '试看选中段',
+  'trim.apply': '裁剪并转换',
+  'quality.label': '质量',
+  'quality.hint': '越小文件越小',
+  'extract.note': '直接拷贝轨道，不重新编码，速度很快',
+  'sub.title': '字幕轨',
+  'sub.extract': '提取字幕',
+  'meta.title': '元数据',
+  'meta.edit': '编辑元数据（另存为新文件）',
+  'meta.save': '保存元数据',
+  'meta.container': '容器',
+  'meta.duration': '时长',
+  'meta.size': '体积',
+  'meta.bitrate': '码率',
+  'meta.video': '视频',
+  'meta.audio': '音频',
+  'meta.subtitles': '字幕',
+  'meta.tags': '标签',
+  'meta.tracks': '轨道',
+  'meta.chapters': '章节',
+  'meta.chapter': '章节',
+  'meta.start': '起始偏移',
+  'meta.type.video': '视频',
+  'meta.type.audio': '音频',
+  'meta.type.subtitle': '字幕',
+  'meta.type.data': '数据',
+  'meta.type.attachment': '附件',
+  'meta.key.title': '标题',
+  'meta.key.artist': '作者',
+  'meta.key.album': '专辑',
+  'meta.key.comment': '备注',
+  'meta.key.date': '日期',
+  'meta.key.genre': '流派',
+  'extract.audio': '只保留音频',
+  'extract.video': '只保留画面（无声）',
+  'compare.before': '原图',
+  'compare.after': '输出',
+  'compare.slot': '对比预览',
+  'compare.live': '实时预览',
+  'compare.pending': '正在生成预览…',
+  'compare.mode': '对比方式',
+  'compare.side': '并排对比',
+  'compare.slider': '滑块对比',
+  'compare.saved': '省了',
+  'b64.title': 'Base64',
+  'b64.encode': '当前文件 → Base64',
+  'b64.encoding': '转换中…',
+  'b64.copy': '复制',
+  'b64.copied': '已复制',
+  'b64.save': '保存为 .txt',
+  'b64.decodeTitle': '从 Base64 还原',
+  'b64.placeholder': '粘贴 data:image/png;base64,... 或纯 Base64 文本',
+  'b64.decode': '还原',
+  'b64.decoding': '还原中…',
+  'b64.textResult': '还原为文本',
+};
+const EN: Record<string, string> = {
+  'nav.label': 'Media Tools',
+  'page.title': 'Media Toolbox',
+  'page.subtitle': 'Convert, trim, split tracks, compress images, and move files to/from Base64 — all locally.',
+  'page.caps': 'convert · trim · split tracks · subtitles · metadata · Base64',
+  'drop.title': 'Drop a file here, or click to choose',
+  'drop.hint': 'video · audio · image',
+  'kind.video': 'Video',
+  'kind.audio': 'Audio',
+  'kind.image': 'Image',
+  'kind.file': 'File',
+  'kind.text': 'Text',
+  'action.change': 'Change file',
+  'action.convert': 'Convert',
+  'action.converting': 'Converting…',
+  'action.cancel': 'Cancel',
+  'action.cancelling': 'Cancelling…',
+  'action.cancelled': 'Cancelled',
+  'action.reveal.mac': 'Show in Finder',
+  'action.reveal.win': 'Show in Explorer',
+  'action.reveal.linux': 'Show in file manager',
+  'action.again': 'Do it again',
+  'action.toFormat': 'Convert to %s',
+  'action.moreFormats': 'More formats…',
+  'action.less': 'Show less',
+  'action.trim': 'Trim a clip',
+  'action.extractAudio': 'Extract audio',
+  'action.extractVideo': 'Extract video',
+  'action.subs': 'Extract subtitles',
+  'action.meta': 'Inspect metadata',
+  'action.b64': 'To Base64',
+  'act.empty': 'No matching actions',
+  'group.convert': 'Convert',
+  'group.edit': 'Edit',
+  'group.view': 'Inspect',
+  'search.placeholder': 'What do you need? Convert to MP4, trim, extract subtitles…',
+  'status.uploading': 'Reading file…',
+  'result.done': 'Done',
+  'result.size': 'Size',
+  'error.title': 'Something went wrong',
+  'error.noffmpeg': 'ffmpeg not found. Run `brew install ffmpeg`, or point FFMPEG_PATH at it.',
+  'error.network': 'Cannot reach the local service; check that the plugin is enabled.',
+  'footer.out': 'Output folder',
+  'hint.formats': 'Output format',
+  'name.label': 'File name',
+  'hint.mp4': 'H.264',
+  'hint.webm': 'VP9 web',
+  'hint.mov': 'QuickTime',
+  'hint.gif': 'animation',
+  'hint.mp3': 'audio',
+  'hint.m4a': 'AAC',
+  'hint.wav': 'lossless PCM',
+  'hint.flac': 'lossless',
+  'hint.png': 'lossless',
+  'hint.jpg': 'photo',
+  'hint.webp': 'web image',
+  'hint.mkv': 'container',
+  'hint.avi': 'legacy',
+  'hint.flv': 'Flash',
+  'hint.wmv': 'Windows',
+  'hint.ts': 'streaming',
+  'hint.ogv': 'Theora',
+  'hint.aac': 'raw stream',
+  'hint.ogg': 'Vorbis',
+  'hint.opus': 'voice',
+  'hint.aiff': 'Apple PCM',
+  'hint.bmp': 'bitmap',
+  'hint.tiff': 'print',
+  'hint.avif': 'next-gen',
+  'hint.noAudio': 'no audio track',
+  'trim.title': 'Trim (optional)',
+  'trim.start': 'From',
+  'trim.end': 'To',
+  'trim.full': 'Whole clip',
+  'trim.invalid': 'Invalid time — use seconds or m:ss',
+  'trim.order': '"To" must be after "From"',
+  'trim.over': '"To" is past the end of the clip',
+  'trim.setStart': 'Set start',
+  'trim.setEnd': 'Set end',
+  'trim.play': 'Play selection',
+  'trim.apply': 'Trim & convert',
+  'quality.label': 'Quality',
+  'quality.hint': 'lower means smaller',
+  'extract.note': 'stream copy — no re-encode, instant',
+  'sub.title': 'Subtitle tracks',
+  'sub.extract': 'Extract subtitles',
+  'meta.title': 'Metadata',
+  'meta.edit': 'Edit metadata (saved as a new file)',
+  'meta.save': 'Save metadata',
+  'meta.container': 'Container',
+  'meta.duration': 'Duration',
+  'meta.size': 'Size',
+  'meta.bitrate': 'Bitrate',
+  'meta.video': 'Video',
+  'meta.audio': 'Audio',
+  'meta.subtitles': 'Subtitles',
+  'meta.tags': 'Tags',
+  'meta.tracks': 'Streams',
+  'meta.chapters': 'Chapters',
+  'meta.chapter': 'Chapter',
+  'meta.start': 'Start offset',
+  'meta.type.video': 'Video',
+  'meta.type.audio': 'Audio',
+  'meta.type.subtitle': 'Subtitle',
+  'meta.type.data': 'Data',
+  'meta.type.attachment': 'Attachment',
+  'meta.key.title': 'Title',
+  'meta.key.artist': 'Artist',
+  'meta.key.album': 'Album',
+  'meta.key.comment': 'Comment',
+  'meta.key.date': 'Date',
+  'meta.key.genre': 'Genre',
+  'extract.audio': 'Audio only',
+  'extract.video': 'Video only (silent)',
+  'compare.before': 'Original',
+  'compare.after': 'Output',
+  'compare.slot': 'Comparison',
+  'compare.live': 'Live preview',
+  'compare.pending': 'Rendering preview…',
+  'compare.mode': 'Compare',
+  'compare.side': 'Side by side',
+  'compare.slider': 'Slider',
+  'compare.saved': 'saved',
+  'b64.title': 'Base64',
+  'b64.encode': 'Current file → Base64',
+  'b64.encoding': 'Encoding…',
+  'b64.copy': 'Copy',
+  'b64.copied': 'Copied',
+  'b64.save': 'Save as .txt',
+  'b64.decodeTitle': 'Restore from Base64',
+  'b64.placeholder': 'Paste data:image/png;base64,... or raw Base64 text',
+  'b64.decode': 'Restore',
+  'b64.decoding': 'Restoring…',
+  'b64.textResult': 'Restored as text',
+};
 
-    function PanelIcon({ size }: { size?: number }) {
-      return h(
-        'svg',
-        {
-          viewBox: '0 0 24 24',
-          width: size,
-          height: size,
-          fill: 'none',
-          stroke: 'currentColor',
-          strokeWidth: 2,
-          strokeLinecap: 'round',
-          strokeLinejoin: 'round',
-          'aria-hidden': true,
-        },
-        h('path', { d: 'M4 8h13' }),
-        h('path', { d: 'm14 4.5 3.5 3.5L14 11.5' }),
-        h('path', { d: 'M20 16H7' }),
-        h('path', { d: 'm10 12.5L6.5 16l3.5 3.5' })
-      );
-    }
+function PanelIcon({ size }: { size?: number }) {
+  return h(
+    'svg',
+    {
+      viewBox: '0 0 24 24',
+      width: size,
+      height: size,
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: 2,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      'aria-hidden': true,
+    },
+    h('path', { d: 'M4 8h13' }),
+    h('path', { d: 'm14 4.5 3.5 3.5L14 11.5' }),
+    h('path', { d: 'M20 16H7' }),
+    h('path', { d: 'm10 12.5L6.5 16l3.5 3.5' }),
+  );
+}
 
-    const CSS = `
+const CSS = `
       .mc-host, media-panel { display: block; height: 100%; }
       .mc-page { width: 100%; max-width: 780px; margin: 0 auto; height: 100%; min-height: 0; overflow-y: auto; padding: 22px 26px 56px; box-sizing: border-box; display: flex; flex-direction: column; gap: 14px; font-size: 14px; color: var(--dsw-alias-label-primary, inherit); }
       /* The page is a fixed-height flex column: without this, tall content
@@ -461,48 +465,51 @@ import './vue/elements.js';
       }
     `;
 
-    // React face of the panel. Eight lines of React is the whole seam: the
-    // element mounts once, owns its own DOM, and only receives the translator.
-    function Shell({ t }: { t: (key: string) => string }) {
-      const ref = React.useRef<HTMLDivElement | null>(null);
-      const panel = React.useRef<PanelElement | null>(null);
-      React.useEffect(() => {
-        const el = document.createElement('media-panel') as PanelElement;
-        el.t = t; // set before connect so the first render is already translated
-        panel.current = el; // firstElementChild is the <style>, not the panel
-        ref.current!.appendChild(el);
-        return () => {
-          panel.current = null;
-          el.remove();
-        };
-      }, []);
-      React.useEffect(() => {
-        if (panel.current) panel.current.t = t;
-      }, [t]);
-      // The stylesheet lives with the shell: Vue does not inject SFC styles when
-      // the custom element uses light DOM.
-      return h('div', { className: 'mc-host', ref }, h('style', null, CSS));
-    }
-
-    const plugin = {
-      inject: ['slots', 'locale'],
-      apply(ctx: PluginContext) {
-        const t = ctx.locale.bind(NS);
-        ctx.effect(() => {
-          const offZh = ctx.locale.register(NS, 'zh', ZH);
-          const offEn = ctx.locale.register(NS, 'en', EN);
-          return () => {
-            offZh();
-            offEn();
-          };
-        });
-
-        ctx.slots.inject('sidebar.panellist', () =>
-          ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 30, label: () => t('nav.label') }, PanelIcon)
-        );
-        ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, () => h(Shell, { t })));
-      },
+// React face of the panel. Eight lines of React is the whole seam: the
+// element mounts once, owns its own DOM, and only receives the translator.
+function Shell({ t }: { t: (key: string) => string }) {
+  const ref = React.useRef<HTMLDivElement | null>(null);
+  const panel = React.useRef<PanelElement | null>(null);
+  React.useEffect(() => {
+    const el = document.createElement('media-panel') as PanelElement;
+    el.t = t; // set before connect so the first render is already translated
+    panel.current = el; // firstElementChild is the <style>, not the panel
+    ref.current!.appendChild(el);
+    return () => {
+      panel.current = null;
+      el.remove();
     };
+  }, []);
+  React.useEffect(() => {
+    if (panel.current) panel.current.t = t;
+  }, [t]);
+  // The stylesheet lives with the shell: Vue does not inject SFC styles when
+  // the custom element uses light DOM.
+  return h('div', { className: 'mc-host', ref }, h('style', null, CSS));
+}
+
+const plugin = {
+  inject: ['slots', 'locale'],
+  apply(ctx: PluginContext) {
+    const t = ctx.locale.bind(NS);
+    ctx.effect(() => {
+      const offZh = ctx.locale.register(NS, 'zh', ZH);
+      const offEn = ctx.locale.register(NS, 'en', EN);
+      return () => {
+        offZh();
+        offEn();
+      };
+    });
+
+    ctx.slots.inject('sidebar.panellist', () =>
+      ctx.slots.register(
+        { name: 'sidebar.panellist', id: PANEL_ID, order: 30, label: () => t('nav.label') },
+        PanelIcon,
+      ),
+    );
+    ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, () => h(Shell, { t })));
+  },
+};
 
 export const inject = plugin.inject;
 export const apply = plugin.apply;

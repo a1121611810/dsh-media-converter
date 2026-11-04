@@ -2,14 +2,20 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { PropType } from 'vue';
 import {
-  PLATFORM, TAG_KEYS, downloadText, formatClock, formatDuration, formatSize,
-  previewUrl, readJson, trimWindow, unavailableTarget,
+  PLATFORM,
+  TAG_KEYS,
+  downloadText,
+  formatClock,
+  formatDuration,
+  formatSize,
+  previewUrl,
+  readJson,
+  trimWindow,
+  unavailableTarget,
 } from './lib.js';
 import type { ConvertRequest, DecodedPayload, ResultPayload } from './lib.js';
 import type { StreamMeta } from '../../lib/plan.js';
-import type {
-  Base64Response, ErrorResponse, Job, StatusResponse, UploadResponse,
-} from '../../index.js';
+import type { Base64Response, ErrorResponse, Job, StatusResponse, UploadResponse } from '../../index.js';
 import CompareSlider from './vue/CompareSlider.vue';
 import ResultBlock from './vue/ResultBlock.vue';
 
@@ -77,59 +83,93 @@ const busy = computed(() => phase.value === 'uploading' || phase.value === 'conv
 const meta = computed(() => (file.value ? file.value.meta : null));
 // The Host answers with the format table of the three convertible kinds; the
 // panel asks for the kind of the picked file, which may be none of them.
-const formatTable = computed<Record<string, string[]>>(() => (status.value ? status.value.formats as Record<string, string[]> : {}));
-const formats = computed(() => (formatTable.value[file.value ? file.value.kind : ''] || []));
+const formatTable = computed<Record<string, string[]>>(() =>
+  status.value ? (status.value.formats as Record<string, string[]>) : {},
+);
+const formats = computed(() => formatTable.value[file.value ? file.value.kind : ''] || []);
 const trim = computed(() => trimWindow({ file: file.value, trimStart: trimStart.value, trimEnd: trimEnd.value, t }));
-const trimSummary = computed(() => (trim.value.error
-  ? ''
-  : trim.value.active
-    ? formatClock(trim.value.start) + ' – ' + formatClock(trim.value.end) + ' · ' + formatClock(trim.value.end - trim.value.start)
-    : t('trim.full') + (file.value && file.value.duration ? ' ' + formatClock(file.value.duration) : '')));
-const usesQuality = computed(() => Boolean(file.value && file.value.kind === 'image' && (format.value === 'jpg' || format.value === 'webp')));
-const canExtractAudio = computed(() => Boolean(file.value && file.value.kind === 'video' && file.value.streams && file.value.streams.audio));
-const canExtractVideo = computed(() => Boolean(file.value && file.value.kind === 'video' && file.value.streams && file.value.streams.video));
-const afterSrc = computed(() => (result.value && result.value.kind === 'image' ? previewUrl(result.value.file) : livePreview.value));
-const afterLabel = computed(() => (result.value && result.value.kind === 'image'
-  ? t('compare.after') + ' · ' + formatSize(result.value.size)
-  : livePreview.value
-    ? t('compare.live') + ' · ' + (format.value ? format.value.toUpperCase() : '') + (usesQuality.value ? ' ' + quality.value : '')
-    : t('compare.slot')));
+const trimSummary = computed(() =>
+  trim.value.error
+    ? ''
+    : trim.value.active
+      ? formatClock(trim.value.start) +
+        ' – ' +
+        formatClock(trim.value.end) +
+        ' · ' +
+        formatClock(trim.value.end - trim.value.start)
+      : t('trim.full') + (file.value && file.value.duration ? ' ' + formatClock(file.value.duration) : ''),
+);
+const usesQuality = computed(() =>
+  Boolean(file.value && file.value.kind === 'image' && (format.value === 'jpg' || format.value === 'webp')),
+);
+const canExtractAudio = computed(() =>
+  Boolean(file.value && file.value.kind === 'video' && file.value.streams && file.value.streams.audio),
+);
+const canExtractVideo = computed(() =>
+  Boolean(file.value && file.value.kind === 'video' && file.value.streams && file.value.streams.video),
+);
+const afterSrc = computed(() =>
+  result.value && result.value.kind === 'image' ? previewUrl(result.value.file) : livePreview.value,
+);
+const afterLabel = computed(() =>
+  result.value && result.value.kind === 'image'
+    ? t('compare.after') + ' · ' + formatSize(result.value.size)
+    : livePreview.value
+      ? t('compare.live') +
+        ' · ' +
+        (format.value ? format.value.toUpperCase() : '') +
+        (usesQuality.value ? ' ' + quality.value : '')
+      : t('compare.slot'),
+);
 
 const joinParts = (parts: (string | null | undefined)[]) => parts.filter(Boolean).join(' · ');
-const typeLabel = (type: string) => t('meta.type.' + (['video', 'audio', 'subtitle', 'data', 'attachment'].includes(type) ? type : 'data'));
-const describeStream = (stream: StreamMeta) => joinParts([
-  stream.codec + (stream.profile ? ' ' + stream.profile : ''),
-  stream.tag,
-  stream.width ? stream.width + '×' + stream.height! : '',
-  stream.pixFmt,
-  stream.aspect ? 'SAR ' + stream.aspect : '',
-  stream.displayAspect ? 'DAR ' + stream.displayAspect : '',
-  stream.fps ? stream.fps + ' fps' : '',
-  stream.sampleRate ? stream.sampleRate + ' Hz' : '',
-  stream.channels,
-  stream.sampleFmt,
-  stream.bitrate ? stream.bitrate + ' kb/s' : '',
-  stream.language,
-  stream.tags && stream.tags.title ? '“' + stream.tags.title + '”' : '',
-  ...(stream.flags || []),
-]);
+const typeLabel = (type: string) =>
+  t('meta.type.' + (['video', 'audio', 'subtitle', 'data', 'attachment'].includes(type) ? type : 'data'));
+const describeStream = (stream: StreamMeta) =>
+  joinParts([
+    stream.codec + (stream.profile ? ' ' + stream.profile : ''),
+    stream.tag,
+    stream.width ? stream.width + '×' + stream.height! : '',
+    stream.pixFmt,
+    stream.aspect ? 'SAR ' + stream.aspect : '',
+    stream.displayAspect ? 'DAR ' + stream.displayAspect : '',
+    stream.fps ? stream.fps + ' fps' : '',
+    stream.sampleRate ? stream.sampleRate + ' Hz' : '',
+    stream.channels,
+    stream.sampleFmt,
+    stream.bitrate ? stream.bitrate + ' kb/s' : '',
+    stream.language,
+    stream.tags && stream.tags.title ? '“' + stream.tags.title + '”' : '',
+    ...(stream.flags || []),
+  ]);
 
-const containerRows = computed(() => (meta.value
-  ? [
-      [t('meta.container'), meta.value.format || '—'],
-      [t('meta.duration'), meta.value.duration ? formatClock(meta.value.duration) + ' · ' + meta.value.duration.toFixed(2) + 's' : '—'],
-      [t('meta.bitrate'), meta.value.bitrate ? meta.value.bitrate + ' kb/s' : '—'],
-      [t('meta.size'), formatSize(file.value!.size) || '—'],
-      [t('meta.start'), (meta.value.start || 0).toFixed(3) + ' s'],
-    ]
-  : []));
-const trackRows = computed(() => (meta.value ? meta.value.streams.map((stream) => ['#' + stream.index + ' ' + typeLabel(stream.type), describeStream(stream)]) : []));
-const chapterRows = computed(() => (meta.value && meta.value.chapters.length
-  ? meta.value.chapters.map((chapter, index) => [
-      t('meta.chapter') + ' ' + (index + 1),
-      joinParts([chapter.tags.title, formatClock(chapter.start) + ' – ' + formatClock(chapter.end)]),
-    ])
-  : []));
+const containerRows = computed(() =>
+  meta.value
+    ? [
+        [t('meta.container'), meta.value.format || '—'],
+        [
+          t('meta.duration'),
+          meta.value.duration ? formatClock(meta.value.duration) + ' · ' + meta.value.duration.toFixed(2) + 's' : '—',
+        ],
+        [t('meta.bitrate'), meta.value.bitrate ? meta.value.bitrate + ' kb/s' : '—'],
+        [t('meta.size'), formatSize(file.value!.size) || '—'],
+        [t('meta.start'), (meta.value.start || 0).toFixed(3) + ' s'],
+      ]
+    : [],
+);
+const trackRows = computed(() =>
+  meta.value
+    ? meta.value.streams.map((stream) => ['#' + stream.index + ' ' + typeLabel(stream.type), describeStream(stream)])
+    : [],
+);
+const chapterRows = computed(() =>
+  meta.value && meta.value.chapters.length
+    ? meta.value.chapters.map((chapter, index) => [
+        t('meta.chapter') + ' ' + (index + 1),
+        joinParts([chapter.tags.title, formatClock(chapter.start) + ' – ' + formatClock(chapter.end)]),
+      ])
+    : [],
+);
 const tagRows = computed(() => (meta.value ? Object.entries(meta.value.tags) : []));
 
 // Every action this file can offer, before the search filter.
@@ -139,21 +179,66 @@ const actions = computed(() => {
   const showAll = moreFormats.value || searching;
   const popular = formats.value.slice(0, 4);
   const extra = formats.value.slice(4);
-  for (const f of (showAll ? formats.value : popular)) {
-    list.push({ id: 'fmt:' + f, group: 'convert', label: t('action.toFormat').replace('%s', f.toUpperCase()), hint: t('hint.' + f), off: unavailableTarget(file.value, f), keys: f });
+  for (const f of showAll ? formats.value : popular) {
+    list.push({
+      id: 'fmt:' + f,
+      group: 'convert',
+      label: t('action.toFormat').replace('%s', f.toUpperCase()),
+      hint: t('hint.' + f),
+      off: unavailableTarget(file.value, f),
+      keys: f,
+    });
   }
   if (extra.length && !searching) {
-    list.push(moreFormats.value
-      ? { id: 'less', group: 'convert', label: t('action.less'), hint: '', keys: '' }
-      : { id: 'more', group: 'convert', label: t('action.moreFormats'), hint: extra.length + ' 种', keys: 'format' });
+    list.push(
+      moreFormats.value
+        ? { id: 'less', group: 'convert', label: t('action.less'), hint: '', keys: '' }
+        : { id: 'more', group: 'convert', label: t('action.moreFormats'), hint: extra.length + ' 种', keys: 'format' },
+    );
   }
   if (file.value && file.value.kind !== 'image') {
-    list.push({ id: 'trim', group: 'edit', label: t('action.trim'), hint: t('trim.full') + ' ' + formatClock(file.value.duration || 0), keys: 'trim cut 裁剪' });
+    list.push({
+      id: 'trim',
+      group: 'edit',
+      label: t('action.trim'),
+      hint: t('trim.full') + ' ' + formatClock(file.value.duration || 0),
+      keys: 'trim cut 裁剪',
+    });
   }
-  if (canExtractAudio.value) list.push({ id: 'extract-audio', group: 'edit', label: t('action.extractAudio'), hint: t('extract.note'), keys: 'extract audio 音轨' });
-  if (canExtractVideo.value) list.push({ id: 'extract-video', group: 'edit', label: t('action.extractVideo'), hint: t('extract.note'), keys: 'extract video 画面' });
-  if (meta.value && meta.value.subtitles.length) list.push({ id: 'subs', group: 'view', label: t('action.subs'), hint: meta.value.subtitles.length + ' 条', keys: 'subtitle srt 字幕' });
-  list.push({ id: 'meta', group: 'view', label: t('action.meta'), hint: joinParts([meta.value ? meta.value.video && meta.value.video.codec : '', meta.value ? meta.value.audio && meta.value.audio.codec : '']), keys: 'metadata info 元数据' });
+  if (canExtractAudio.value)
+    list.push({
+      id: 'extract-audio',
+      group: 'edit',
+      label: t('action.extractAudio'),
+      hint: t('extract.note'),
+      keys: 'extract audio 音轨',
+    });
+  if (canExtractVideo.value)
+    list.push({
+      id: 'extract-video',
+      group: 'edit',
+      label: t('action.extractVideo'),
+      hint: t('extract.note'),
+      keys: 'extract video 画面',
+    });
+  if (meta.value && meta.value.subtitles.length)
+    list.push({
+      id: 'subs',
+      group: 'view',
+      label: t('action.subs'),
+      hint: meta.value.subtitles.length + ' 条',
+      keys: 'subtitle srt 字幕',
+    });
+  list.push({
+    id: 'meta',
+    group: 'view',
+    label: t('action.meta'),
+    hint: joinParts([
+      meta.value ? meta.value.video && meta.value.video.codec : '',
+      meta.value ? meta.value.audio && meta.value.audio.codec : '',
+    ]),
+    keys: 'metadata info 元数据',
+  });
   list.push({ id: 'b64', group: 'view', label: t('action.b64'), hint: '', keys: 'base64 编码' });
   return list;
 });
@@ -217,15 +302,19 @@ async function pick(picked: File | null) {
   const controller = new AbortController();
   uploadAbort = controller;
   try {
-    const data = await readJson<UploadResponse | ErrorResponse>(await fetch('/api/media-convert/upload?name=' + encodeURIComponent(picked.name), {
-      method: 'POST',
-      body: picked,
-      signal: controller.signal,
-    }));
+    const data = await readJson<UploadResponse | ErrorResponse>(
+      await fetch('/api/media-convert/upload?name=' + encodeURIComponent(picked.name), {
+        method: 'POST',
+        body: picked,
+        signal: controller.signal,
+      }),
+    );
     if (!data.ok) throw new Error(data.error || t('error.title'));
     file.value = data;
     outputName.value = String(data.name || '').replace(/\.[^.]*$/, '');
-    metaTags.value = Object.fromEntries(TAG_KEYS.map((key) => [key, (data.meta && data.meta.tags && data.meta.tags[key]) || '']));
+    metaTags.value = Object.fromEntries(
+      TAG_KEYS.map((key) => [key, (data.meta && data.meta.tags && data.meta.tags[key]) || '']),
+    );
     // A Host that was still starting at mount left the format list empty; the
     // first successful pick fills it in.
     const active = status.value || (await fetchStatus());
@@ -253,11 +342,13 @@ async function runJob(body: Partial<ConvertRequest>, forAction: string) {
   jobAction.value = forAction;
   phase.value = 'converting';
   try {
-    const data = await readJson<{ ok: true; job: Job } | ErrorResponse>(await fetch('/api/media-convert/convert', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: file.value!.id, name: outputName.value.trim() || undefined, ...body }),
-    }));
+    const data = await readJson<{ ok: true; job: Job } | ErrorResponse>(
+      await fetch('/api/media-convert/convert', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: file.value!.id, name: outputName.value.trim() || undefined, ...body }),
+      }),
+    );
     if (!data.ok) throw new Error(data.error || t('error.title'));
     jobId.value = data.job.id;
   } catch (err) {
@@ -270,11 +361,13 @@ async function cancelJob() {
   if (!jobId.value) return;
   cancelling.value = true;
   try {
-    await readJson<{ ok: true } | ErrorResponse>(await fetch('/api/media-convert/cancel', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: jobId.value }),
-    }));
+    await readJson<{ ok: true } | ErrorResponse>(
+      await fetch('/api/media-convert/cancel', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: jobId.value }),
+      }),
+    );
   } catch {
     /* the poll reports the final state anyway */
   }
@@ -288,9 +381,22 @@ function convert() {
 
 function applyTrim() {
   const window = trim.value;
-  if (window.error) { error.value = window.error; return; }
-  if (!window.active) { error.value = t('trim.full'); return; }
-  runJob({ format: format.value, quality: file.value!.kind === 'image' ? quality.value : undefined, trim: { start: window.start, end: window.end } }, 'trim');
+  if (window.error) {
+    error.value = window.error;
+    return;
+  }
+  if (!window.active) {
+    error.value = t('trim.full');
+    return;
+  }
+  runJob(
+    {
+      format: format.value,
+      quality: file.value!.kind === 'image' ? quality.value : undefined,
+      trim: { start: window.start, end: window.end },
+    },
+    'trim',
+  );
 }
 
 function extract(which: 'audio' | 'video') {
@@ -300,11 +406,13 @@ function extract(which: 'audio' | 'video') {
 
 async function reveal(target: string) {
   try {
-    const data = await readJson<{ ok: true } | ErrorResponse>(await fetch('/api/media-convert/reveal', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ file: target }),
-    }));
+    const data = await readJson<{ ok: true } | ErrorResponse>(
+      await fetch('/api/media-convert/reveal', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ file: target }),
+      }),
+    );
     if (!data.ok) error.value = data.error || t('error.title');
   } catch (err) {
     error.value = String((err && (err as Error).message) || err);
@@ -326,7 +434,7 @@ function playSelection() {
   const window = trim.value;
   if (window.error) return;
   const start = window.active ? window.start : 0;
-  const end = window.active ? window.end : (el.duration || 0);
+  const end = window.active ? window.end : el.duration || 0;
   if (stopAt) el.removeEventListener('timeupdate', stopAt);
   const stop = () => {
     if (el.currentTime >= end - 0.03) {
@@ -346,11 +454,13 @@ async function toBase64() {
   b64Busy.value = true;
   error.value = '';
   try {
-    const data = await readJson<Base64Response | ErrorResponse>(await fetch('/api/media-convert/base64', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id: file.value.id }),
-    }));
+    const data = await readJson<Base64Response | ErrorResponse>(
+      await fetch('/api/media-convert/base64', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: file.value.id }),
+      }),
+    );
     if (!data.ok) throw new Error(data.error || t('error.title'));
     b64.value = data;
   } catch (err) {
@@ -365,11 +475,13 @@ async function decode() {
   error.value = '';
   decoded.value = null;
   try {
-    const data = await readJson<DecodedPayload | ErrorResponse>(await fetch('/api/media-convert/decode', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: decodeInput.value }),
-    }));
+    const data = await readJson<DecodedPayload | ErrorResponse>(
+      await fetch('/api/media-convert/decode', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text: decodeInput.value }),
+      }),
+    );
     if (!data.ok) throw new Error(data.error || t('error.title'));
     decoded.value = data;
   } catch (err) {
@@ -383,7 +495,9 @@ async function copy(text: string) {
   try {
     await navigator.clipboard.writeText(text);
     copied.value = true;
-    setTimeout(() => { copied.value = false; }, 1500);
+    setTimeout(() => {
+      copied.value = false;
+    }, 1500);
   } catch {
     error.value = '复制失败，请手动选择文本';
   }
@@ -436,7 +550,9 @@ function changeFile() {
 function closePanel() {
   panelOpen.value = false;
   clearTimeout(closeTimer);
-  closeTimer = setTimeout(() => { action.value = ''; }, 200);
+  closeTimer = setTimeout(() => {
+    action.value = '';
+  }, 200);
 }
 
 function openPanel(id: string) {
@@ -449,12 +565,22 @@ function openPanel(id: string) {
   }
   action.value = id;
   panelOpen.value = false;
-  requestAnimationFrame(() => requestAnimationFrame(() => { panelOpen.value = true; }));
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      panelOpen.value = true;
+    }),
+  );
 }
 
 function toggleAction(id: string) {
-  if (id === 'more') { moreFormats.value = true; return; }
-  if (id === 'less') { moreFormats.value = false; return; }
+  if (id === 'more') {
+    moreFormats.value = true;
+    return;
+  }
+  if (id === 'less') {
+    moreFormats.value = false;
+    return;
+  }
   if (id.startsWith('fmt:')) format.value = id.slice(4);
   if (action.value === id) closePanel();
   else openPanel(id);
@@ -532,7 +658,9 @@ watch([blobUrl, file, format, quality], () => {
         livePreview.value = '';
       }
     };
-    image.onerror = () => { livePreview.value = ''; };
+    image.onerror = () => {
+      livePreview.value = '';
+    };
     image.src = blobUrl.value;
   }, 120);
 });
@@ -543,7 +671,9 @@ watch([phase, jobId], () => {
   if (phase.value !== 'converting' || !jobId.value) return;
   pollTimer = setInterval(async () => {
     try {
-      const data = await readJson<Job & { ok: true } | ErrorResponse>(await fetch('/api/media-convert/job?id=' + encodeURIComponent(jobId.value!)));
+      const data = await readJson<(Job & { ok: true }) | ErrorResponse>(
+        await fetch('/api/media-convert/job?id=' + encodeURIComponent(jobId.value!)),
+      );
       if (!data.ok) return;
       if (data.percent !== null) percent.value = data.percent;
       if (data.state === 'done') {
@@ -616,7 +746,9 @@ watch([action, panelOpen], async () => {
           class="mc-btn mc-btn-ghost"
           style="margin-top: 10px"
           @click.stop="cancelUpload"
-        >{{ t('action.cancel') }}</button>
+        >
+          {{ t('action.cancel') }}
+        </button>
         <span class="mc-muted" style="margin-top: 10px; font-size: 12px">{{ t('page.caps') }}</span>
       </div>
     </template>
@@ -625,20 +757,51 @@ watch([action, panelOpen], async () => {
       <div class="mc-file">
         <div class="mc-file-main">
           <span class="mc-name" :title="file.name">{{ file.name }}</span>
-          <span class="mc-muted">{{ [formatSize(file.size), formatDuration(file.duration)].filter(Boolean).join(' · ') }}</span>
+          <span class="mc-muted">{{
+            [formatSize(file.size), formatDuration(file.duration)].filter(Boolean).join(' · ')
+          }}</span>
         </div>
         <span class="mc-tag">{{ t('kind.' + file.kind) }}</span>
         <button class="mc-btn mc-btn-ghost" :disabled="busy" @click="changeFile">{{ t('action.change') }}</button>
       </div>
 
-      <video v-if="blobUrl && file.kind === 'video'" ref="mediaEl" class="mc-player" :src="blobUrl" controls playsinline preload="metadata"></video>
-      <audio v-else-if="blobUrl && file.kind === 'audio'" ref="mediaEl" :src="blobUrl" controls preload="metadata" style="width: 100%"></audio>
+      <video
+        v-if="blobUrl && file.kind === 'video'"
+        ref="mediaEl"
+        class="mc-player"
+        :src="blobUrl"
+        controls
+        playsinline
+        preload="metadata"
+      ></video>
+      <audio
+        v-else-if="blobUrl && file.kind === 'audio'"
+        ref="mediaEl"
+        :src="blobUrl"
+        controls
+        preload="metadata"
+        style="width: 100%"
+      ></audio>
 
       <template v-if="blobUrl && file.kind === 'image'">
         <div class="mc-tools" style="justify-content: flex-end">
           <span class="mc-muted">{{ t('compare.mode') }}</span>
-          <button class="mc-toggle" :class="{ on: compareMode === 'side' }" :aria-pressed="compareMode === 'side'" @click="compareMode = 'side'">{{ t('compare.side') }}</button>
-          <button class="mc-toggle" :class="{ on: compareMode === 'slider' }" :aria-pressed="compareMode === 'slider'" @click="compareMode = 'slider'">{{ t('compare.slider') }}</button>
+          <button
+            class="mc-toggle"
+            :class="{ on: compareMode === 'side' }"
+            :aria-pressed="compareMode === 'side'"
+            @click="compareMode = 'side'"
+          >
+            {{ t('compare.side') }}
+          </button>
+          <button
+            class="mc-toggle"
+            :class="{ on: compareMode === 'slider' }"
+            :aria-pressed="compareMode === 'slider'"
+            @click="compareMode = 'slider'"
+          >
+            {{ t('compare.slider') }}
+          </button>
         </div>
         <CompareSlider
           v-if="compareMode === 'slider' && afterSrc"
@@ -654,7 +817,13 @@ watch([action, panelOpen], async () => {
           </figure>
           <figure class="mc-fig">
             <img v-if="afterSrc" :key="afterSrc" :src="afterSrc" alt="" decoding="async" />
-            <div v-else class="mc-fig-ph">{{ phase === 'converting' ? t('action.converting') + (percent === null ? '' : ' ' + percent + '%') : t('compare.pending') }}</div>
+            <div v-else class="mc-fig-ph">
+              {{
+                phase === 'converting'
+                  ? t('action.converting') + (percent === null ? '' : ' ' + percent + '%')
+                  : t('compare.pending')
+              }}
+            </div>
             <figcaption class="mc-cap">{{ afterLabel }}</figcaption>
           </figure>
         </div>
@@ -662,8 +831,18 @@ watch([action, panelOpen], async () => {
 
       <div class="mc-search">
         <span class="mc-muted">⌘</span>
-        <input ref="searchEl" v-model="query" :placeholder="t('search.placeholder')" :aria-label="t('search.placeholder')" @keydown="onSearchKey" />
-        <span class="mc-muted" style="font-size: 11px; border: 1px solid currentColor; border-radius: 5px; padding: 0 6px">⌘K</span>
+        <input
+          ref="searchEl"
+          v-model="query"
+          :placeholder="t('search.placeholder')"
+          :aria-label="t('search.placeholder')"
+          @keydown="onSearchKey"
+        />
+        <span
+          class="mc-muted"
+          style="font-size: 11px; border: 1px solid currentColor; border-radius: 5px; padding: 0 6px"
+          >⌘K</span
+        >
       </div>
 
       <div v-if="error" class="mc-error">{{ t('error.title') }}：{{ error }}</div>
@@ -691,94 +870,227 @@ watch([action, panelOpen], async () => {
                   <template v-if="item.id.startsWith('fmt:')">
                     <div class="mc-row">
                       <span class="mc-muted">{{ t('name.label') }}</span>
-                      <input class="mc-name-input" v-model="outputName" :disabled="busy" :placeholder="String(file.name || '').replace(/\.[^.]*$/, '')" :aria-label="t('name.label')" />
+                      <input
+                        class="mc-name-input"
+                        v-model="outputName"
+                        :disabled="busy"
+                        :placeholder="String(file.name || '').replace(/\.[^.]*$/, '')"
+                        :aria-label="t('name.label')"
+                      />
                       <span class="mc-muted">{{ format ? '.' + format : '' }}</span>
                     </div>
                     <div v-if="usesQuality && item.id === 'fmt:' + format" class="mc-row">
                       <span class="mc-muted">{{ t('quality.label') }}</span>
-                      <input type="range" min="10" max="100" step="5" v-model.number="quality" :disabled="busy" :aria-label="t('quality.label')" @input="resetResult" />
+                      <input
+                        type="range"
+                        min="10"
+                        max="100"
+                        step="5"
+                        v-model.number="quality"
+                        :disabled="busy"
+                        :aria-label="t('quality.label')"
+                        @input="resetResult"
+                      />
                       <span class="mc-muted">{{ quality }}</span>
                       <span class="mc-muted">{{ t('quality.hint') }}</span>
                     </div>
                     <div class="mc-row">
-                      <button class="mc-btn mc-btn-primary" :disabled="busy || unavailableTarget(file, format)" @click="convert">{{ t('action.convert') }}</button>
+                      <button
+                        class="mc-btn mc-btn-primary"
+                        :disabled="busy || unavailableTarget(file, format)"
+                        @click="convert"
+                      >
+                        {{ t('action.convert') }}
+                      </button>
                     </div>
-                    <ResultBlock :action-id="item.id" :job-action="jobAction" :result="result" :percent="percent" :converting="phase === 'converting'" :cancelling="cancelling" :cancelled="cancelled" :file="file" :t="t" @cancel="cancelJob" @reveal="reveal" @again="resetResult" />
+                    <ResultBlock
+                      :action-id="item.id"
+                      :job-action="jobAction"
+                      :result="result"
+                      :percent="percent"
+                      :converting="phase === 'converting'"
+                      :cancelling="cancelling"
+                      :cancelled="cancelled"
+                      :file="file"
+                      :t="t"
+                      @cancel="cancelJob"
+                      @reveal="reveal"
+                      @again="resetResult"
+                    />
                   </template>
 
                   <!-- trim -->
                   <template v-else-if="item.id === 'trim'">
                     <div class="mc-row">
                       <span class="mc-muted">{{ t('trim.start') }}</span>
-                      <input class="mc-time" v-model="trimStart" :disabled="busy" inputmode="decimal" placeholder="0:00" :aria-label="t('trim.start')" @input="resetResult" />
+                      <input
+                        class="mc-time"
+                        v-model="trimStart"
+                        :disabled="busy"
+                        inputmode="decimal"
+                        placeholder="0:00"
+                        :aria-label="t('trim.start')"
+                        @input="resetResult"
+                      />
                       <span class="mc-muted">{{ t('trim.end') }}</span>
-                      <input class="mc-time" v-model="trimEnd" :disabled="busy" inputmode="decimal" :placeholder="file.duration ? formatClock(file.duration) : '0:00'" :aria-label="t('trim.end')" @input="resetResult" />
+                      <input
+                        class="mc-time"
+                        v-model="trimEnd"
+                        :disabled="busy"
+                        inputmode="decimal"
+                        :placeholder="file.duration ? formatClock(file.duration) : '0:00'"
+                        :aria-label="t('trim.end')"
+                        @input="resetResult"
+                      />
                       <span class="mc-grow"></span>
                       <span :class="trim.error ? 'mc-error' : 'mc-muted'">{{ trim.error || trimSummary }}</span>
                     </div>
                     <div class="mc-tools">
-                      <button class="mc-btn mc-btn-ghost" :disabled="busy" @click="setTrimFromPlayer('start')">{{ t('trim.setStart') }}</button>
-                      <button class="mc-btn mc-btn-ghost" :disabled="busy" @click="setTrimFromPlayer('end')">{{ t('trim.setEnd') }}</button>
-                      <button class="mc-btn mc-btn-ghost" :disabled="busy || Boolean(trim.error)" @click="playSelection">{{ t('trim.play') }}</button>
+                      <button class="mc-btn mc-btn-ghost" :disabled="busy" @click="setTrimFromPlayer('start')">
+                        {{ t('trim.setStart') }}
+                      </button>
+                      <button class="mc-btn mc-btn-ghost" :disabled="busy" @click="setTrimFromPlayer('end')">
+                        {{ t('trim.setEnd') }}
+                      </button>
+                      <button
+                        class="mc-btn mc-btn-ghost"
+                        :disabled="busy || Boolean(trim.error)"
+                        @click="playSelection"
+                      >
+                        {{ t('trim.play') }}
+                      </button>
                     </div>
                     <div class="mc-row">
                       <span class="mc-muted">{{ t('hint.formats') }}</span>
                       <select class="mc-select" v-model="format" :disabled="busy">
-                        <option v-for="f in formats" :key="f" :value="f" :disabled="unavailableTarget(file, f)">{{ f.toUpperCase() }}</option>
+                        <option v-for="f in formats" :key="f" :value="f" :disabled="unavailableTarget(file, f)">
+                          {{ f.toUpperCase() }}
+                        </option>
                       </select>
-                      <button class="mc-btn mc-btn-primary" :disabled="busy || Boolean(trim.error) || !trim.active || unavailableTarget(file, format)" @click="applyTrim">{{ t('trim.apply') }}</button>
+                      <button
+                        class="mc-btn mc-btn-primary"
+                        :disabled="busy || Boolean(trim.error) || !trim.active || unavailableTarget(file, format)"
+                        @click="applyTrim"
+                      >
+                        {{ t('trim.apply') }}
+                      </button>
                     </div>
-                    <ResultBlock :action-id="item.id" :job-action="jobAction" :result="result" :percent="percent" :converting="phase === 'converting'" :cancelling="cancelling" :cancelled="cancelled" :file="file" :t="t" @cancel="cancelJob" @reveal="reveal" @again="resetResult" />
+                    <ResultBlock
+                      :action-id="item.id"
+                      :job-action="jobAction"
+                      :result="result"
+                      :percent="percent"
+                      :converting="phase === 'converting'"
+                      :cancelling="cancelling"
+                      :cancelled="cancelled"
+                      :file="file"
+                      :t="t"
+                      @cancel="cancelJob"
+                      @reveal="reveal"
+                      @again="resetResult"
+                    />
                   </template>
 
                   <!-- extract a track -->
                   <template v-else-if="item.id === 'extract-audio' || item.id === 'extract-video'">
                     <div class="mc-row">
                       <span class="mc-muted">{{ t('name.label') }}</span>
-                      <input class="mc-name-input" v-model="outputName" :disabled="busy" :placeholder="String(file.name || '').replace(/\.[^.]*$/, '')" :aria-label="t('name.label')" />
+                      <input
+                        class="mc-name-input"
+                        v-model="outputName"
+                        :disabled="busy"
+                        :placeholder="String(file.name || '').replace(/\.[^.]*$/, '')"
+                        :aria-label="t('name.label')"
+                      />
                     </div>
                     <div class="mc-row">
-                      <button class="mc-btn mc-btn-primary" :disabled="busy" @click="extract(item.id === 'extract-audio' ? 'audio' : 'video')">{{ item.id === 'extract-audio' ? t('extract.audio') : t('extract.video') }}</button>
+                      <button
+                        class="mc-btn mc-btn-primary"
+                        :disabled="busy"
+                        @click="extract(item.id === 'extract-audio' ? 'audio' : 'video')"
+                      >
+                        {{ item.id === 'extract-audio' ? t('extract.audio') : t('extract.video') }}
+                      </button>
                       <span class="mc-muted">{{ t('extract.note') }}</span>
                     </div>
-                    <ResultBlock :action-id="item.id" :job-action="jobAction" :result="result" :percent="percent" :converting="phase === 'converting'" :cancelling="cancelling" :cancelled="cancelled" :file="file" :t="t" @cancel="cancelJob" @reveal="reveal" @again="resetResult" />
+                    <ResultBlock
+                      :action-id="item.id"
+                      :job-action="jobAction"
+                      :result="result"
+                      :percent="percent"
+                      :converting="phase === 'converting'"
+                      :cancelling="cancelling"
+                      :cancelled="cancelled"
+                      :file="file"
+                      :t="t"
+                      @cancel="cancelJob"
+                      @reveal="reveal"
+                      @again="resetResult"
+                    />
                   </template>
 
                   <!-- subtitle tracks -->
                   <template v-else-if="item.id === 'subs'">
                     <div v-for="(track, index) in meta!.subtitles" :key="index" class="mc-row">
-                      <span>#{{ track.index }} · {{ track.language || '?' }} · {{ track.codec }}<template v-if="track.title"> · {{ track.title }}</template></span>
-                      <button class="mc-btn mc-btn-ghost" style="margin-left: auto" :disabled="busy" @click="runJob({ mode: 'subtitle', stream: index }, 'subs')">{{ t('sub.extract') }}</button>
+                      <span
+                        >#{{ track.index }} · {{ track.language || '?' }} · {{ track.codec
+                        }}<template v-if="track.title"> · {{ track.title }}</template></span
+                      >
+                      <button
+                        class="mc-btn mc-btn-ghost"
+                        style="margin-left: auto"
+                        :disabled="busy"
+                        @click="runJob({ mode: 'subtitle', stream: index }, 'subs')"
+                      >
+                        {{ t('sub.extract') }}
+                      </button>
                     </div>
-                    <ResultBlock :action-id="item.id" :job-action="jobAction" :result="result" :percent="percent" :converting="phase === 'converting'" :cancelling="cancelling" :cancelled="cancelled" :file="file" :t="t" @cancel="cancelJob" @reveal="reveal" @again="resetResult" />
+                    <ResultBlock
+                      :action-id="item.id"
+                      :job-action="jobAction"
+                      :result="result"
+                      :percent="percent"
+                      :converting="phase === 'converting'"
+                      :cancelling="cancelling"
+                      :cancelled="cancelled"
+                      :file="file"
+                      :t="t"
+                      @cancel="cancelJob"
+                      @reveal="reveal"
+                      @again="resetResult"
+                    />
                   </template>
 
                   <!-- metadata -->
                   <template v-else-if="item.id === 'meta'">
                     <div class="mc-meta-grid">
                       <template v-for="([label, value], index) in containerRows" :key="'c' + index">
-                        <span>{{ label }}</span><span>{{ value || '—' }}</span>
+                        <span>{{ label }}</span
+                        ><span>{{ value || '—' }}</span>
                       </template>
                     </div>
                     <template v-if="chapterRows.length">
                       <div class="mc-meta-head">{{ t('meta.chapters') }}</div>
                       <div class="mc-meta-grid">
                         <template v-for="([label, value], index) in chapterRows" :key="'ch' + index">
-                          <span>{{ label }}</span><span>{{ value || '—' }}</span>
+                          <span>{{ label }}</span
+                          ><span>{{ value || '—' }}</span>
                         </template>
                       </div>
                     </template>
                     <div class="mc-meta-head">{{ t('meta.tracks') }}</div>
                     <div class="mc-meta-grid">
                       <template v-for="([label, value], index) in trackRows" :key="'t' + index">
-                        <span>{{ label }}</span><span>{{ value || '—' }}</span>
+                        <span>{{ label }}</span
+                        ><span>{{ value || '—' }}</span>
                       </template>
                     </div>
                     <template v-if="tagRows.length">
                       <div class="mc-meta-head">{{ t('meta.tags') }}</div>
                       <div class="mc-meta-grid">
                         <template v-for="([label, value], index) in tagRows" :key="'g' + index">
-                          <span>{{ label }}</span><span>{{ value || '—' }}</span>
+                          <span>{{ label }}</span
+                          ><span>{{ value || '—' }}</span>
                         </template>
                       </div>
                     </template>
@@ -790,45 +1102,105 @@ watch([action, panelOpen], async () => {
                       </label>
                     </div>
                     <div class="mc-row">
-                      <button class="mc-btn mc-btn-primary" :disabled="busy" @click="runJob({ mode: 'meta', tags: metaTags }, 'meta')">{{ t('meta.save') }}</button>
+                      <button
+                        class="mc-btn mc-btn-primary"
+                        :disabled="busy"
+                        @click="runJob({ mode: 'meta', tags: metaTags }, 'meta')"
+                      >
+                        {{ t('meta.save') }}
+                      </button>
                     </div>
-                    <ResultBlock :action-id="item.id" :job-action="jobAction" :result="result" :percent="percent" :converting="phase === 'converting'" :cancelling="cancelling" :cancelled="cancelled" :file="file" :t="t" @cancel="cancelJob" @reveal="reveal" @again="resetResult" />
+                    <ResultBlock
+                      :action-id="item.id"
+                      :job-action="jobAction"
+                      :result="result"
+                      :percent="percent"
+                      :converting="phase === 'converting'"
+                      :cancelling="cancelling"
+                      :cancelled="cancelled"
+                      :file="file"
+                      :t="t"
+                      @cancel="cancelJob"
+                      @reveal="reveal"
+                      @again="resetResult"
+                    />
                   </template>
 
                   <!-- base64 -->
                   <template v-else-if="item.id === 'b64'">
                     <div class="mc-tools">
-                      <button class="mc-btn mc-btn-ghost" :disabled="busy || b64Busy" @click="toBase64">{{ b64Busy ? t('b64.encoding') : t('b64.encode') }}</button>
+                      <button class="mc-btn mc-btn-ghost" :disabled="busy || b64Busy" @click="toBase64">
+                        {{ b64Busy ? t('b64.encoding') : t('b64.encode') }}
+                      </button>
                       <span v-if="b64" class="mc-muted">{{ formatSize(b64.size) }} · {{ b64.mime }}</span>
                     </div>
                     <template v-if="b64">
                       <textarea class="mc-b64" rows="4" readonly :value="b64.data"></textarea>
                       <div class="mc-tools">
-                        <button class="mc-btn mc-btn-ghost" @click="copy(b64.data)">{{ copied ? t('b64.copied') : t('b64.copy') }}</button>
-                        <button class="mc-btn mc-btn-ghost" @click="downloadText((file ? file.name : 'media') + '.base64.txt', b64.data)">{{ t('b64.save') }}</button>
+                        <button class="mc-btn mc-btn-ghost" @click="copy(b64.data)">
+                          {{ copied ? t('b64.copied') : t('b64.copy') }}
+                        </button>
+                        <button
+                          class="mc-btn mc-btn-ghost"
+                          @click="downloadText((file ? file.name : 'media') + '.base64.txt', b64.data)"
+                        >
+                          {{ t('b64.save') }}
+                        </button>
                       </div>
                     </template>
                     <div class="mc-sep"></div>
                     <div class="mc-muted">{{ t('b64.decodeTitle') }}</div>
-                    <textarea class="mc-b64" rows="3" v-model="decodeInput" :placeholder="t('b64.placeholder')"></textarea>
+                    <textarea
+                      class="mc-b64"
+                      rows="3"
+                      v-model="decodeInput"
+                      :placeholder="t('b64.placeholder')"
+                    ></textarea>
                     <div class="mc-tools">
-                      <button class="mc-btn mc-btn-ghost" :disabled="decodeBusy || !decodeInput.trim()" @click="decode">{{ decodeBusy ? t('b64.decoding') : t('b64.decode') }}</button>
+                      <button class="mc-btn mc-btn-ghost" :disabled="decodeBusy || !decodeInput.trim()" @click="decode">
+                        {{ decodeBusy ? t('b64.decoding') : t('b64.decode') }}
+                      </button>
                     </div>
                     <template v-if="decoded && decoded.kind === 'text'">
                       <div class="mc-muted">{{ t('b64.textResult') }}</div>
                       <pre class="mc-pre">{{ decoded.text }}</pre>
                       <div class="mc-tools">
-                        <button class="mc-btn mc-btn-ghost" @click="copy(decoded.text)">{{ copied ? t('b64.copied') : t('b64.copy') }}</button>
-                        <button class="mc-btn mc-btn-ghost" @click="downloadText('decoded.txt', decoded.text)">{{ t('b64.save') }}</button>
+                        <button class="mc-btn mc-btn-ghost" @click="copy(decoded.text)">
+                          {{ copied ? t('b64.copied') : t('b64.copy') }}
+                        </button>
+                        <button class="mc-btn mc-btn-ghost" @click="downloadText('decoded.txt', decoded.text)">
+                          {{ t('b64.save') }}
+                        </button>
                       </div>
                     </template>
                     <template v-if="decoded && decoded.kind !== 'text'">
-                      <img v-if="decoded.kind === 'image'" class="mc-player" style="width: auto; max-width: 100%; background: transparent" :src="previewUrl(decoded.file)" alt="" />
-                      <video v-if="decoded.kind === 'video'" class="mc-player" :src="previewUrl(decoded.file)" controls playsinline preload="metadata"></video>
-                      <audio v-if="decoded.kind === 'audio'" :src="previewUrl(decoded.file)" controls preload="metadata" style="width: 100%"></audio>
+                      <img
+                        v-if="decoded.kind === 'image'"
+                        class="mc-player"
+                        style="width: auto; max-width: 100%; background: transparent"
+                        :src="previewUrl(decoded.file)"
+                        alt=""
+                      />
+                      <video
+                        v-if="decoded.kind === 'video'"
+                        class="mc-player"
+                        :src="previewUrl(decoded.file)"
+                        controls
+                        playsinline
+                        preload="metadata"
+                      ></video>
+                      <audio
+                        v-if="decoded.kind === 'audio'"
+                        :src="previewUrl(decoded.file)"
+                        controls
+                        preload="metadata"
+                        style="width: 100%"
+                      ></audio>
                       <span class="mc-path">{{ decoded.file }}</span>
                       <div class="mc-row">
-                        <button class="mc-btn mc-btn-primary" @click="reveal(decoded.file)">{{ t('action.reveal.' + PLATFORM) }}</button>
+                        <button class="mc-btn mc-btn-primary" @click="reveal(decoded.file)">
+                          {{ t('action.reveal.' + PLATFORM) }}
+                        </button>
                       </div>
                     </template>
                   </template>
@@ -839,7 +1211,9 @@ watch([action, panelOpen], async () => {
         </template>
       </template>
 
-      <div v-if="!visible.length" class="mc-muted" style="padding: 24px 0; text-align: center">{{ t('act.empty') }}</div>
+      <div v-if="!visible.length" class="mc-muted" style="padding: 24px 0; text-align: center">
+        {{ t('act.empty') }}
+      </div>
     </template>
 
     <input ref="inputEl" type="file" hidden @change="onPick" />

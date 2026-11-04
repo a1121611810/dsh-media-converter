@@ -9,26 +9,49 @@ export const TAG_KEYS = ['title', 'artist', 'album', 'comment', 'date', 'genre']
 // physically impossible rather than merely unwanted.
 const AUDIO_TARGETS = ['mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus', 'aiff'];
 
-export const PLATFORM = typeof navigator === 'undefined'
-  ? 'mac'
-  : /Windows/i.test(navigator.userAgent)
-    ? 'win'
-    : /Mac/i.test(navigator.userAgent)
-      ? 'mac'
-      : 'linux';
+export const PLATFORM =
+  typeof navigator === 'undefined'
+    ? 'mac'
+    : /Windows/i.test(navigator.userAgent)
+      ? 'win'
+      : /Mac/i.test(navigator.userAgent)
+        ? 'mac'
+        : 'linux';
 
 // What the panel sends to the Host: the panel is the sender, so it declares
 // the shapes it sends.
-export interface ResultPayload { file: string; size: number; kind: MediaKind; text?: string }
-export interface ConvertRequest { id: string; name?: string; format?: string; quality?: number; mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta'; stream?: number; tags?: Record<string, string>; trim?: TrimWindow }
-export interface CancelRequest { id: string }
-export interface RevealRequest { file: string }
-export interface DecodeRequest { text: string }
+export interface ResultPayload {
+  file: string;
+  size: number;
+  kind: MediaKind;
+  text?: string;
+}
+export interface ConvertRequest {
+  id: string;
+  name?: string;
+  format?: string;
+  quality?: number;
+  mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta';
+  stream?: number;
+  tags?: Record<string, string>;
+  trim?: TrimWindow;
+}
+export interface CancelRequest {
+  id: string;
+}
+export interface RevealRequest {
+  file: string;
+}
+export interface DecodeRequest {
+  text: string;
+}
 
 // The decode answer is either plain text or a file the Host wrote; the file
 // answer never carries the 'text' kind, so the panel can tell them apart.
 export type DecodedText = Extract<DecodeResponse, { text: string }>;
-export type DecodedFile = Omit<Extract<DecodeResponse, { file: string }>, 'kind'> & { kind: Exclude<MediaKind, 'text'> };
+export type DecodedFile = Omit<Extract<DecodeResponse, { file: string }>, 'kind'> & {
+  kind: Exclude<MediaKind, 'text'>;
+};
 export type DecodedPayload = DecodedText | DecodedFile;
 
 export function formatSize(bytes: number): string {
@@ -93,7 +116,9 @@ export async function readJson<T>(resp: Response): Promise<T> {
 // Media without a picture still needs a probe; this mirrors the Host's rule so
 // the UI can grey out impossible targets before a request is made.
 export function unavailableTarget(file: UploadResponse | null, target: string): boolean {
-  return Boolean(file && file.kind === 'video' && AUDIO_TARGETS.includes(target) && file.streams && !file.streams.audio);
+  return Boolean(
+    file && file.kind === 'video' && AUDIO_TARGETS.includes(target) && file.streams && !file.streams.audio,
+  );
 }
 
 // The trim window described by the two fields; empty fields mean start/end.
@@ -111,8 +136,9 @@ export function trimWindow({ file, trimStart, trimEnd, t }: TrimInput): TrimStat
   if (!file || file.kind === 'image') return { active: false, start: 0, end: 0, error: '' };
   if (!trimStart.trim() && !trimEnd.trim()) return { active: false, start: 0, end: file.duration || 0, error: '' };
   const start = trimStart.trim() ? parseTimecode(trimStart) : 0;
-  const end = trimEnd.trim() ? parseTimecode(trimEnd) : (file.duration || 0);
-  if (start === null || Number.isNaN(start) || end === null || Number.isNaN(end)) return { active: false, error: t('trim.invalid') };
+  const end = trimEnd.trim() ? parseTimecode(trimEnd) : file.duration || 0;
+  if (start === null || Number.isNaN(start) || end === null || Number.isNaN(end))
+    return { active: false, error: t('trim.invalid') };
   if (!(end > start)) return { active: false, error: t('trim.order') };
   if (file.duration > 0 && end > file.duration + 0.05) return { active: false, error: t('trim.over') };
   return { active: true, start, end, error: '' };

@@ -22,8 +22,24 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { decodeBase64Payload } from './lib/base64.js';
 import {
-  FORMATS, buildArgs, extOf, extractPlan, formatsFor, kindByExt, kindOf, metaArgs, mimeOf, normalizeStderr,
-  normalizeTrim, parseDuration, parseMeta, parseStreams, percentOf, progressSeconds, subtitlePlan, trimArgs,
+  FORMATS,
+  buildArgs,
+  extOf,
+  extractPlan,
+  formatsFor,
+  kindByExt,
+  kindOf,
+  metaArgs,
+  mimeOf,
+  normalizeStderr,
+  normalizeTrim,
+  parseDuration,
+  parseMeta,
+  parseStreams,
+  percentOf,
+  progressSeconds,
+  subtitlePlan,
+  trimArgs,
 } from './lib/plan.js';
 import type { ConvertPlan, MediaKind, MediaMeta, StreamInfo, TrimWindow } from './lib/plan.js';
 import { expandDirs, ffmpegCandidates, imageioPatterns, revealCommand, safeBaseName } from './lib/platform.js';
@@ -48,10 +64,19 @@ interface HostContext {
 // The job as the page sees it while it polls for progress.
 export type JobState = 'running' | 'cancelling' | 'cancelled' | 'done' | 'error';
 export interface Job {
-  id: string; state: JobState; percent: number | null; out: string; size: number;
-  error: string | null; kind: MediaKind; trim: TrimWindow | null;
+  id: string;
+  state: JobState;
+  percent: number | null;
+  out: string;
+  size: number;
+  error: string | null;
+  kind: MediaKind;
+  trim: TrimWindow | null;
 }
-export interface ErrorResponse { ok: false; error: string; }
+export interface ErrorResponse {
+  ok: false;
+  error: string;
+}
 
 // An uploaded file the Host keeps on disk until the job is done.
 interface Upload {
@@ -81,10 +106,23 @@ interface JsonBody {
 
 // The answers of the routes, each built by a small function so the exported
 // type is derived from what is actually sent.
-const statusPayload = (ffmpegPath: string | null, outputDir: string) => ({ ok: true as const, ffmpegPath, outputDir, formats: FORMATS });
+const statusPayload = (ffmpegPath: string | null, outputDir: string) => ({
+  ok: true as const,
+  ffmpegPath,
+  outputDir,
+  formats: FORMATS,
+});
 export type StatusResponse = ReturnType<typeof statusPayload>;
 
-const uploadPayload = (id: string, name: string, kind: MediaKind, duration: number, size: number, streams: StreamInfo, meta: MediaMeta) => ({ ok: true as const, id, name, kind, duration, size, streams, meta });
+const uploadPayload = (
+  id: string,
+  name: string,
+  kind: MediaKind,
+  duration: number,
+  size: number,
+  streams: StreamInfo,
+  meta: MediaMeta,
+) => ({ ok: true as const, id, name, kind, duration, size, streams, meta });
 export type UploadResponse = ReturnType<typeof uploadPayload>;
 
 const base64Payload = (mime: string, size: number) => ({ ok: true as const, mime, size });
@@ -95,7 +133,13 @@ export type Base64Response = ReturnType<typeof base64Payload> & { data: string }
 // The decode route answers with one of two shapes: plain text, or a file it
 // wrote into the output directory.
 const decodeTextPayload = (text: string) => ({ ok: true as const, kind: 'text' as const, text });
-const decodeFilePayload = (kind: MediaKind, file: string, mime: string, size: number) => ({ ok: true as const, kind, file, mime, size });
+const decodeFilePayload = (kind: MediaKind, file: string, mime: string, size: number) => ({
+  ok: true as const,
+  kind,
+  file,
+  mime,
+  size,
+});
 export type DecodeResponse = ReturnType<typeof decodeTextPayload> | ReturnType<typeof decodeFilePayload>;
 
 const errorPayload = (error: string): ErrorResponse => ({ ok: false, error });
@@ -122,7 +166,10 @@ function imageioBinaries(): string[] {
   const out: string[] = [];
   const listDirs = (dir: string): string[] => {
     try {
-      return fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+      return fs
+        .readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
     } catch {
       return [];
     }
@@ -208,7 +255,10 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
 
   const uploads = new Map<string, Upload>();
   const jobs = new Map<string, Job>();
-  const controllers = new Map<string, { controller: AbortController; child: ReturnType<typeof spawn>; killTimer: NodeJS.Timeout | null }>();
+  const controllers = new Map<
+    string,
+    { controller: AbortController; child: ReturnType<typeof spawn>; killTimer: NodeJS.Timeout | null }
+  >();
   const children = new Set<ReturnType<typeof spawn>>();
 
   const webServer = ctx.get('webServer');
@@ -219,7 +269,8 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
   }
   const noFfmpeg: ErrorResponse = {
     ok: false,
-    error: '未找到 ffmpeg：请先安装（brew install ffmpeg / winget install ffmpeg），或用 FFMPEG_PATH / 插件配置 ffmpegPath 指定路径',
+    error:
+      '未找到 ffmpeg：请先安装（brew install ffmpeg / winget install ffmpeg），或用 FFMPEG_PATH / 插件配置 ffmpegPath 指定路径',
   };
 
   const json = (res: ServerResponse, status: number, payload: unknown): void => {
@@ -239,12 +290,16 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
     }
   };
 
-  const insideOutput = (file: unknown): file is string => typeof file === 'string' && file.startsWith(outDir + path.sep);
+  const insideOutput = (file: unknown): file is string =>
+    typeof file === 'string' && file.startsWith(outDir + path.sep);
 
   const uniqueOutput = async (name: string, extension: string, suffix = ''): Promise<string> => {
     const stem = safeBaseName(name) + suffix;
     const candidate = path.join(outDir, `${stem}.${extension}`);
-    const taken = await fsp.stat(candidate).then(() => true, () => false);
+    const taken = await fsp.stat(candidate).then(
+      () => true,
+      () => false,
+    );
     return taken ? path.join(outDir, `${stem}-${Date.now().toString(36)}.${extension}`) : candidate;
   };
 
@@ -253,17 +308,30 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
     const out = await uniqueOutput(name || upload.name, plan.ext, plan.stemSuffix || '');
     const job: Job = {
       id: `j${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-      state: 'running', percent: null, out, size: 0, error: null, kind: plan.kind, trim,
+      state: 'running',
+      percent: null,
+      out,
+      size: 0,
+      error: null,
+      kind: plan.kind,
+      trim,
     };
     jobs.set(job.id, job);
     const span = trim ? trim.end - trim.start : upload.duration;
 
     const args = [
-      '-y', '-hide_banner', '-loglevel', 'error',
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
       ...trimArgs(trim),
-      '-i', upload.path,
+      '-i',
+      upload.path,
       ...plan.args,
-      '-progress', 'pipe:1', '-nostats', out,
+      '-progress',
+      'pipe:1',
+      '-nostats',
+      out,
     ];
     // The AbortSignal is the whole cancel mechanism: aborting kills the ffmpeg
     // process, and the close handler below cleans up what it left behind.
@@ -367,7 +435,12 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
       fs.createReadStream(file, { start, end }).pipe(res);
       return;
     }
-    res.writeHead(200, { 'content-type': mime, 'content-length': size, 'accept-ranges': 'bytes', 'cache-control': 'no-store' });
+    res.writeHead(200, {
+      'content-type': mime,
+      'content-length': size,
+      'accept-ranges': 'bytes',
+      'cache-control': 'no-store',
+    });
     fs.createReadStream(file).pipe(res);
   };
 
@@ -375,15 +448,18 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
     fs.mkdirSync(tmpDir, { recursive: true });
     // Drop stale uploads so a session with many big files does not fill the
     // temp directory. unref() keeps the timer from holding the process open.
-    const pruneTimer = setInterval(() => {
-      const now = Date.now();
-      for (const [id, upload] of uploads) {
-        if (now - upload.at > UPLOAD_TTL_MS) {
-          uploads.delete(id);
-          fs.rm(upload.path, { force: true }, () => {});
+    const pruneTimer = setInterval(
+      () => {
+        const now = Date.now();
+        for (const [id, upload] of uploads) {
+          if (now - upload.at > UPLOAD_TTL_MS) {
+            uploads.delete(id);
+            fs.rm(upload.path, { force: true }, () => {});
+          }
         }
-      }
-    }, 10 * 60 * 1000);
+      },
+      10 * 60 * 1000,
+    );
     pruneTimer.unref();
 
     const disposers = [
@@ -422,21 +498,32 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
             if (!kind) {
               await fsp.rm(file, { force: true }).catch(() => {});
               console.error(`[dsh-media-converter] unrecognised media: ${name} (${written} bytes)`);
-              return json(res, 200, errorPayload('无法识别的媒体文件（支持视频、音频、图片）——文件可能已损坏或格式不支持'));
+              return json(
+                res,
+                200,
+                errorPayload('无法识别的媒体文件（支持视频、音频、图片）——文件可能已损坏或格式不支持'),
+              );
             }
             const upload: Upload = {
-              id, name, path: file, kind,
+              id,
+              name,
+              path: file,
+              kind,
               duration: parseDuration(stderr),
               size: written,
               streams: parseStreams(stderr),
               at: Date.now(),
             };
             uploads.set(id, upload);
-            json(res, 200, uploadPayload(id, name, upload.kind, upload.duration, upload.size, upload.streams, parseMeta(stderr)));
+            json(
+              res,
+              200,
+              uploadPayload(id, name, upload.kind, upload.duration, upload.size, upload.streams, parseMeta(stderr)),
+            );
           } catch (err) {
             // A cancelled or broken upload must not leave its copy behind.
             if (file) await fsp.rm(file, { force: true }).catch(() => {});
-            console.error('[dsh-media-converter] upload failed:', (err instanceof Error ? err.message : err));
+            console.error('[dsh-media-converter] upload failed:', err instanceof Error ? err.message : err);
             json(res, 500, errorPayload(errorText(err)));
           }
         },
@@ -452,7 +539,12 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
             const body = await readJson(req);
             const upload = body.id ? uploads.get(body.id) : undefined;
             if (!upload) return json(res, 200, errorPayload('文件已失效，请重新选择'));
-            const job = await startJob(upload, planFor(upload, body), normalizeTrim(body.trim, upload.duration), String(body.name || '').trim());
+            const job = await startJob(
+              upload,
+              planFor(upload, body),
+              normalizeTrim(body.trim, upload.duration),
+              String(body.name || '').trim(),
+            );
             json(res, 200, { ok: true, job });
           } catch (err) {
             json(res, 200, errorPayload(errorText(err)));
@@ -541,7 +633,11 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
             upload = body.id ? uploads.get(body.id) : undefined;
             if (!upload) return json(res, 200, errorPayload('文件已失效，请重新选择'));
             if (upload.size > MAX_BASE64_BYTES) {
-              return json(res, 200, errorPayload(`文件 ${(upload.size / 1048576).toFixed(1)} MB 超过 Base64 上限（24 MB）`));
+              return json(
+                res,
+                200,
+                errorPayload(`文件 ${(upload.size / 1048576).toFixed(1)} MB 超过 Base64 上限（24 MB）`),
+              );
             }
             mime = mimeOf(upload.name);
           } catch (err) {
@@ -552,9 +648,13 @@ export function apply(ctx: HostContext, config?: { outputDir?: string; ffmpegPat
           // free while it works.
           const payload = base64Payload(mime, upload.size);
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-          res.write(`{"ok":true,"mime":${JSON.stringify(payload.mime)},"size":${payload.size},"data":"data:${mime};base64,`);
+          res.write(
+            `{"ok":true,"mime":${JSON.stringify(payload.mime)},"size":${payload.size},"data":"data:${mime};base64,`,
+          );
           try {
-            await pipeline(fs.createReadStream(upload.path, { highWaterMark: 3 * 65536 }), base64Encoder(), res, { end: false });
+            await pipeline(fs.createReadStream(upload.path, { highWaterMark: 3 * 65536 }), base64Encoder(), res, {
+              end: false,
+            });
           } catch {
             res.destroy();
             return;

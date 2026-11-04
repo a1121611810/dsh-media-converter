@@ -44,7 +44,10 @@ assert.equal(rawMp4.ext, 'mp4');
 assert.ok(rawMp4.bytes.equals(mp4Bytes));
 
 // Base64 of plain text comes back as text, not as a mystery binary file.
-assert.deepEqual(decodeBase64Payload(Buffer.from('你好，世界').toString('base64')), { kind: 'text', text: '你好，世界' });
+assert.deepEqual(decodeBase64Payload(Buffer.from('你好，世界').toString('base64')), {
+  kind: 'text',
+  text: '你好，世界',
+});
 assert.equal(decodeBase64Payload(Buffer.from('hello').toString('base64url')).text, 'hello');
 
 // Unknown binary stays a file instead of being mangled into text.

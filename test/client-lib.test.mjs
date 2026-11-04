@@ -1,7 +1,14 @@
 // The panel's pure helpers: formatting, timecodes, and the trim window.
 // Kept DOM-free so they can be checked without a browser.
 import assert from 'node:assert/strict';
-import { formatClock, formatDuration, formatSize, parseTimecode, trimWindow, unavailableTarget } from '../dist/src/client/lib.js';
+import {
+  formatClock,
+  formatDuration,
+  formatSize,
+  parseTimecode,
+  trimWindow,
+  unavailableTarget,
+} from '../dist/src/client/lib.js';
 
 assert.equal(formatSize(0), '');
 assert.equal(formatSize(512), '512 B');
@@ -28,8 +35,18 @@ const t = (key) => key;
 const video = { kind: 'video', duration: 10, streams: { video: true, audio: false } };
 
 // An empty pair means the whole clip, not an error.
-assert.deepEqual(trimWindow({ file: video, trimStart: '', trimEnd: '', t }), { active: false, start: 0, end: 10, error: '' });
-assert.deepEqual(trimWindow({ file: video, trimStart: '2', trimEnd: '5', t }), { active: true, start: 2, end: 5, error: '' });
+assert.deepEqual(trimWindow({ file: video, trimStart: '', trimEnd: '', t }), {
+  active: false,
+  start: 0,
+  end: 10,
+  error: '',
+});
+assert.deepEqual(trimWindow({ file: video, trimStart: '2', trimEnd: '5', t }), {
+  active: true,
+  start: 2,
+  end: 5,
+  error: '',
+});
 // An inverted or over-long window is refused instead of cutting a surprise range.
 assert.equal(trimWindow({ file: video, trimStart: '5', trimEnd: '2', t }).error, 'trim.order');
 assert.equal(trimWindow({ file: video, trimStart: '0', trimEnd: '99', t }).error, 'trim.over');
