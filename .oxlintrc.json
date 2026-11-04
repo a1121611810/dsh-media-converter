@@ -3,6 +3,9 @@
   "categories": {
     "correctness": "error"
   },
-  "plugins": ["typescript", "oxc", "unicorn", "import", "node"],
-  "ignorePatterns": ["client.js", "client.js.map", "dist"]
+  "plugins": ["typescript", "oxc", "unicorn", "import", "node", "vue"],
+  "options": {
+    "reportUnusedDisableDirectives": "error"
+  },
+  "ignorePatterns": ["client.js", "client.js.map", "dist/**"]
 }

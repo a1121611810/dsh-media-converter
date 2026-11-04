@@ -103,8 +103,9 @@ node test/host.test.mjs           # 真 ffmpeg 端到端：27 种格式矩阵 + 
 
 ## 代码风格
 
-- **[oxlint](https://oxc.rs/docs/guide/usage/linter)**：只开 `correctness` 一类（`suspicious`/`perf`/`style` 全开是 1750 条风格意见，其中一半和这个仓库的写法冲突）；配置在 `.oxlintrc.json`。两处 `no-control-regex` 是故意的（文件名里的控制字符就是要剔掉），在代码里就地豁免。**oxlint 不读 `.vue` 的 `<script>` 块**——`.vue` 由类型检查兜底。
-- **[oxfmt](https://oxc.rs/docs/guide/usage/formatter)**：Prettier 风格，配置在 `.oxfmtrc.json`（单引号、行宽 120）。`client.js`（压缩产物）、`README.md`、`package.json` 不进格式化范围：前者是产物，后两者一格式化就会动中文表格的排版和 npm 的 keywords 顺序。
+- **[oxlint](https://oxc.rs/docs/guide/usage/linter)**：配置在 `.oxlintrc.json`。只开 `correctness` 一类——`suspicious`/`perf`/`style`/`restriction` 全开是 11/13/1750/137 条意见，基本是风格口味，其中 `no-await-in-loop`（上传和转码是**故意**串行的）、`no-underscore-dangle`（`__dshReact` 是 loader 的契约名）和这个仓库的写法正面冲突。插件开 `typescript`/`oxc`/`unicorn`/`import`/`node`/`vue`；`.vue` 的 `<script>` 块会被查（`vue` 插件）。两处 `no-control-regex` 是故意的（文件名里的控制字符就是要剔掉），在代码里就地豁免；`reportUnusedDisableDirectives` 会把失效的豁免报成错——它已经抓到过一条 2024 年留下的死豁免。
+- **[oxfmt](https://oxc.rs/docs/guide/usage/formatter)**：配置在 `.oxfmtrc.json`（单引号、行宽 120、`sortPackageJson: false`——不动已发布的 keywords 顺序）。`client.js`（压缩产物）和 `README.md` 不进格式化范围：前者是产物，后者一格式化就会按字符数给中文表格补列宽（CJK 是双宽字符，补出来的分隔线长短不齐）。`.editorconfig` 让编辑器跟格式化器用同一套缩进和行宽。
+- **类型相关的 lint 规则没开**：`oxlint --type-aware`（需要额外的 `oxlint-tsgolint`）在这个仓库只报出 4 条，全是误报——`const h = React.createElement`、`export const apply = plugin.apply` 这种解引用方法（本来就不依赖 `this`）、测试里故意用的 `new Function`、以及断言里的 `.sort()`。类型层面的问题由 `tsrs` 负责，重复跑一套类型引擎不值。
 
 ```bash
 npm run lint          # oxlint

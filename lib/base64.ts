@@ -52,7 +52,8 @@ export function looksLikeText(bytes: Buffer): boolean {
   if (!bytes || !bytes.length || bytes.includes(0)) return false;
   const text = bytes.toString('utf8');
   if (!Buffer.from(text, 'utf8').equals(bytes)) return false;
-  // oxlint-disable-next-line no-control-regex -- the control characters are what we look for
+  // The control characters are what we look for.
+  // oxlint-disable-next-line no-control-regex
   return !/[\u0001-\u0008\u000b\u000c\u000e-\u001f]/.test(text);
 }
 

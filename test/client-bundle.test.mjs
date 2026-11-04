@@ -21,7 +21,6 @@ globalThis.window = { __ModuleLoader__: { load: (mod) => calls.push(mod) } };
 const source = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8');
 // No document stub: the artifact must survive a document-less load exactly
 // like the Host does when it only evaluates the bundle's contract.
-// eslint-disable-next-line no-new-func -- the artifact is a classic script
 new Function('window', 'globalThis', source)(globalThis.window, globalThis);
 
 assert.equal(calls.length, 1, 'the bundle registers exactly one loader entry');

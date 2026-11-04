@@ -108,7 +108,8 @@ export function safeBaseName(raw: string, platform = process.platform): string {
   const p = pathFor(platform);
   const base = p.basename(String(raw || 'input'));
   let stem = base.replace(/\.[^.]*$/, '') || 'output';
-  // oxlint-disable-next-line no-control-regex -- the control characters are what we strip
+  // The control characters are what we strip.
+  // oxlint-disable-next-line no-control-regex
   stem = stem.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 120) || 'output';
   if (platform === 'win32' && WIN_RESERVED.test(stem)) stem = '_' + stem;
   return stem;
