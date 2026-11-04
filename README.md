@@ -101,6 +101,20 @@ node test/host.test.mjs           # 真 ffmpeg 端到端：27 种格式矩阵 + 
 
 `test/host.test.mjs` 需要本机有 ffmpeg；没有会**失败**（不是跳过——静默跳过等于假绿）。
 
+## 代码风格
+
+- **[oxlint](https://oxc.rs/docs/guide/usage/linter)**：只开 `correctness` 一类（`suspicious`/`perf`/`style` 全开是 1750 条风格意见，其中一半和这个仓库的写法冲突）；配置在 `.oxlintrc.json`。两处 `no-control-regex` 是故意的（文件名里的控制字符就是要剔掉），在代码里就地豁免。**oxlint 不读 `.vue` 的 `<script>` 块**——`.vue` 由类型检查兜底。
+- **[oxfmt](https://oxc.rs/docs/guide/usage/formatter)**：Prettier 风格，配置在 `.oxfmtrc.json`（单引号、行宽 120）。`client.js`（压缩产物）、`README.md`、`package.json` 不进格式化范围：前者是产物，后两者一格式化就会动中文表格的排版和 npm 的 keywords 顺序。
+
+```bash
+npm run lint          # oxlint
+npm run lint:fix      # oxlint --fix
+npm run format        # oxfmt，就地改写
+npm run format:check  # oxfmt --check，只报不改
+```
+
+`npm test` 里已经带上 `lint` 与 `format:check`，所以 CI 和发版都会拦住风格漂移。
+
 ### 发版
 
 ```bash
