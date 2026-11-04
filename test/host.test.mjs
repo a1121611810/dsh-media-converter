@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
-import { apply } from '../index.js';
+import { apply, inject } from '../index.js';
 import { parseDuration } from '../lib/plan.js';
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-out-'));
@@ -31,52 +31,53 @@ apply(
 
 // Minimal IncomingMessage stand-in: the handlers only use method/url/headers and
 // async iteration over the body.
-function fakeReq({ method = 'GET', url = '/', body = null, origin = null } = {}) {
+function fakeReq({ method = 'GET', url = '/', body = null, origin = null, headers = {} } = {}) {
   const req = Readable.from(body ? [body] : []);
   req.method = method;
   req.url = url;
-  req.headers = origin ? { origin } : {};
+  req.headers = { ...headers, ...(origin ? { origin } : {}) };
   return req;
 }
 
 async function call(route, options = {}) {
   const handler = routes.get('/api/media-convert/' + route.split('?')[0]);
   assert.ok(handler, `route ${route} registered`);
-  const res = {
-    status: 0,
-    body: '',
-    writeHead(status) {
-      this.status = status;
-    },
-    end(chunk) {
-      this.body += chunk || '';
-    },
-  };
+  const res = makeRes();
   await handler(fakeReq({ url: '/api/media-convert/' + route, ...options }), res);
-  return { status: res.status, data: JSON.parse(res.body) };
+  await res.done;
+  const body = Buffer.concat(res.chunks).toString('utf8');
+  return { status: res.status, data: JSON.parse(body) };
+}
+
+// A real writable response: the Base64 route streams its payload out, so the
+// handler needs a genuine stream to pipe into.
+function makeRes() {
+  const chunks = [];
+  const res = new Writable({
+    write(chunk, _enc, done) {
+      chunks.push(Buffer.from(chunk));
+      done();
+    },
+  });
+  res.status = 0;
+  res.headers = {};
+  res.chunks = chunks;
+  res.writeHead = (status, headers) => {
+    res.status = status;
+    res.headers = headers || {};
+  };
+  res.done = new Promise((resolve) => res.on('finish', resolve));
+  return res;
 }
 
 // Streaming routes need a real writable response.
 async function fetchBinary(route) {
   const handler = routes.get('/api/media-convert/' + route.split('?')[0]);
   assert.ok(handler, `route ${route} registered`);
-  const chunks = [];
-  const res = new Writable({
-    write(chunk, _enc, done) {
-      chunks.push(chunk);
-      done();
-    },
-  });
-  res.status = 0;
-  res.headers = {};
-  res.writeHead = (status, headers) => {
-    res.status = status;
-    res.headers = headers || {};
-  };
-  const finished = new Promise((resolve) => res.on('finish', resolve));
+  const res = makeRes();
   await handler(fakeReq({ url: '/api/media-convert/' + route }), res);
-  await finished;
-  res.body = Buffer.concat(chunks);
+  await res.done;
+  res.body = Buffer.concat(res.chunks);
   return res;
 }
 
@@ -91,12 +92,18 @@ async function waitJob(job) {
   return current;
 }
 
+// Without this the plugin can apply before the web server exists, take its
+// early return, and register no routes at all.
+assert.deepEqual(inject, ['webServer'], 'the web server is a declared dependency');
+
 const status = await call('status');
 assert.equal(status.data.ok, true);
 assert.deepEqual(status.data.formats.image, ['png', 'jpg', 'webp', 'gif', 'bmp', 'tiff', 'avif']);
 if (!status.data.ffmpegPath) {
-  console.log('host.test.mjs: skipped (no ffmpeg)');
-  process.exit(0);
+  // A silent skip is a green run that tested nothing; CI installs ffmpeg, so
+  // missing it here is a broken environment, not a reason to pass.
+  console.error('host.test.mjs: FAILED — no ffmpeg found (install ffmpeg or set FFMPEG_PATH)');
+  process.exit(1);
 }
 const ffmpeg = status.data.ffmpegPath;
 
@@ -260,8 +267,7 @@ assert.equal(crossOrigin.status, 403);
 
 // A broken input still has a known extension, so the job must fail cleanly and
 // leave no truncated output behind.
-const broken = await call('upload?name=broken.mp4', { method: 'POST', body: Buffer.from('not a video') });
-const brokenJob = await call('convert', { method: 'POST', body: JSON.stringify({ id: broken.data.id, format: 'mp4' }) });
+const broken = await call('upload?name=broken.mp4', { method: 'POST', body: Buffer.from('not a video') });const brokenJob = await call('convert', { method: 'POST', body: JSON.stringify({ id: broken.data.id, format: 'mp4' }) });
 let brokenState = brokenJob.data.job;
 for (let attempt = 0; attempt < 100 && brokenState.state === 'running'; attempt += 1) {
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -270,6 +276,49 @@ for (let attempt = 0; attempt < 100 && brokenState.state === 'running'; attempt 
 assert.equal(brokenState.state, 'error');
 assert.equal(fs.existsSync(brokenState.out), false, 'failed job leaves no output');
 assert.ok(brokenState.error.length > 0);
+
+// --- cancelling a running job ---------------------------------------------
+// A slow encode gives the cancel a wide window: VP9 is far slower than the
+// x264 the other fixtures use.
+const slowClip = path.join(outDir, 'slow.mp4');
+execFileSync(ffmpeg, ['-y', '-loglevel', 'error', '-f', 'lavfi', '-t', '8', '-i', 'testsrc=size=640x360:rate=30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', slowClip]);
+const slowUpload = await call('upload?name=slow.mp4', { method: 'POST', body: fs.readFileSync(slowClip) });
+assert.equal(slowUpload.data.ok, true, JSON.stringify(slowUpload.data));
+const slowJob = await call('convert', { method: 'POST', body: JSON.stringify({ id: slowUpload.data.id, format: 'webm' }) });
+assert.equal(slowJob.data.ok, true, JSON.stringify(slowJob.data));
+
+const cancelled = await call('cancel', { method: 'POST', body: JSON.stringify({ id: slowJob.data.job.id }) });
+assert.equal(cancelled.data.ok, true, JSON.stringify(cancelled.data));
+assert.equal(cancelled.data.state, 'cancelling', 'ffmpeg still has to die');
+
+// The job only reports "cancelled" once the process is really gone and the
+// half-written output is gone with it.
+let cancelState = slowJob.data.job;
+for (let attempt = 0; attempt < 100 && ['running', 'cancelling'].includes(cancelState.state); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  cancelState = (await call('job?id=' + cancelState.id)).data;
+}
+assert.equal(cancelState.state, 'cancelled');
+assert.equal(fs.existsSync(cancelState.out), false, 'cancelled job leaves no output');
+
+const unknownCancel = await call('cancel', { method: 'POST', body: JSON.stringify({ id: 'nope' }) });
+assert.equal(unknownCancel.data.ok, false, 'cancelling an unknown job reports it');
+
+// --- an upload that does not arrive whole ---------------------------------
+// A truncated body would only fail later as an "unrecognisable media file",
+// so it has to be reported as what it is.
+const truncated = await call('upload?name=clip.mp4', {
+  method: 'POST',
+  body: Buffer.from('partial'),
+  headers: { 'content-length': '999999' },
+});
+assert.equal(truncated.data.ok, false, JSON.stringify(truncated.data));
+assert.match(truncated.data.error, /上传不完整/);
+
+// A file ffmpeg cannot read is reported as such, not as a silent failure.
+const garbage = await call('upload?name=clip.xyz', { method: 'POST', body: Buffer.from('not a media file') });
+assert.equal(garbage.data.ok, false, JSON.stringify(garbage.data));
+assert.match(garbage.data.error, /无法识别/);
 
 cleanups.forEach((dispose) => dispose());
 fs.rmSync(outDir, { recursive: true, force: true });

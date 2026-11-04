@@ -43,9 +43,9 @@ jobs:
       # The host test drives real ffmpeg; it skips itself when ffmpeg is absent,
       # and installing it here keeps the release tested for the format matrix.
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: node test/plan.test.mjs
-      - run: node test/base64.test.mjs
-      - run: node test/host.test.mjs
+      # Builds client.js and runs every suite, including the artifact contract:
+      # a stale or broken bundle must not reach npm.
+      - run: npm test
       # No `--provenance` flag: under trusted publishing npm generates the
       # attestation automatically once the repository is public.
       - run: npm publish --loglevel verbose

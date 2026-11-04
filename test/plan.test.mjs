@@ -1,8 +1,8 @@
 // Self-check for the pure planner: `node test/plan.test.mjs`.
 import assert from 'node:assert/strict';
 import {
-  FORMATS, buildArgs, defaultFormat, extractPlan, kindOf, metaArgs, normalizeTrim, parseDuration,
-  parseMeta, parseStreams, percentOf, progressSeconds, subtitlePlan, supportsQuality, trimArgs,
+  FORMATS, buildArgs, defaultFormat, extractPlan, kindOf, metaArgs, normalizeStderr, normalizeTrim,
+  parseDuration, parseMeta, parseStreams, percentOf, progressSeconds, subtitlePlan, supportsQuality, trimArgs,
 } from '../lib/plan.js';
 
 assert.equal(kindOf('movie.MOV'), 'video');
@@ -46,6 +46,11 @@ const stderr = [
 const streams = parseStreams(stderr);
 assert.deepEqual(streams, { video: true, audio: true, videoCodec: 'h264', audioCodec: 'aac', subtitles: [] });
 assert.deepEqual(parseStreams('Stream #0:0: Video: png, rgb24'), { video: true, audio: false, videoCodec: 'png', audioCodec: '', subtitles: [] });
+
+// Windows ffmpeg writes CRLF; the sample is normalised before it is parsed.
+const crlf = stderr.replace(/\n/g, '\r\n');
+assert.equal(normalizeStderr(crlf), stderr);
+assert.equal(parseMeta(normalizeStderr(crlf)).video.pixFmt, 'yuv420p');
 
 assert.deepEqual(extractPlan(streams, 'audio'), { ext: 'm4a', kind: 'audio', args: ['-map', '0:a:0', '-vn', '-c:a', 'copy'] });
 assert.deepEqual(extractPlan(streams, 'video'), { ext: 'mp4', kind: 'video', args: ['-map', '0:v:0', '-an', '-c:v', 'copy'] });

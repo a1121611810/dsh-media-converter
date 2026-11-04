@@ -1,6 +1,6 @@
 {
   "name": "dsh-media-converter",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Local media toolbox for DeepSeek Harness: convert, trim, split tracks, export subtitles, compress images, edit metadata, and Base64 — all through local ffmpeg.",
   "keywords": [
     "dsh",
@@ -36,6 +36,7 @@
   "files": [
     "index.js",
     "client.js",
+    "client.js.map",
     "lib/**/*.js",
     "cordis.patch.yml",
     "locale/*.json",
@@ -54,5 +55,15 @@
         "@deepseek-ai/dsh-client-locale"
       ]
     }
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.10",
+    "vite": "^8.3.5",
+    "vue": "^3.5.44"
+  },
+  "scripts": {
+    "build:client": "vite build && cp dist/client.js client.js && cp dist/client.js.map client.js.map",
+    "test": "npm run build:client && node test/client-bundle.test.mjs && node test/client-lib.test.mjs && node test/platform.test.mjs && node test/plan.test.mjs && node test/base64.test.mjs && node test/host.test.mjs",
+    "check:build": "npm run build:client && git diff --exit-code -- client.js client.js.map"
   }
 }

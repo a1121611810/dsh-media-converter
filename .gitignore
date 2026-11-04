@@ -153,3 +153,6 @@ vite.config.ts.timestamp-*
 
 # npm pack output
 *.tgz
+
+# build intermediates (client.js itself is the committed artifact)
+dist/

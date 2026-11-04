@@ -15,8 +15,16 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | 图片压缩 | 选 JPG / WEBP 时按质量滑杆重编码；右侧实时预览 + 并排/滑块对比 |
 | 元数据 | 查看容器、章节、逐轨参数与全部标签；改写标题/作者/专辑/备注/日期/流派（另存为新文件） |
 | Base64 | 当前文件 → `data:` URL；或粘贴 Base64 还原成文件 / 文本 |
+| 取消 | 转换中随时点「取消」结束 ffmpeg；上传中也能中断传输 |
 
 界面是一个「动作面板」：选文件 → 搜索或点动作 → 参数就地展开 → 结果就地显示。支持 `⌘K` 聚焦搜索、回车执行第一个动作、Esc 收起。
+
+## 大文件
+
+- **不整文件进内存**：上传边收边落盘；Base64 结果边编码边发回；预览走 HTTP Range，拖进度条不会整段下载。
+- **不阻塞宿主**：文件读写全部用异步 API，转码期间 DSH 界面照常响应。
+- **随时可取消**：每个任务带一个 `AbortSignal`，取消即向 ffmpeg 发终止信号并清掉半成品；ffmpeg 要到下一帧才真正退出，这期间界面显示「正在取消…」，退出后才是「已取消」。上传用 `AbortController` 中断传输，服务端不留残余副本。
+- **临时文件会自我清理**：上传的副本放在 `$TMPDIR/dsh-media-toolbox`，超过 2 小时自动删除，插件卸载时也清空。
 
 ## 安装
 
@@ -40,7 +48,10 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 
 ## 依赖
 
-- **ffmpeg**：插件按顺序查找 `config.ffmpegPath` → `FFMPEG_PATH` → `PATH` → `/opt/homebrew/bin`、`/usr/local/bin` → imageio-ffmpeg 自带的静态包。找不到时页面顶部会提示安装方式。
+- **ffmpeg**：插件按顺序查找 `config.ffmpegPath` → `FFMPEG_PATH` → `PATH` → 常见安装目录 → imageio-ffmpeg 自带的静态包。找不到时页面顶部会提示安装方式。
+  - macOS/Linux：`/opt/homebrew/bin`、`/usr/local/bin`；imageio 静态包在 `~/Library/Python/*/lib/python/site-packages/imageio_ffmpeg/binaries` 或 `~/.local/lib/python*/site-packages/...`。
+  - Windows：`PATH` 里找 `ffmpeg.exe`（装在 `C:\ffmpeg\bin` 也认），imageio 静态包在 `%LOCALAPPDATA%\imageio_ffmpeg\binaries` 或 `%APPDATA%\Python\Python*\site-packages\...`。
+  - 手动指定路径时，Windows 下写不写 `.exe` 都行。
 - 没有 ffprobe 也能用：元数据从 `ffmpeg -i` 的输出解析。
 
 ## 配置
@@ -60,26 +71,59 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 ## 开发
 
 ```bash
-node test/plan.test.mjs     # 格式表、参数、元数据解析、裁剪
-node test/base64.test.mjs   # 魔数嗅探、Base64 往返、文本回退
-node test/host.test.mjs     # 真 ffmpeg 端到端：27 种格式矩阵 + 字幕 + 标签改写 + 失败路径
+npm test              # 构建 client.js + 五套自检
+npm run build:client  # 只构建浏览器半边（vite → client.js + sourcemap）
+npm run check:build   # 改了源码却没重新构建时失败（CI 用）
 ```
 
-`test/host.test.mjs` 需要本机有 ffmpeg；没有则自动跳过。
+浏览器半边是**构建产物**：`src/client/` 是源码，`client.js` 提交进仓库（DSH 直接从包目录读它，链接安装不会触发构建）。改了 `src/client/` 之后必须 `npm run build:client`，否则 `check:build` 会红。
+
+```bash
+node test/client-bundle.test.mjs  # 产物契约：loader 握手、React 注入、两个槽位
+node test/plan.test.mjs           # 格式表、参数、元数据解析、裁剪
+node test/base64.test.mjs         # 魔数嗅探、Base64 往返、文本回退
+node test/platform.test.mjs       # ffmpeg 查找顺序、文件管理器命令、文件名规则（含 Windows 分支）
+node test/host.test.mjs           # 真 ffmpeg 端到端：27 种格式矩阵 + 字幕 + 标签改写 + 取消 + 失败路径
+```
+
+`test/host.test.mjs` 需要本机有 ffmpeg；没有会**失败**（不是跳过——静默跳过等于假绿）。
 
 ## 结构
 
 ```
-client.js        页面（动作面板、预览/对比、Base64、元数据编辑）
-index.js         宿主：/api/media-convert/* 路由、ffmpeg 任务、预览与 Base64
-lib/plan.js      格式表、参数生成、元数据解析、裁剪
-lib/base64.js    Base64 嗅探与还原
-test/            三个自检
+src/client/index.js       加载器握手 + React 8 行壳 + 侧边栏图标 + i18n 字典 + CSS
+src/client/App.vue        <media-panel>：状态机、动作面板、预览/对比、Base64、元数据
+src/client/vue/           CompareSlider、ResultBlock（普通 Vue 组件）
+src/client/lib.js         纯函数（格式化/时间码/裁剪窗口）+ fetch 封装，不碰 DOM
+vite.config.js            构建：IIFE + __ModuleLoader__ 握手 + React 走宿主模块表
+client.js                 构建产物（提交进仓库，勿手改）
+index.js                  宿主：/api/media-convert/* 路由、ffmpeg 任务、预览与 Base64
+lib/plan.js               格式表、参数生成、元数据解析、裁剪
+lib/base64.js             Base64 嗅探与还原
+lib/platform.js           ffmpeg 查找、文件管理器、文件名规则（纯函数，跨平台分支可测）
+test/                     五套自检
 ```
+
+React 只剩一个壳：把 `<media-panel>` 挂进槽位并传 `t`。面板本身是 Vue，`shadowRoot: false`（light DOM），样式由壳注入的 `<style>` 提供——Vue 的 `defineCustomElement` 在 light DOM 下不会注入 SFC 样式。
 
 ## 限制
 
 - Base64 单文件上限 24 MB。
 - 裁剪区间必须落在文件时长内；区间无效时按钮不可用。
 - 视频转 GIF 会缩到宽 640、12 fps。
-- 没有取消按钮：转换开始后只能等它结束。
+- 上传的临时副本保留 2 小时后自动删除。
+- Windows 上「在资源管理器中显示」用 `explorer /select,`，macOS 用 `open -R`，Linux 用 `xdg-open`（打开所在目录）。
+
+## 排查
+
+页面打开时会向宿主取一次 `/status`（ffmpeg 路径、输出目录、可用格式）。宿主刚启动时这次请求可能失败，插件会**自动重试**（约 25 秒内最多 10 次），成功后就撤掉提示；选文件时若还没拿到，会再补一次。
+
+上传失败时，**原因会直接显示在选择框上方**（而不是悄悄退回选择框），宿主同时往日志写一行：
+
+```sh
+[dsh-media-converter] upload truncated: big.mp4 got 4194304 of 8388608 bytes   # 传了一半
+[dsh-media-converter] unrecognised media: clip.xyz (16 bytes)                  # ffmpeg 读不了
+[dsh-media-converter] upload failed: aborted                                  # 连接中断
+```
+
+宿主的这些行在 DSH 的日志里；改了 `index.js` 之后**必须重启 DSH**才会生效（运行中的宿主用的是启动时那份代码）。
