@@ -1,8 +1,13 @@
 // DSH Host plugin: local media toolkit — convert, trim, extract tracks, and
 // move media to/from Base64 through ffmpeg.
 //
+// Security has one home: every route asks the composition's `connection`
+// service for a rejection first (the Host/Origin fence plus browser
+// authentication, the same guard the `/api` bridge applies). No connection
+// service means no trusted caller, so requests are refused rather than served.
+//
 // The Web page (client.js) never touches the filesystem: it uploads picked
-// files to this plugin's same-origin routes, the Host runs one ffmpeg process
+// files to this plugin's routes, the Host runs one ffmpeg process
 // per job, and the page polls the job for progress. Results land in
 // ~/Downloads/media-toolbox (config.outputDir overrides it) and are served back
 // for preview from that same directory only.
@@ -65,8 +70,14 @@ interface WebServer {
   getOrigin(): string;
   register(route: WebServerRoute): () => void;
 }
+// Trust surface consumed from the composition's connection service; the
+// browser-side connection package owns the full type.
+interface Connection {
+  requestRejection(request: { headers: IncomingMessage['headers'] }): 401 | 403 | undefined;
+}
 interface HostContext {
   get(key: 'webServer'): WebServer | undefined;
+  get(key: 'connection'): Connection | undefined;
   tools: Tools;
   settings: SettingsForms;
   effect(fn: () => void | (() => void)): void;
@@ -421,16 +432,16 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     res.end(JSON.stringify(payload));
   };
 
-  // Mutating routes are same-origin only: a plain cross-origin POST is a
-  // "simple request" the browser sends without preflight.
-  const sameOrigin = (req: IncomingMessage): boolean => {
-    const origin = req.headers.origin;
-    if (!origin) return true;
-    try {
-      return new URL(origin).host === new URL(webServer.getOrigin()).host;
-    } catch {
-      return false;
-    }
+  // Every route crosses the connection trust fence before it touches the body
+  // or the disk: 403 answers a foreign Host/Origin, 401 a caller without the
+  // browser-session cookie. 503 when the composition owns no connection
+  // service — fail closed, never serve an unauthenticated request.
+  const connection = ctx.get('connection');
+  const rejectUnauthenticated = (req: IncomingMessage, res: ServerResponse): boolean => {
+    const rejection = connection ? connection.requestRejection({ headers: req.headers }) : 503;
+    if (rejection === undefined) return false;
+    json(res, rejection, errorPayload('unauthorized'));
+    return true;
   };
 
   // The preview and the reveal may only reach into the output directory. The
@@ -792,6 +803,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         path: `${PREFIX}/status`,
         handler: (req, res) => {
           if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
+          if (rejectUnauthenticated(req, res)) return;
           json(
             res,
             200,
@@ -804,7 +816,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         path: `${PREFIX}/config`,
         handler: async (req, res) => {
           if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
-          if (!sameOrigin(req)) return json(res, 403, errorPayload('forbidden origin'));
+          if (rejectUnauthenticated(req, res)) return;
           try {
             const body = await readJson(req);
             // Only defined keys are merged; an empty string resets that key to
@@ -851,7 +863,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         path: `${PREFIX}/upload`,
         handler: async (req, res) => {
           if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
-          if (!sameOrigin(req)) return json(res, 403, errorPayload('forbidden origin'));
+          if (rejectUnauthenticated(req, res)) return;
           if (!ffmpeg) return json(res, 200, noFfmpeg);
           let file = '';
           try {
@@ -922,7 +934,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         path: `${PREFIX}/convert`,
         handler: async (req, res) => {
           if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
-          if (!sameOrigin(req)) return json(res, 403, errorPayload('forbidden origin'));
+          if (rejectUnauthenticated(req, res)) return;
           if (!ffmpeg) return json(res, 200, noFfmpeg);
           try {
             const body = await readJson(req);
@@ -945,7 +957,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         path: `${PREFIX}/cancel`,
         handler: async (req, res) => {
           if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
-          if (!sameOrigin(req)) return json(res, 403, errorPayload('forbidden origin'));
+          if (rejectUnauthenticated(req, res)) return;
           try {
             const body = await readJson(req);
             const job = jobs.get(String(body.id || ''));
@@ -976,6 +988,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         path: `${PREFIX}/job`,
         handler: (req, res) => {
           if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
+          if (rejectUnauthenticated(req, res)) return;
           const id = requestUrl(req).searchParams.get('id');
           const job = id ? jobs.get(id) : undefined;
           if (!job) return json(res, 404, errorPayload('任务不存在'));
@@ -987,6 +1000,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         path: `${PREFIX}/preview`,
         handler: async (req, res) => {
           if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
+          if (rejectUnauthenticated(req, res)) return;
           const file = requestUrl(req).searchParams.get('file');
           if (!insideOutput(file)) return json(res, 403, errorPayload('只能预览输出目录里的文件'));
           await serveFile(req, res, file);
@@ -997,7 +1011,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         path: `${PREFIX}/reveal`,
         handler: async (req, res) => {
           if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
-          if (!sameOrigin(req)) return json(res, 403, errorPayload('forbidden origin'));
+          if (rejectUnauthenticated(req, res)) return;
           try {
             const { file } = await readJson(req);
             if (!insideOutput(file)) return json(res, 200, errorPayload('只能打开输出目录里的文件'));
@@ -1014,7 +1028,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         path: `${PREFIX}/base64`,
         handler: async (req, res) => {
           if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
-          if (!sameOrigin(req)) return json(res, 403, errorPayload('forbidden origin'));
+          if (rejectUnauthenticated(req, res)) return;
           let upload: Upload | undefined;
           let mime: string | undefined;
           try {
@@ -1056,7 +1070,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         path: `${PREFIX}/decode`,
         handler: async (req, res) => {
           if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
-          if (!sameOrigin(req)) return json(res, 403, errorPayload('forbidden origin'));
+          if (rejectUnauthenticated(req, res)) return;
           try {
             const body = await readJson(req);
             const payload = decodeBase64Payload(body.text);

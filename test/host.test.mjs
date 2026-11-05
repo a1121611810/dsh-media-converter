@@ -22,10 +22,20 @@ const webServer = {
     return () => routes.delete(route.path);
   },
 };
+// The composition's connection service, reduced to the one call every route
+// makes. It keeps the fence's answers: a foreign Origin is 403 before the
+// cookie is considered, a caller without the session cookie is 401.
+const AUTH_COOKIE = 'authenticated';
+const connection = {
+  requestRejection: ({ headers }) => {
+    if (headers.origin && headers.origin !== 'http://127.0.0.1:65533') return 403;
+    return headers.cookie === AUTH_COOKIE ? undefined : 401;
+  },
+};
 const cleanups = [];
 apply(
   {
-    get: (key) => (key === 'webServer' ? webServer : undefined),
+    get: (key) => (key === 'webServer' ? webServer : key === 'connection' ? connection : undefined),
     tools: {
       register: (definition) => {
         tools.set(definition.name, definition);
@@ -48,11 +58,11 @@ apply(
 
 // Minimal IncomingMessage stand-in: the handlers only use method/url/headers and
 // async iteration over the body.
-function fakeReq({ method = 'GET', url = '/', body = null, origin = null, headers = {} } = {}) {
+function fakeReq({ method = 'GET', url = '/', body = null, origin = null, headers = {}, auth = true } = {}) {
   const req = Readable.from(body ? [body] : []);
   req.method = method;
   req.url = url;
-  req.headers = { ...headers, ...(origin ? { origin } : {}) };
+  req.headers = { ...(auth ? { cookie: AUTH_COOKIE } : {}), ...headers, ...(origin ? { origin } : {}) };
   return req;
 }
 
@@ -502,6 +512,47 @@ const aborted = new AbortController();
 aborted.abort();
 await assert.rejects(() => media.execute({ path: clip, action: 'convert', format: 'mp4' }, { signal: aborted.signal }));
 
+// --- the connection trust fence ---------------------------------------------
+// Every route refuses a caller without the browser-session cookie before it
+// reads a body or touches the disk.
+const unauthenticated = await call('status', { auth: false });
+assert.equal(unauthenticated.status, 401, JSON.stringify(unauthenticated.data));
+
+const unauthenticatedUpload = await call('upload?name=x.mp4', {
+  method: 'POST',
+  body: Buffer.alloc(8, 1),
+  auth: false,
+});
+assert.equal(unauthenticatedUpload.status, 401, JSON.stringify(unauthenticatedUpload.data));
+
+// A composition that owns no connection service must not serve requests at all:
+// the plugin fails closed with 503 instead of accepting an unauthenticated call.
+const bareRoutes = new Map();
+const bareCleanups = [];
+apply(
+  {
+    get: (key) =>
+      key === 'webServer'
+        ? {
+            getOrigin: () => 'http://127.0.0.1:65533',
+            register: (route) => {
+              bareRoutes.set(route.path, route.handler);
+              return () => bareRoutes.delete(route.path);
+            },
+          }
+        : undefined,
+    tools: { register: () => () => {} },
+    settings: { configure: () => () => {}, update: async () => {} },
+    effect: (fn) => bareCleanups.push(fn()),
+  },
+  { outputDir: outDir },
+);
+const bareRes = makeRes();
+await bareRoutes.get('/api/media-convert/status')(fakeReq({ url: '/api/media-convert/status' }), bareRes);
+await bareRes.done;
+assert.equal(bareRes.status, 503, Buffer.concat(bareRes.chunks).toString('utf8'));
+bareCleanups.forEach((dispose) => dispose());
+
 // --- the upload cap ---------------------------------------------------------
 // A body over the cap is refused instead of filling the disk.
 const capRoutes = new Map();
@@ -509,13 +560,18 @@ const capOut = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-cap-'));
 const capCleanups = [];
 apply(
   {
-    get: () => ({
-      getOrigin: () => 'http://127.0.0.1:65533',
-      register: (route) => {
-        capRoutes.set(route.path, route.handler);
-        return () => capRoutes.delete(route.path);
-      },
-    }),
+    get: (key) =>
+      key === 'webServer'
+        ? {
+            getOrigin: () => 'http://127.0.0.1:65533',
+            register: (route) => {
+              capRoutes.set(route.path, route.handler);
+              return () => capRoutes.delete(route.path);
+            },
+          }
+        : key === 'connection'
+          ? connection
+          : undefined,
     tools: { register: () => () => {} },
     settings: { configure: () => () => {}, update: async () => {} },
     effect: (fn) => capCleanups.push(fn()),
