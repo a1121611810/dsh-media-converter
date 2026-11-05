@@ -50,11 +50,13 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 
 ## 安装
 
-已发布到 npm（`dsh-media-converter`）。在 Harness 里用 `plugin_manager` 的 `install_bundle` 装，或在 profile 目录里：
+已发布到 npm（`dsh-media-converter`）。一行装完：
 
 ```sh
-dsh plugin add dsh-media-converter --profile <profile>
+dsh plugin --profile web add dsh-media-converter
 ```
+
+`web` 换成你自己的 profile 名即可。也可以在 Harness 里用 `plugin_manager` 的 `install_bundle` 装。
 
 从源码装（开发用）：`plugin_manager` 的 `install_bundle`，target 指向本仓库目录——它会在 profile 的 `package.json` 里登记包名，并在 `node_modules/` 下建一条软链指向本目录。
 
