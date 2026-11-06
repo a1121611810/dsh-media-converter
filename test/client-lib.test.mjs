@@ -2,10 +2,14 @@
 // Kept DOM-free so they can be checked without a browser.
 import assert from 'node:assert/strict';
 import {
+  CONVERTIBLE_KINDS,
+  defaultTargets,
   formatClock,
   formatDuration,
   formatSize,
+  isConvertible,
   parseTimecode,
+  rowPlan,
   trimWindow,
   unavailableTarget,
 } from '../dist/src/client/lib.js';
@@ -56,5 +60,37 @@ assert.equal(trimWindow({ file: { kind: 'image' }, trimStart: '', trimEnd: '', t
 assert.equal(unavailableTarget(video, 'mp3'), true);
 assert.equal(unavailableTarget({ ...video, streams: { video: true, audio: true } }, 'mp3'), false);
 assert.equal(unavailableTarget(video, 'mp4'), false);
+
+// --- per-kind batch targets ----------------------------------------------
+const table = {
+  video: ['mp4', 'mp3', 'm4a'],
+  audio: ['mp3', 'm4a'],
+  image: ['png', 'jpg'],
+};
+assert.deepEqual([...CONVERTIBLE_KINDS], ['video', 'audio', 'image']);
+assert.equal(isConvertible('video'), true);
+assert.equal(isConvertible('text'), false);
+assert.deepEqual(defaultTargets(table), { video: 'mp4', audio: 'mp3', image: 'png' });
+
+const rows = [
+  { key: 'a', kind: 'video', streams: { video: true, audio: true } },
+  { key: 'b', kind: 'image', streams: { video: true, audio: false } },
+  { key: 'c', kind: 'video', streams: { video: true, audio: false } },
+];
+assert.deepEqual(rowPlan(rows, { video: 'mp3', audio: 'mp3', image: 'png' }), [
+  { key: 'a', target: 'mp3', error: '' },
+  { key: 'b', target: 'png', error: '' },
+  { key: 'c', target: 'mp3', error: 'hint.noAudio' },
+]);
+// A silent video converting to a video format is fine.
+assert.deepEqual(rowPlan([rows[2]], { video: 'mp4', audio: 'mp3', image: 'png' }), [
+  { key: 'c', target: 'mp4', error: '' },
+]);
+// A per-row target overrides the group default; other rows keep it.
+assert.deepEqual(rowPlan(rows, { video: 'mp4', audio: 'mp3', image: 'png' }, { b: 'jpg', c: 'mp4' }), [
+  { key: 'a', target: 'mp4', error: '' },
+  { key: 'b', target: 'jpg', error: '' },
+  { key: 'c', target: 'mp4', error: '' },
+]);
 
 console.log('client-lib.test.mjs: ok');

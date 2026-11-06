@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   FORMATS,
   buildArgs,
+  copyArgs,
   defaultFormat,
+  hardwareFor,
   extractPlan,
   kindOf,
   metaArgs,
@@ -18,6 +20,7 @@ import {
   supportsQuality,
   trimArgs,
 } from '../dist/lib/plan.js';
+import { capacityFor, threadsFor } from '../dist/lib/schedule.js';
 
 assert.equal(kindOf('movie.MOV'), 'video');
 assert.equal(kindOf('clip.gif'), 'image');
@@ -181,5 +184,25 @@ assert.equal(progressSeconds('progress=end'), null);
 assert.equal(percentOf(31, 62), 50);
 assert.equal(percentOf(62, 62), 99); // never claim 100 before the process exits
 assert.equal(percentOf(1, 0), null);
+
+// Copy only when the codecs fit the target container.
+assert.ok(copyArgs('video', 'mp4', { video: { codec: 'h264' }, audio: { codec: 'aac' } }).includes('copy'));
+assert.ok(copyArgs('video', 'webm', { video: { codec: 'vp9' }, audio: { codec: 'opus' } }));
+assert.equal(copyArgs('video', 'mp4', { video: { codec: 'vp9' }, audio: { codec: 'opus' } }), null);
+assert.ok(copyArgs('audio', 'mp3', { video: null, audio: { codec: 'mp3' } }));
+assert.equal(copyArgs('audio', 'mp3', { video: null, audio: { codec: 'aac' } }), null);
+
+// VideoToolbox only for the libx264 containers.
+assert.ok(hardwareFor('video', 'mp4', 10 * 1024 * 1024, 10).args.includes('h264_videotoolbox'));
+assert.deepEqual(hardwareFor('video', 'mp4', 10 * 1024 * 1024, 10).inputArgs, ['-hwaccel', 'videotoolbox']);
+assert.equal(hardwareFor('video', 'webm', 10 * 1024 * 1024, 10), null);
+
+// CPU-aware capacity and thread split.
+assert.equal(capacityFor(0.9, 10), 1);
+assert.equal(capacityFor(0.5, 10), 2);
+assert.equal(capacityFor(0.2, 10), 4);
+assert.equal(capacityFor(0.9, 2), 1);
+assert.equal(threadsFor(1, 1, 10), 0);
+assert.ok(threadsFor(2, 0.5, 10) >= 1);
 
 console.log('plan.test.mjs: ok');

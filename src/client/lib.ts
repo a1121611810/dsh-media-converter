@@ -25,7 +25,22 @@ export interface ResultPayload {
   size: number;
   kind: MediaKind;
   text?: string;
+  copy?: boolean;
+  hardware?: boolean;
 }
+// One queue row, shared by App, FileQueue and QueueGroup.
+export interface QueueRow {
+  key: string;
+  file: File;
+  url: string;
+  checked: boolean;
+  upload: UploadResponse | null;
+  state: string;
+  percent: number | null;
+  result: ResultPayload | null;
+  error: string;
+}
+
 export interface ConvertRequest {
   id: string;
   name?: string;
@@ -142,4 +157,46 @@ export function trimWindow({ file, trimStart, trimEnd, t }: TrimInput): TrimStat
   if (!(end > start)) return { active: false, error: t('trim.order') };
   if (file.duration > 0 && end > file.duration + 0.05) return { active: false, error: t('trim.over') };
   return { active: true, start, end, error: '' };
+}
+
+// --- per-kind batch targets ----------------------------------------------
+export const CONVERTIBLE_KINDS = ['video', 'audio', 'image'] as const;
+export type ConvertibleKind = (typeof CONVERTIBLE_KINDS)[number];
+
+export function isConvertible(kind: MediaKind): kind is ConvertibleKind {
+  return kind === 'video' || kind === 'audio' || kind === 'image';
+}
+
+export function defaultTargets(table: Record<string, string[]>): Record<ConvertibleKind, string> {
+  return {
+    video: (table.video || [])[0] || 'mp4',
+    audio: (table.audio || [])[0] || 'mp3',
+    image: (table.image || [])[0] || 'png',
+  };
+}
+
+// Each row now uses its own type's target. A silent video asked for an
+// audio-only target is named as a skip instead of letting ffmpeg fail.
+export interface BatchRowInput {
+  key: string;
+  kind: MediaKind;
+  streams?: { audio?: boolean } | null;
+}
+export interface BatchRowTarget {
+  key: string;
+  target: string;
+  error: '' | 'hint.noAudio';
+}
+
+export function rowPlan(
+  rows: BatchRowInput[],
+  targets: Record<ConvertibleKind, string>,
+  overrides: Record<string, string> = {},
+): BatchRowTarget[] {
+  return rows.map((row) => {
+    if (!isConvertible(row.kind)) return { key: row.key, target: '', error: '' };
+    const target = overrides[row.key] || targets[row.kind];
+    const noAudio = row.kind === 'video' && AUDIO_TARGETS.includes(target) && !row.streams?.audio;
+    return { key: row.key, target, error: noAudio ? 'hint.noAudio' : '' };
+  });
 }

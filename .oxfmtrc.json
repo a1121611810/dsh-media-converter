@@ -3,5 +3,5 @@
   "singleQuote": true,
   "printWidth": 120,
   "sortPackageJson": false,
-  "ignorePatterns": ["client.js", "client.js.map", "README.md"]
+  "ignorePatterns": ["client.js", "client.js.map", "README.md", ".agents/**"]
 }

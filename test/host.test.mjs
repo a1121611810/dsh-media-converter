@@ -32,10 +32,46 @@ const connection = {
     return headers.cookie === AUTH_COOKIE ? undefined : 401;
   },
 };
+// The PTC batch route is driven through fakes: the model stream yields a
+// program, and the fake runtime calls the route's own media.convert binding.
+// Everything after the binding (plan, job, ffmpeg, response mapping) is real.
+let testUploadId = '';
+let ptcPrompt = '';
+let ptcProgram = '';
+let ptcReasoning;
+const ptcRuntime = {
+  timeout: { defaultMs: 120000, maxMs: 600000 },
+  resolve: (request) => request,
+  run: async (spec) => {
+    ptcProgram = spec.program;
+    const convert = spec.bindings[0].functions.convert;
+    return { value: [await convert({ id: testUploadId, format: 'jpg', quality: 60 })], logs: [] };
+  },
+};
+const llm = {
+  listProviders: () => [{ id: 'test', name: 'Test' }],
+  listModels: async () => [{ provider: 'test', id: 'test', name: 'Test Model' }],
+  resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'low' }, { id: 'high' }] } }),
+  stream: async function* (options) {
+    // A plain string here would produce no completion in the real service.
+    assert.ok(Array.isArray(options.messages[0].content), 'messages carry content blocks');
+    ptcPrompt = options.messages[0].content[0].text;
+    ptcReasoning = options.reasoningEffort;
+    yield {
+      type: 'text-delta',
+      index: 0,
+      text: JSON.stringify({ files: [{ id: testUploadId, format: 'jpg', quality: 60 }] }),
+    };
+    yield { type: 'finish', reason: { kind: 'stop' } };
+  },
+};
+const agentDefaultModel = { currentSelection: () => ({ provider: 'test', model: 'test' }) };
+const sandboxPolicy = { resolve: () => ({ mode: 'read-only', workspaceRoot: outDir }) };
+const services = { webServer, connection, ptcRuntime, llm, agentDefaultModel, sandboxPolicy };
 const cleanups = [];
 apply(
   {
-    get: (key) => (key === 'webServer' ? webServer : key === 'connection' ? connection : undefined),
+    get: (key) => services[key],
     tools: {
       register: (definition) => {
         tools.set(definition.name, definition);
@@ -123,8 +159,8 @@ async function waitJob(job) {
 // early return, and register no routes at all.
 assert.deepEqual(
   inject,
-  ['webServer', 'tools', 'settings'],
-  'the web server, the tool registry, and settings are declared dependencies',
+  ['webServer', 'tools', 'settings', 'connection'],
+  'the web server, the tool registry, settings, and the trust fence are declared dependencies',
 );
 assert.ok(
   settingsCalls.some((call) => call[0] === 'configure' && call[1].auto === true),
@@ -181,6 +217,85 @@ const previewEscape = await fetchBinary(
   'preview?file=' + encodeURIComponent(path.join(outDir, '..', '..', 'etc', 'hosts')),
 );
 assert.equal(previewEscape.status, 403, 'a traversal out of the output directory is refused');
+
+// --- PTC batch route -----------------------------------------------------
+testUploadId = upload.data.id;
+const batch = await call('batch', {
+  method: 'POST',
+  body: JSON.stringify({ ids: [upload.data.id], format: 'jpg', quality: 60, runId: 'testrun' }),
+});
+assert.equal(batch.data.ok, true, JSON.stringify(batch.data));
+assert.equal(batch.data.results.length, 1);
+assert.equal(batch.data.results[0].id, upload.data.id);
+assert.ok(fs.existsSync(batch.data.results[0].output), 'batch output exists');
+assert.equal(batch.data.results[0].kind, 'image');
+assert.ok(batch.data.results[0].size > 0);
+assert.ok(batch.data.modelMs >= 0, 'the batch response carries the model time');
+assert.ok(batch.data.runMs >= 0, 'the batch response carries the conversion time');
+assert.match(ptcProgram, /media\.convert/, 'the host composes the PTC program from the plan');
+assert.match(ptcProgram, new RegExp(upload.data.id), 'the plan carries the selected file');
+assert.match(ptcPrompt, /JSON/);
+assert.match(ptcPrompt, /每个文件恰好一条/);
+assert.match(ptcPrompt, new RegExp('id=' + upload.data.id));
+assert.equal(ptcReasoning, 'low', 'the lowest reasoning effort is requested');
+
+const progress = await call('batch/progress?id=testrun');
+assert.equal(progress.data.ok, true, JSON.stringify(progress.data));
+assert.equal(progress.data.stage, 'done');
+assert.equal(progress.data.items[0].state, 'done');
+assert.equal(progress.data.items[0].percent, 100);
+assert.equal(progress.data.model.name, 'Test Model');
+assert.ok(progress.data.modelMs >= 0);
+
+const modelList = await call('models');
+assert.equal(modelList.data.ok, true);
+assert.equal(modelList.data.default.provider, 'test');
+assert.equal(modelList.data.default.model, 'test');
+assert.equal(modelList.data.default.name, 'Test Model');
+assert.ok(modelList.data.models.some((item) => item.provider === 'test' && item.id === 'test'));
+
+const explicit = await call('batch', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [{ id: testUploadId, format: 'jpg' }],
+    model: { provider: 'test', model: 'test' },
+    quality: 60,
+  }),
+});
+assert.equal(explicit.data.ok, true, JSON.stringify(explicit.data));
+assert.equal(ptcReasoning, 'low');
+
+const unregistered = await call('batch', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: testUploadId, format: 'jpg' }], model: { provider: 'test', model: 'nope' } }),
+});
+assert.equal(unregistered.data.ok, false);
+assert.match(unregistered.data.error, /注册/);
+
+// A program-returned path is never trusted; the host uses the binding's record.
+const realPtcRun = ptcRuntime.run;
+ptcRuntime.run = async (spec) => {
+  await spec.bindings[0].functions.convert({ id: testUploadId, format: 'png' });
+  return { value: [{ id: testUploadId, output: '/etc/passwd' }], logs: [] };
+};
+const smuggled = await call('batch', {
+  method: 'POST',
+  body: JSON.stringify({ ids: [upload.data.id], format: 'png' }),
+});
+assert.equal(smuggled.data.ok, true, JSON.stringify(smuggled.data));
+assert.notEqual(smuggled.data.results[0].output, '/etc/passwd');
+assert.ok(fs.existsSync(smuggled.data.results[0].output));
+ptcRuntime.run = realPtcRun;
+
+// No runtime means a clear stop, never a silent fallback to fixed rules.
+services.ptcRuntime = undefined;
+const noPtc = await call('batch', {
+  method: 'POST',
+  body: JSON.stringify({ ids: [upload.data.id], format: 'jpg' }),
+});
+assert.equal(noPtc.data.ok, false);
+assert.match(noPtc.data.error, /PTC/);
+services.ptcRuntime = ptcRuntime;
 
 const bad = await call('convert', { method: 'POST', body: JSON.stringify({ id: upload.data.id, format: 'mp4' }) });
 assert.equal(bad.data.ok, false); // image sources have no mp4 target
@@ -552,6 +667,39 @@ await bareRoutes.get('/api/media-convert/status')(fakeReq({ url: '/api/media-con
 await bareRes.done;
 assert.equal(bareRes.status, 503, Buffer.concat(bareRes.chunks).toString('utf8'));
 bareCleanups.forEach((dispose) => dispose());
+
+// A plugin can apply before the composition registers the connection service.
+// The route must look it up per request; capturing it at apply time would leave
+// every route refusing with 401/503 for the life of the instance.
+let lateConnection;
+const lateRoutes = new Map();
+const lateCleanups = [];
+apply(
+  {
+    get: (key) => {
+      if (key === 'webServer') {
+        return {
+          getOrigin: () => 'http://127.0.0.1:65533',
+          register: (route) => {
+            lateRoutes.set(route.path, route.handler);
+            return () => lateRoutes.delete(route.path);
+          },
+        };
+      }
+      return key === 'connection' ? lateConnection : undefined;
+    },
+    tools: { register: () => () => {} },
+    settings: { configure: () => () => {}, update: async () => {} },
+    effect: (fn) => lateCleanups.push(fn()),
+  },
+  { outputDir: outDir },
+);
+lateConnection = connection;
+const lateRes = makeRes();
+await lateRoutes.get('/api/media-convert/status')(fakeReq({ url: '/api/media-convert/status' }), lateRes);
+await lateRes.done;
+assert.equal(lateRes.status, 200, Buffer.concat(lateRes.chunks).toString('utf8'));
+lateCleanups.forEach((dispose) => dispose());
 
 // --- the upload cap ---------------------------------------------------------
 // A body over the cap is refused instead of filling the disk.

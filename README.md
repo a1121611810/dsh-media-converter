@@ -1,6 +1,6 @@
 # dsh-media-converter
 
-DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音轨/画面、字幕导出、图片压缩、元数据查看与改写、Base64 编解码。全部在本机用 ffmpeg 完成，文件不出本机。
+DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音轨/画面、字幕导出、图片压缩、元数据查看与改写、Base64 编解码。支持一次处理多个文件，全部在本机用 ffmpeg 完成，文件不出本机。
 
 ![icon](icon.svg)
 
@@ -15,15 +15,36 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | 图片压缩 | 选 JPG / WEBP 时按质量滑杆重编码；右侧实时预览 + 并排/滑块对比 |
 | 元数据 | 查看容器、章节、逐轨参数与全部标签；改写标题/作者/专辑/备注/日期/流派（另存为新文件） |
 | Base64 | 当前文件 → `data:` URL；或粘贴 Base64 还原成文件 / 文本 |
-| 取消 | 转换中随时点「取消」结束 ffmpeg；上传中也能中断传输 |
+| 批量处理 | 按类型分组：视频/音频/图片各自一个目标；文本单独一段、不参与转换；读取中/未识别单独一段；逐组全选/质量、逐行进度/结果/取消 |
+| PTC 调度 | 批量转换可选：在 DSH 已注册模型里选一个（默认跟随主模型），模型只返回每文件 JSON 计划，宿主校验后交给 PTC 沙箱执行；低推理档、分阶段进度；默认关，耗 token |
+| GPU / 直接拷贝 | macOS VideoToolbox 的 H.264 可勾选 GPU 编码（mp4/mov/mkv/flv/ts）；兼容编码/容器直接 `-c copy`，不重编码 |
+| 取消 | 批量中途取消停当前 ffmpeg 并不再排队；单文件任务可随时取消；上传中也能中断传输 |
 
-界面是一个「动作面板」：选文件 → 搜索或点动作 → 参数就地展开 → 结果就地显示。支持 `⌘K` 聚焦搜索、回车执行第一个动作、Esc 收起。
+界面分两层：**队列**是首页，负责一次处理多个文件；点某一行进入**文件详情**，那里是单个文件的操作页。
 
-![媒体工具箱空状态：拖入文件或点击选择，下方显示输出目录](docs/screenshots/panel-empty.png)
+- **队列**：拖入或选择多个文件 → 可转换的默认勾选 → 顶部「批量处理」卡选处理方式（转换 / 提取音频 / 提取画面）、PTC/GPU；目标格式和图片质量在各自的类型组标题里。每一行有自己的上传/处理状态、进度、结果与「显示」；可全选、按组全选、取消勾选、移除、清空（两步确认）。
+- **文件详情**：点某行的「详情」进入。这里是单文件工作台：预览/图片对比、搜索、按「转换 / 编辑 / 查看」分组的动作网格（转格式、裁一段、提取、字幕、元数据、Base64），参数就地展开、结果就地显示。`⌘K` 聚焦搜索，回车执行第一个动作，Esc 收起；「返回队列」保留队列与结果。
+- **处理范围**：批量动作只处理勾选的可转换行；文本、读取中、未识别不参与批量；详情页的动作只处理当前打开的那个文件。PTC 只出现在批量转换面板，且勾选 ≥2 时才可用；打开后才出现模型下拉，进度分“模型决定中”和“转换 N/M”两段；单个文件不走 PTC。
 
-选中一张图片后：左侧原图、右侧实时预览，并排 / 滑块两种对比方式，下方是「转换 / 查看」分组的动作列表。
+## 批量、调度、GPU 与 PTC
 
-![图片前后对比与动作列表](docs/screenshots/image-compare.png)
+- **分组与目标**：视频、音频、图片各自一段，组标题有“默认目标”；每一行还有自己的目标格式下拉，改单行只影响该行。图片段还有质量滑杆。文本单独一段、勾选禁用，详情只保留 Base64；读取中/上传失败单独一段，没有目标、不可批量。
+- **固定规则 vs PTC**：固定规则批量逐行串行（可预测、取消简单），靠 copy 和 GPU 提速；PTC 批量才走自适应 CPU 队列。
+- **自适应 CPU 调度**：[lib/schedule.ts](lib/schedule.ts) 每秒用 `os.cpus()` 的差值采样，EMA 平滑；平滑使用率 >60% 只跑 1 个，35–60% 2 个，<35% 最多 4 个。任务权重：视频 1、音频/图片 0.5、copy 0.25、GPU 0.5；GPU 另限 2 路。容量 >1 时给每个软件编码 ffmpeg 分 `-threads/-filter_threads`；运行中的任务不抢占。
+- **GPU（VideoToolbox）**：macOS 上安装的 ffmpeg 若带 `h264_videotoolbox`，批量卡出现“GPU 编码（VideoToolbox）”。对 mp4/mov/mkv/flv/ts 的 H.264 用硬件编码 + `-hwaccel videotoolbox`；按源码率估 `-b:v/-maxrate/-bufsize`，带 `-allow_sw 1`。WebM/VP9/AV1、图片、音频没有对应硬件编码，仍走 CPU；探测不到就隐藏开关。
+- **直接拷贝**：h264/hevc + aac/mp3 等兼容组合直接 `-c copy`（mp4/mov/mkv/webm/ts 与同编码音频容器），有裁剪或编码不兼容才重编码；行上显示“直接拷贝”。
+- **PTC 可选模型**：默认跟随 DSH 当前主模型；下拉列出已注册模型；显式模型不在目录里会报错，不回退默认。对选中模型取最低推理档，`maxTokens` 6000；模型只返回 `{"files":[{"id","format","quality"}...]}`，宿主校验 id/格式/质量后拼程序交给 PTC 执行。
+- **实测**（10 秒 1080p30 合成样本，机器负载约 4.6；不是你的真实文件）：
+
+  | 路径 | 耗时 | 输出 | VMAF |
+  | --- | --- | --- | --- |
+  | libx264 veryfast CRF 23 | 2.1–2.3 s | 6.35 MB | 95.02 |
+  | h264_videotoolbox 5 Mbps | 2 路并行 3.2 s（每路约 1.6 s） | 6.45 MB | 95.15 |
+  | 直接拷贝 | 0.02 s | 11.48 MB | — |
+
+  结论：可拷贝时最快；GPU 画质与 CPU 接近，CPU 占用/内存明显更低，适合机器本来就很忙时；真实文件、分辨率和负载不同，以现场为准。
+
+> 新界面的截图会在手工验收后补上。
 
 ## 给 Agent 用的工具
 
@@ -75,6 +96,7 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 - **ffmpeg**：插件按顺序查找 `config.ffmpegPath` → `FFMPEG_PATH` → `PATH` → 常见安装目录 → imageio-ffmpeg 自带的静态包。找不到时页面顶部会提示安装方式。
   - macOS/Linux：`/opt/homebrew/bin`、`/usr/local/bin`；imageio 静态包在 `~/Library/Python/*/lib/python/site-packages/imageio_ffmpeg/binaries` 或 `~/.local/lib/python*/site-packages/...`。
   - Windows：`PATH` 里找 `ffmpeg.exe`（装在 `C:\ffmpeg\bin` 也认），imageio 静态包在 `%LOCALAPPDATA%\imageio_ffmpeg\binaries` 或 `%APPDATA%\Python\Python*\site-packages\...`。
+  - macOS GPU 编码需要 ffmpeg 带 `h264_videotoolbox`（本机 imageio 7.1 自带）；插件探测后显示开关，没有就隐藏。
   - 手动指定路径时，Windows 下写不写 `.exe` 都行。
 - 没有 ffprobe 也能用：元数据从 `ffmpeg -i` 的输出解析。
 
@@ -97,7 +119,7 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 - `ffmpegPath`：找不到 ffmpeg 时手动指定。
 - `maxUploadMb`：单次上传上限（默认 2048 MB），超了直接拒绝，不写盘。
 - `composerButton`：是否在输入框工具排显示「媒体工具箱」按钮（默认开）。
-- `groups`：动作面板的模块顺序与显隐（`convert,edit,view`，写进字符串的才显示）。
+- `groups`：文件详情页动作模块的顺序与显隐（`convert,edit,view`，写进字符串的才显示）。
 - 设置页右上角还有版本号显示与「刷新界面」（等同 Ctrl+R）。
 
 插件导出 `Config` schema 供宿主的 settings 服务投影表单（这是唯一的运行时依赖 `@deepseek-ai/schemastery`，由 npm 正常安装）。
@@ -126,11 +148,11 @@ npm run check:build   # 改了源码却没重新构建时失败（CI 用）
 
 ```bash
 node test/client-bundle.test.mjs  # 产物契约：loader 握手、React 注入、两个槽位
-node test/client-lib.test.mjs     # 面板纯函数：格式化、时间码、裁剪窗口
-node test/plan.test.mjs           # 格式表、参数、元数据解析、裁剪
+node test/client-lib.test.mjs     # 面板纯函数：格式化、时间码、裁剪窗口、按类型目标
+node test/plan.test.mjs           # 格式表、参数、元数据解析、裁剪、copy/GPU/容量/线程
 node test/base64.test.mjs         # 魔数嗅探、Base64 往返、文本回退
 node test/platform.test.mjs       # ffmpeg 查找顺序、文件管理器命令、文件名规则、目录归属判定（含 Windows 分支）
-node test/host.test.mjs           # 真 ffmpeg 端到端：27 种格式矩阵 + 字幕 + 标签改写 + 取消 + 失败路径 + Agent 工具 + 上传上限
+node test/host.test.mjs           # 真 ffmpeg 端到端：27 种格式矩阵 + 字幕 + 标签改写 + 取消 + 失败路径 + Agent 工具 + 上传上限 + PTC JSON 计划/模型目录/进度 + copy/GPU
 ```
 
 `test/host.test.mjs` 需要本机有 ffmpeg；没有会**失败**（不是跳过——静默跳过等于假绿）。
@@ -162,13 +184,14 @@ npm run release -- 1.2.0
 
 ```
 src/client/index.ts       加载器握手 + React 8 行壳 + 侧边栏图标 + i18n 字典 + CSS
-src/client/App.vue        <media-panel>：状态机、动作面板、预览/对比、Base64、元数据
-src/client/vue/           CompareSlider、ResultBlock（普通 Vue 组件）
+src/client/App.vue        <media-panel>：队列首页 + 文件详情、上传/批量/单文件任务、预览/对比、Base64、元数据
+src/client/vue/           FileQueue（队列行）、QueueGroup（按类型分组的组头）、BatchCard（批量任务卡）、ActionGrid、CompareSlider、ResultBlock
 src/client/lib.ts         纯函数（格式化/时间码/裁剪窗口）+ fetch 封装，不碰 DOM
 vite.config.ts            构建：IIFE + __ModuleLoader__ 握手 + React 走宿主模块表
 client.js                 构建产物（提交进仓库，勿手改）
-index.ts                  宿主：/api/media-convert/* 路由、ffmpeg 任务、预览与 Base64、Agent 工具 media_toolbox
-lib/plan.ts               格式表、参数生成、元数据解析、裁剪（也定义面板要用的媒体类型）
+index.ts                  宿主：/api/media-convert/* 路由、ffmpeg 任务、PTC 模型目录/计划/进度、自适应队列、GPU 探测、预览与 Base64、Agent 工具 media_toolbox
+lib/plan.ts               格式表、参数生成（含 copy/GPU/线程）、元数据解析、裁剪（也定义面板要用的媒体类型）
+lib/schedule.ts           自适应容量、任务权重、每任务线程数（纯函数）
 lib/base64.ts             Base64 嗅探与还原
 lib/platform.ts           ffmpeg 查找、文件管理器、文件名规则（纯函数，跨平台分支可测）
 test/                     六套自检（.mjs，跑编译产物）
@@ -183,6 +206,11 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位并传 `t`。面板本�
 - 上传单文件上限 2048 MB（`maxUploadMb` 可调）。
 - 裁剪区间必须落在文件时长内；区间无效时按钮不可用。
 - 视频转 GIF 会缩到宽 640、12 fps。
+- 批量按类型分组：视频/音频/图片各自一个目标；文本单独一段、不参与转换；读取中/未识别不可批量。
+- 批量提取只处理视频；不适用或没有音轨的行标「跳过」，不算失败。
+- 固定规则批量逐行串行；PTC 批量走自适应 CPU 队列（1–4 路，GPU 另限 2 路）；上传中或处理中不能增删文件。
+- PTC 只用于批量转换且至少 2 个文件；默认关，开关不随页面保存。可选已注册模型；模型只返回每文件计划；每次运行仍会调用一次主模型（消耗 token）；执行时限默认 2 分钟、最长 10 分钟，超时会整批中止。
+- PTC 不提供改分辨率、合并或 remux 参数；GPU 只覆盖 H.264 的 mp4/mov/mkv/flv/ts；直接拷贝只覆盖兼容的编码/容器矩阵。
 - 上传的临时副本保留 2 小时后自动删除。
 - Windows 上「在资源管理器中显示」用 `explorer /select,`，macOS 用 `open -R`，Linux 用 `xdg-open`（打开所在目录）。
 
@@ -197,5 +225,7 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位并传 `t`。面板本�
 [dsh-media-converter] unrecognised media: clip.xyz (16 bytes)                  # ffmpeg 读不了
 [dsh-media-converter] upload failed: aborted                                  # 连接中断
 ```
+
+PTC 批量在点「开始处理」时才检查运行时与模型服务：缺任何一个会立即在批量卡里报错，不会退回固定规则。运行中关闭页面会中止 PTC 与在跑的 ffmpeg。
 
 宿主的这些行在 DSH 的日志里；改了 `index.ts` 之后必须 `npm run build:host` 并**重启 DSH**才会生效（运行中的宿主用的是启动时那份代码）。

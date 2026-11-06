@@ -79,6 +79,14 @@ export interface ConvertPlan {
   ext: string;
   kind: MediaKind;
   args: string[];
+  // Input options that must sit before -i (e.g. -hwaccel videotoolbox).
+  inputArgs?: string[];
+  // True when the job only rewrites the container.
+  copy?: boolean;
+  // True when the video encoder is Apple VideoToolbox.
+  hardware?: boolean;
+  // 0 / undefined lets ffmpeg pick its own thread count.
+  threads?: number;
   stemSuffix?: string;
 }
 
@@ -242,6 +250,96 @@ const IMAGE: Record<string, string[]> = {
 // Lossy formats only: the UI shows its quality control for exactly these.
 export function supportsQuality(kind: MediaKind, format: string): boolean {
   return kind === 'image' && (format === 'jpg' || format === 'webp');
+}
+
+// Split one CPU across concurrent ffmpeg jobs; 0 lets ffmpeg choose.
+export function threadArgs(threads?: number): string[] {
+  return threads && threads > 1 ? ['-threads', String(threads), '-filter_threads', String(threads)] : [];
+}
+
+// Container rewrites that do not re-encode. The video/audio codec matrix is
+// deliberately narrow: unknown codecs re-encode instead of risking a broken
+// output. A trim window never copies (keyframe seeking would be imprecise).
+const COPY_AUDIO: Record<string, string> = {
+  mp3: 'mp3',
+  m4a: 'aac',
+  aac: 'aac',
+  flac: 'flac',
+  wav: 'pcm_s16le',
+  ogg: 'vorbis',
+  opus: 'opus',
+  aiff: 'pcm_s16be',
+};
+const COPY_VIDEO: Record<string, { video: string[]; audio: string[]; extra?: string[] }> = {
+  mp4: { video: ['h264', 'hevc'], audio: ['aac', 'mp3'], extra: ['-movflags', '+faststart'] },
+  mov: { video: ['h264', 'hevc'], audio: ['aac', 'mp3'] },
+  mkv: { video: ['h264', 'hevc', 'vp9', 'av1'], audio: ['aac', 'opus', 'vorbis', 'mp3', 'flac'] },
+  webm: { video: ['vp8', 'vp9', 'av1'], audio: ['opus', 'vorbis'] },
+  ts: { video: ['h264', 'hevc'], audio: ['aac', 'mp3'], extra: ['-f', 'mpegts'] },
+};
+
+export function copyArgs(kind: MediaKind, format: string, meta: MediaMeta | null | undefined): string[] | null {
+  if (!meta) return null;
+  const video = String(meta.video?.codec || '').toLowerCase();
+  const audio = String(meta.audio?.codec || '').toLowerCase();
+  if (kind === 'video' && (format === 'mp3' || format === 'm4a') && audio) {
+    if ((format === 'mp3' && audio === 'mp3') || (format === 'm4a' && audio === 'aac')) {
+      return ['-vn', '-map', '0:a:0?', '-c:a', 'copy'];
+    }
+    return null;
+  }
+  if (kind === 'audio' && COPY_AUDIO[format] && audio === COPY_AUDIO[format]) {
+    const args = ['-vn', '-map', '0:a:0?', '-c:a', 'copy'];
+    if (format === 'aac') args.push('-f', 'adts');
+    return args;
+  }
+  const rule = COPY_VIDEO[format];
+  if (kind !== 'video' || !rule || !video || !rule.video.includes(video)) return null;
+  if (audio && !rule.audio.includes(audio)) return null;
+  const args = ['-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy'];
+  if (format === 'mp4' && video === 'hevc') args.push('-tag:v', 'hvc1');
+  if (rule.extra) args.push(...rule.extra);
+  return args;
+}
+
+// Apple VideoToolbox H.264. Only the containers that currently use libx264
+// are eligible; the quality/bitrate estimate is explained in the UI.
+const HW_AUDIO: Record<string, string[]> = {
+  mp4: ['-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'],
+  mov: ['-c:a', 'aac', '-b:a', '192k'],
+  mkv: ['-c:a', 'aac', '-b:a', '192k'],
+  flv: ['-c:a', 'aac', '-b:a', '128k', '-ar', '44100'],
+  ts: ['-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts'],
+};
+
+export function hardwareFor(
+  kind: MediaKind,
+  format: string,
+  size: number,
+  duration: number,
+): { args: string[]; inputArgs: string[] } | null {
+  const audio = HW_AUDIO[format];
+  if (kind !== 'video' || !audio) return null;
+  const totalKbps = duration > 0 ? (size * 8) / duration / 1000 : 0;
+  const videoKbps = Math.min(12000, Math.max(1500, Math.round(totalKbps - 192)));
+  return {
+    inputArgs: ['-hwaccel', 'videotoolbox'],
+    args: [
+      '-c:v',
+      'h264_videotoolbox',
+      '-b:v',
+      videoKbps + 'k',
+      '-maxrate',
+      Math.round(videoKbps * 1.5) + 'k',
+      '-bufsize',
+      String(videoKbps * 2) + 'k',
+      '-allow_sw',
+      '1',
+      '-pix_fmt',
+      'yuv420p',
+      ...audio,
+    ],
+  };
 }
 
 // 1..100 user quality -> mjpeg qscale (2 best .. 31 worst) or libwebp quality.

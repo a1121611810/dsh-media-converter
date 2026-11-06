@@ -59,7 +59,7 @@ const NS = 'media-convert';
 const ZH: Record<string, string> = {
   'nav.label': '媒体工具箱',
   'page.title': '媒体工具箱',
-  'page.subtitle': '转换、裁剪、提取音轨、图片压缩、Base64——都在本机完成，文件不出本机。',
+  'page.subtitle': '转换、裁剪、提取音轨、字幕、元数据、Base64——一次可以处理多个文件，全部在本机完成。',
   'page.caps': '转换 · 裁剪 · 提取音轨 · 字幕 · 元数据 · Base64',
   'drop.title': '拖入文件，或点击选择',
   'drop.hint': '视频 · 音频 · 图片',
@@ -80,6 +80,7 @@ const ZH: Record<string, string> = {
   'action.again': '再转一个',
   'action.toFormat': '转成 %s',
   'action.moreFormats': '更多格式…',
+  'action.moreFormatsCount': '%s 种',
   'action.less': '收起',
   'action.trim': '裁一段',
   'action.extractAudio': '提取音频',
@@ -98,6 +99,7 @@ const ZH: Record<string, string> = {
   'error.title': '出错了',
   'error.noffmpeg': '未找到 ffmpeg。先运行 brew install ffmpeg，或用 FFMPEG_PATH 指定路径。',
   'error.network': '无法连接到本地服务，请确认插件已启用。',
+  'error.service': '本地服务拒绝了请求：%s。请重启 DSH 后再试。',
   'footer.out': '输出目录',
   'hint.formats': '输出格式',
   'name.label': '文件名',
@@ -214,12 +216,87 @@ const ZH: Record<string, string> = {
   'settings.groups.show': '显示',
   'settings.groups.up': '上移',
   'settings.groups.down': '下移',
+  'queue.file': '文件',
+  'queue.kind': '类型',
+  'queue.duration': '时长',
+  'queue.size': '大小',
+  'queue.status': '状态',
+  'queue.all': '全选',
+  'queue.selected': '已选 %s / %s',
+  'queue.select': '选择 %s',
+  'queue.add': '添加文件',
+  'queue.clear': '清空',
+  'queue.confirmClear': '确认清空',
+  'queue.emptyTitle': '拖入文件，或点击选择',
+  'queue.emptyHint': '视频 · 音频 · 图片，可一次选多个',
+  'queue.choose': '选择文件',
+  'queue.privacy': '全部在本机用 ffmpeg 完成，文件不出本机。',
+  'queue.dropNow': '松开以添加文件',
+  'queue.cancelUpload': '取消上传',
+  'item.uploading': '读取中…',
+  'item.ready': '等待',
+  'item.converting': '处理中…',
+  'item.cancelling': '正在取消…',
+  'item.cancelled': '已取消',
+  'item.done': '完成',
+  'item.copy': '直接拷贝',
+  'item.gpu': 'GPU 编码',
+  'item.failed': '失败',
+  'item.skipped': '跳过',
+  'item.details': '详情',
+  'item.reveal': '显示',
+  'item.remove': '移除 %s',
+  'batch.title': '批量处理',
+  'batch.count': '%s 个文件',
+  'batch.operation': '处理方式',
+  'batch.convert': '转换',
+  'batch.audio': '提取音频',
+  'batch.video': '提取画面',
+  'batch.format': '目标格式',
+  'batch.quality': '图片质量',
+  'batch.start': '开始处理 %s 个文件',
+  'batch.running': '正在处理 %s/%s',
+  'batch.cancel': '取消',
+  'batch.none': '勾选要处理的文件',
+  'batch.skip': '跳过',
+  'batch.missing': '模型没有返回这个文件',
+  'batch.notApplicable': '不适用',
+  'batch.ptcInfo': '说明',
+  'batch.ptcOnlyBatch': 'PTC 只用于至少 2 个文件的批量转换',
+  'batch.ptcOff': '关闭（默认）：固定规则，快，不花 token。',
+  'batch.timing': '模型 %s 秒 · 转换 %s 秒',
+  'batch.target': '目标',
+  'batch.notConvert': '不参与转换',
+  'queue.pending': '读取中/未识别',
+  'queue.pendingNote': '正在读取或未能识别，不能批量处理',
+  'queue.textNoBatch': '不参与转换，可进详情转 Base64',
+  'queue.selectGroup': '全选 %s',
+  'queue.defaultTarget': '默认目标',
+  'queue.rowTargetFor': '目标 %s',
+  'batch.gpu': 'GPU 编码（VideoToolbox）',
+  'batch.gpuHint': '用 Apple 媒体引擎，速度快、CPU 占用低；画质/体积与软件编码不同',
+  'ptc.model': '模型',
+  'ptc.modelDefault': '跟随 DSH 默认',
+  'ptc.modelHint': '默认用 DSH 当前主模型；换一个更快的已注册模型可以缩短等待',
+  'ptc.modelLoading': '读取模型中…',
+  'ptc.modelFailed': '模型列表读取失败，仍可用默认',
+  'ptc.planning': '模型决定中 · %s 秒 · 已输出 %s 字',
+  'ptc.converting': '转换 %s/%s（自适应并发）',
+  'batch.noAudio': '勾选里没有带音轨的视频',
+  'batch.noVideo': '勾选里没有视频',
+  'extract.visualNote': '直接拷贝画面，不重新编码',
+  'detail.back': '返回队列',
+  'detail.recent': '最近输出',
+  'ptc.label': '用 DSH PTC 调度',
+  'ptc.running': 'PTC 正在调度…',
+  'ptc.note':
+    '关闭（默认）：这批任务由插件按每类文件的目标直接跑。快，不花 token。\n打开：主模型只返回每个文件的格式/质量计划（JSON），插件把它拼成程序交给 DSH PTC 在沙箱执行。会消耗 token；通常会多花几秒。\n适合需要逐文件调整的批次；统一转换关着更快。只影响「转成 X」；裁剪、提取、字幕、元数据仍按固定规则。\n大批量慎用：PTC 有执行时限（默认 2 分钟，最多 10 分钟），超时会整批中止。',
   'settings.groups.hint': '勾选控制显示，箭头调整顺序；隐藏的模块在面板中不显示。',
 };
 const EN: Record<string, string> = {
   'nav.label': 'Media Tools',
   'page.title': 'Media Toolbox',
-  'page.subtitle': 'Convert, trim, split tracks, compress images, and move files to/from Base64 — all locally.',
+  'page.subtitle': 'Convert, trim, split tracks, subtitles, metadata, and Base64 — several files at once, all locally.',
   'page.caps': 'convert · trim · split tracks · subtitles · metadata · Base64',
   'drop.title': 'Drop a file here, or click to choose',
   'drop.hint': 'video · audio · image',
@@ -240,6 +317,7 @@ const EN: Record<string, string> = {
   'action.again': 'Do it again',
   'action.toFormat': 'Convert to %s',
   'action.moreFormats': 'More formats…',
+  'action.moreFormatsCount': '%s more',
   'action.less': 'Show less',
   'action.trim': 'Trim a clip',
   'action.extractAudio': 'Extract audio',
@@ -258,6 +336,7 @@ const EN: Record<string, string> = {
   'error.title': 'Something went wrong',
   'error.noffmpeg': 'ffmpeg not found. Run `brew install ffmpeg`, or point FFMPEG_PATH at it.',
   'error.network': 'Cannot reach the local service; check that the plugin is enabled.',
+  'error.service': 'The local service refused the request: %s. Restart DSH and try again.',
   'footer.out': 'Output folder',
   'hint.formats': 'Output format',
   'name.label': 'File name',
@@ -374,6 +453,81 @@ const EN: Record<string, string> = {
   'settings.groups.show': 'Show',
   'settings.groups.up': 'Up',
   'settings.groups.down': 'Down',
+  'queue.file': 'File',
+  'queue.kind': 'Type',
+  'queue.duration': 'Duration',
+  'queue.size': 'Size',
+  'queue.status': 'Status',
+  'queue.all': 'Select all',
+  'queue.selected': '%s of %s selected',
+  'queue.select': 'Select %s',
+  'queue.add': 'Add files',
+  'queue.clear': 'Clear',
+  'queue.confirmClear': 'Confirm clear',
+  'queue.emptyTitle': 'Drop files, or click to choose',
+  'queue.emptyHint': 'Video · audio · image — multiple files at once',
+  'queue.choose': 'Choose files',
+  'queue.privacy': 'Everything runs locally with ffmpeg; files never leave this machine.',
+  'queue.dropNow': 'Release to add files',
+  'queue.cancelUpload': 'Cancel uploads',
+  'item.uploading': 'Reading…',
+  'item.ready': 'Queued',
+  'item.converting': 'Working…',
+  'item.cancelling': 'Cancelling…',
+  'item.cancelled': 'Cancelled',
+  'item.done': 'Done',
+  'item.copy': 'Direct copy',
+  'item.gpu': 'GPU encoded',
+  'item.failed': 'Failed',
+  'item.skipped': 'Skipped',
+  'item.details': 'Details',
+  'item.reveal': 'Show',
+  'item.remove': 'Remove %s',
+  'batch.title': 'Batch',
+  'batch.count': '%s files',
+  'batch.operation': 'Operation',
+  'batch.convert': 'Convert',
+  'batch.audio': 'Extract audio',
+  'batch.video': 'Extract video',
+  'batch.format': 'Target',
+  'batch.quality': 'Image quality',
+  'batch.start': 'Process %s files',
+  'batch.running': 'Processing %s/%s',
+  'batch.cancel': 'Cancel',
+  'batch.none': 'Check the files to process',
+  'batch.skip': 'Skipped',
+  'batch.missing': 'The model returned no result for this file',
+  'batch.notApplicable': 'Not applicable',
+  'batch.ptcInfo': 'Details',
+  'batch.ptcOnlyBatch': 'PTC is for batch conversion of at least 2 files',
+  'batch.ptcOff': 'Off (default): fixed rules, fast, no tokens.',
+  'batch.timing': 'Model %ss · convert %ss',
+  'batch.target': 'Target',
+  'batch.notConvert': 'not converted',
+  'queue.pending': 'Reading / unrecognised',
+  'queue.pendingNote': 'Still reading or not recognised; not batchable',
+  'queue.textNoBatch': 'Not converted; open details for Base64',
+  'queue.selectGroup': 'Select all %s',
+  'queue.defaultTarget': 'Default target',
+  'queue.rowTargetFor': 'Target for %s',
+  'batch.gpu': 'GPU encoding (VideoToolbox)',
+  'batch.gpuHint': 'Uses the Apple media engine: faster, lower CPU. Quality and size differ from software encoding.',
+  'ptc.model': 'Model',
+  'ptc.modelDefault': 'Follow DSH default',
+  'ptc.modelHint': 'Defaults to the DSH model; a faster registered model shortens the wait.',
+  'ptc.modelLoading': 'Loading models…',
+  'ptc.modelFailed': 'Could not load the model list; the default still works',
+  'ptc.planning': 'Planning · %ss · %s chars',
+  'ptc.converting': 'Converting %s/%s (adaptive)',
+  'batch.noAudio': 'No video with audio is selected',
+  'batch.noVideo': 'No video is selected',
+  'extract.visualNote': 'Stream copy — no re-encode',
+  'detail.back': 'Back to queue',
+  'detail.recent': 'Latest output',
+  'ptc.label': 'Use DSH PTC scheduling',
+  'ptc.running': 'PTC is scheduling…',
+  'ptc.note':
+    'Off (default): the plugin runs this batch with the target of each kind. Fast, no tokens.\nOn: the main model only returns a per-file format/quality plan (JSON); the plugin composes it into a program and runs it in the DSH PTC sandbox. Costs tokens and usually a few seconds.\nBest for batches that need per-file adjustments; for one uniform format, off is faster. Only affects "Convert to X"; trim, extract, subtitles and metadata keep the fixed rules.\nLarge batches: PTC has an execution deadline (2 min by default, 10 min max); a timeout aborts the whole batch.',
   'settings.groups.hint': 'Tick to show, arrows to order; hidden modules do not appear in the panel.',
 };
 
@@ -736,8 +890,8 @@ const CSS = `
       .mc-toggle { padding: 4px 12px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); background: transparent; color: inherit; font: inherit; font-size: 12.5px; cursor: pointer; }
       .mc-toggle.on { border-color: var(--dsw-static-deepseek-500, #4d6bfe); font-weight: 600; }
       .mc-fig { display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 0; min-width: 0; }
-      .mc-fig img { max-width: 100%; max-height: 190px; border-radius: 8px; object-fit: contain; }
-      .mc-fig-ph { display: flex; align-items: center; justify-content: center; box-sizing: border-box; width: 100%; min-height: 190px; padding: 12px; border-radius: 8px; border: 1.5px dashed var(--dsw-alias-border-l2, rgba(128,128,128,0.5)); color: var(--dsw-alias-label-secondary, inherit); font-size: 13px; text-align: center; }
+      .mc-fig img { max-width: 100%; max-height: 240px; border-radius: 8px; object-fit: contain; }
+      .mc-fig-ph { display: flex; align-items: center; justify-content: center; box-sizing: border-box; width: 100%; min-height: 240px; padding: 12px; border-radius: 8px; border: 1.5px dashed var(--dsw-alias-border-l2, rgba(128,128,128,0.5)); color: var(--dsw-alias-label-secondary, inherit); font-size: 13px; text-align: center; }
       .mc-cap { font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); text-align: center; word-break: break-all; }
       compare-slider { display: block; }
       .mc-slider { position: relative; width: 100%; height: 300px; border-radius: 10px; overflow: hidden; cursor: ew-resize; touch-action: none; background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); }
@@ -805,6 +959,124 @@ const CSS = `
           animation-iteration-count: 1 !important;
           transition-duration: .001ms !important;
         }
+      }
+
+      /* ---- queue workbench ------------------------------------------------ */
+      .mc-page { max-width: 960px; position: relative; }
+      .mc-queue { position: relative; display: flex; flex-direction: column; gap: 14px; }
+      .mc-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+      .mc-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 12.5px; }
+      .mc-check input { width: 15px; height: 15px; accent-color: var(--dsw-static-deepseek-500, #4d6bfe); }
+      .mc-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 260px; padding: 64px 24px; border: 1.5px dashed var(--dsw-alias-border-l2, rgba(128,128,128,0.5)); border-radius: 16px; text-align: center; cursor: pointer; transition: border-color .2s, background-color .2s; }
+      .mc-empty:hover, .mc-empty.over { border-color: var(--dsw-static-deepseek-500, #4d6bfe); background: rgba(77, 107, 254, 0.04); }
+      .mc-empty svg { width: 34px; height: 34px; color: var(--dsw-alias-label-tertiary, inherit); }
+      .mc-empty-title { margin: 0; font-size: 16px; font-weight: 600; }
+      .mc-empty-hint { margin: 0; font-size: 13px; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-empty-privacy { margin: 4px 0 0; font-size: 12px; color: var(--dsw-alias-label-tertiary, inherit); }
+      .mc-drop-overlay { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; border: 2px dashed var(--dsw-static-deepseek-500, #4d6bfe); border-radius: 14px; background: rgba(77, 107, 254, 0.06); font-weight: 600; pointer-events: none; }
+      .mc-group { border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 12px; margin: 10px 0; overflow: hidden; }
+      .mc-group-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.06)); }
+      .mc-group-check { font-size: 12.5px; font-weight: 600; }
+      .mc-group-label { font-size: 13px; font-weight: 600; }
+      .mc-group-count { font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-group-target { margin-left: auto; }
+      .mc-group .mc-list-wrap { border: 0; }
+      .mc-group .mc-item:first-child { border-top: 0; }
+      .mc-list-wrap { display: flex; flex-direction: column; }
+      .mc-list-head, .mc-item { display: grid; grid-template-columns: 20px 36px minmax(0, 1fr) 112px 58px 76px minmax(130px, auto) auto; align-items: center; gap: 6px 12px; }
+      .mc-kind { display: flex; align-items: center; gap: 6px; min-width: 0; }
+      .mc-kind > span { flex: none; }
+      .mc-row-target { width: 72px; min-width: 0; padding: 2px 4px; height: 24px; font-size: 11px; }
+      .mc-list-head { padding: 2px 8px 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dsw-alias-label-tertiary, inherit); }
+      .mc-list { list-style: none; margin: 0; padding: 0; }
+      .mc-item { padding: 10px 8px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); transition: background-color .15s; }
+      .mc-item:hover { background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); }
+      .mc-thumb { width: 36px; height: 36px; box-sizing: border-box; border-radius: 6px; overflow: hidden; display: grid; place-items: center; background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+      .mc-thumb svg { width: 18px; height: 18px; }
+      .mc-item-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; }
+      .mc-kind { display: flex; flex-direction: column; gap: 1px; min-width: 0; font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-row-target { font-size: 10.5px; color: var(--dsw-alias-label-tertiary, inherit); white-space: nowrap; }
+      .mc-num { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); text-align: right; white-space: nowrap; }
+      .mc-status { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mc-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--dsw-alias-label-tertiary, inherit); }
+      .mc-dot.dot-ok { background: var(--dsw-alias-state-success-primary, #2ba471); }
+      .mc-dot.dot-error { background: var(--dsw-alias-state-error-primary, #d5483f); }
+      .mc-dot.dot-warn { background: var(--dsw-alias-state-warn-primary, #d5763f); }
+      .mc-dot.dot-busy { background: var(--dsw-static-deepseek-500, #4d6bfe); }
+      .mc-row-actions { display: flex; align-items: center; gap: 4px; justify-content: flex-end; }
+      .mc-link { border: 0; background: transparent; color: var(--dsw-static-deepseek-500, #4d6bfe); font: inherit; font-size: 12px; cursor: pointer; padding: 3px 5px; border-radius: 5px; }
+      .mc-link:hover { text-decoration: underline; }
+      .mc-link:disabled { opacity: .5; cursor: default; text-decoration: none; }
+      .mc-icon-btn { width: 26px; height: 26px; display: grid; place-items: center; border: 0; background: transparent; color: var(--dsw-alias-label-secondary, inherit); border-radius: 5px; cursor: pointer; }
+      .mc-icon-btn:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,0.12)); color: var(--dsw-alias-label-primary, inherit); }
+      .mc-icon-btn:disabled { opacity: .45; cursor: default; }
+      .mc-icon-btn svg { width: 14px; height: 14px; }
+      .mc-rowbar { grid-column: 1 / -1; height: 3px; margin-top: -4px; border-radius: 2px; overflow: hidden; background: var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); }
+      .mc-rowbar > i { display: block; height: 100%; background: var(--dsw-static-deepseek-500, #4d6bfe); transition: width .2s var(--mc-ease); }
+      .mc-rowbar.indet > i { width: 38%; animation: mc-slide 1.2s ease-in-out infinite; }
+      .mc-row-error { grid-column: 3 / -1; margin: 0; color: var(--dsw-alias-state-error-primary, #d5483f); font-size: 12px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+      .mc-task { display: flex; flex-direction: column; gap: 11px; padding: 14px 16px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 12px; background: var(--dsw-alias-bg-layer-1, transparent); }
+      .mc-task-head { display: flex; align-items: baseline; gap: 10px; }
+      .mc-task-title { font-size: 14px; font-weight: 600; }
+      .mc-task-count { font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-task-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+      .mc-seg { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 8px; }
+      .mc-seg button { padding: 5px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--dsw-alias-label-secondary, inherit); font: inherit; font-size: 12.5px; cursor: pointer; }
+      .mc-seg button.on { background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.12)); color: var(--dsw-alias-label-primary, inherit); font-weight: 600; }
+      .mc-seg button:disabled { opacity: .45; cursor: default; }
+      .mc-field { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-field .mc-select { padding: 5px 8px; font-size: 12.5px; }
+      .mc-quality input[type='range'] { width: 120px; accent-color: var(--dsw-static-deepseek-500, #4d6bfe); }
+      .mc-batch-note { font-size: 12px; }
+      .mc-summary { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-ptc-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      .mc-ptc-check { font-size: 12.5px; }
+      .mc-hint { font-size: 12px; color: var(--dsw-alias-label-tertiary, inherit); }
+      .mc-ptc-copy { margin: 0; padding: 10px 12px; border-left: 2px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.5)); color: var(--dsw-alias-label-secondary, inherit); font-size: 12px; line-height: 1.7; white-space: pre-line; max-width: 68ch; }
+      .mc-task-foot { display: flex; align-items: center; gap: 10px; }
+      .mc-batch-progress { flex: 1; min-width: 140px; display: flex; flex-direction: column; gap: 5px; }
+      .mc-batch-progress span { font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-batch-result { font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-btn-danger { color: var(--dsw-alias-state-error-primary, #d5483f); border-color: var(--dsw-alias-state-error-primary, #d5483f); }
+      .mc-detail-head { display: flex; align-items: center; gap: 10px; }
+      .mc-back { padding: 4px 8px 4px 0; border: 0; background: transparent; color: var(--dsw-alias-label-secondary, inherit); font: inherit; font-size: 12.5px; cursor: pointer; }
+      .mc-back:hover { color: var(--dsw-alias-label-primary, inherit); }
+      .mc-detail-title { display: flex; flex-direction: column; gap: 3px; }
+      .mc-detail-name { margin: 0; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+      .mc-recent { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 8px; background: var(--dsw-alias-bg-layer-1, transparent); font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-action-groups { display: flex; flex-direction: column; gap: 12px; }
+      .mc-group { display: flex; flex-direction: column; gap: 8px; }
+      .mc-group-title { margin-top: 4px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--dsw-alias-label-tertiary, inherit); }
+      .mc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
+      .mc-tile { display: flex; align-items: center; gap: 10px; min-height: 54px; padding: 9px 10px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 9px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background-color .15s, border-color .15s; }
+      .mc-tile:hover:not(:disabled) { background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); }
+      .mc-tile.on { border-color: var(--dsw-static-deepseek-500, #4d6bfe); background: rgba(77, 107, 254, 0.06); }
+      .mc-tile:disabled { opacity: .5; cursor: not-allowed; }
+      .mc-tile-badge { flex: none; min-width: 38px; padding: 4px 6px; border-radius: 5px; background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; font-weight: 600; text-align: center; }
+      .mc-tile-icon { flex: none; width: 18px; height: 18px; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-tile-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+      .mc-tile-label { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mc-tile-hint { font-size: 11.5px; color: var(--dsw-alias-label-secondary, inherit); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mc-empty-actions { padding: 24px 0; text-align: center; }
+      .mc-panel { margin: 2px 0 0; }
+      @media (max-width: 720px) {
+        .mc-list-head { display: none; }
+        .mc-item { display: flex; flex-wrap: wrap; align-items: center; gap: 7px 10px; }
+        .mc-item-name { flex: 1 1 55%; }
+        .mc-kind, .mc-num, .mc-status { flex: 0 0 auto; }
+        .mc-num { text-align: left; }
+        .mc-row-actions { margin-left: auto; }
+        .mc-row-error, .mc-rowbar { flex: 1 0 100%; }
+        .mc-row-error { grid-column: auto; }
+        .mc-task-row { gap: 10px; }
+        .mc-task-foot { flex-wrap: wrap; }
+        .mc-task-foot .mc-btn { flex: 1 1 100%; }
+        .mc-grid { grid-template-columns: 1fr 1fr; }
+      }
+      @media (max-width: 460px) {
+        .mc-grid { grid-template-columns: 1fr; }
       }
     `;
 

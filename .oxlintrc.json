@@ -7,5 +7,5 @@
   "options": {
     "reportUnusedDisableDirectives": "error"
   },
-  "ignorePatterns": ["client.js", "client.js.map", "dist/**"]
+  "ignorePatterns": ["client.js", "client.js.map", "dist/**", ".agents/**"]
 }

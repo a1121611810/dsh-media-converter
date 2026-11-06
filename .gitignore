@@ -156,3 +156,6 @@ vite.config.ts.timestamp-*
 
 # build intermediates (client.js itself is the committed artifact)
 dist/
+
+# local agent skills (tooling, not part of the plugin)
+.agents/
