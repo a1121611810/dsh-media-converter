@@ -92,7 +92,7 @@ const statusOf = (item: QueueRow): string => {
           />
         </label>
         <span class="mc-thumb" aria-hidden="true">
-          <img v-if="kindOf(item) === 'image' && item.url" :src="item.url" alt="" />
+          <img v-if="kindOf(item) === 'image' && item.thumb" :src="item.thumb" alt="" />
           <svg
             v-else
             viewBox="0 0 24 24"

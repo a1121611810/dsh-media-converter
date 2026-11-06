@@ -4,15 +4,24 @@ import assert from 'node:assert/strict';
 import {
   CONVERTIBLE_KINDS,
   defaultTargets,
+  fitPreview,
   formatClock,
   formatDuration,
   formatSize,
   isConvertible,
   parseTimecode,
+  previewMime,
   rowPlan,
   trimWindow,
   unavailableTarget,
 } from '../dist/src/client/lib.js';
+
+assert.deepEqual(fitPreview(4000, 3000), { width: 900, height: 675 });
+assert.deepEqual(fitPreview(300, 200), { width: 300, height: 200 });
+assert.deepEqual(fitPreview(6000, 9000, 128), { width: 85, height: 128 });
+assert.equal(previewMime('jpg'), 'image/jpeg');
+assert.equal(previewMime('webp'), 'image/webp');
+assert.equal(previewMime('gif'), 'image/png');
 
 assert.equal(formatSize(0), '');
 assert.equal(formatSize(512), '512 B');

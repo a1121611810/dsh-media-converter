@@ -33,6 +33,7 @@ export interface QueueRow {
   key: string;
   file: File;
   url: string;
+  thumb: string;
   checked: boolean;
   upload: UploadResponse | null;
   state: string;
@@ -104,6 +105,22 @@ export function parseTimecode(text: string): number | null {
     total = total * 60 + Number(part);
   }
   return total;
+}
+
+// Long edges for the two pictures the panel makes itself: the detail preview
+// and the queue row thumbnail.
+export const PREVIEW_MAX = 900;
+export const THUMB_MAX = 128;
+
+// The browser has no gif/avif/bmp encoder, so those targets compare as PNG.
+export function previewMime(format: string): string {
+  return format === 'jpg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
+}
+
+// Largest size that fits inside `max` on the long edge, aspect preserved.
+export function fitPreview(width: number, height: number, max = PREVIEW_MAX): { width: number; height: number } {
+  const scale = Math.min(1, max / Math.max(1, width, height));
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
 }
 
 export function previewUrl(file: string): string {

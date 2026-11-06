@@ -19,6 +19,9 @@ const React = {
 
 globalThis.window = { __ModuleLoader__: { load: (mod) => calls.push(mod) } };
 const source = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8');
+// The preview pipeline must stay off the main thread: toDataURL froze the
+// panel for hundreds of milliseconds on a 24 MP picture.
+assert.ok(source.includes('convertToBlob'), 'image preview still encodes off the main thread');
 // No document stub: the artifact must survive a document-less load exactly
 // like the Host does when it only evaluates the bundle's contract.
 new Function('window', 'globalThis', source)(globalThis.window, globalThis);

@@ -4,13 +4,17 @@ import type { PropType } from 'vue';
 import {
   CONVERTIBLE_KINDS,
   PLATFORM,
+  PREVIEW_MAX,
   TAG_KEYS,
+  THUMB_MAX,
   defaultTargets,
   downloadText,
+  fitPreview,
   formatClock,
   formatDuration,
   formatSize,
   isConvertible,
+  previewMime,
   previewUrl,
   readJson,
   rowPlan,
@@ -127,6 +131,8 @@ let stopAt: ((this: HTMLMediaElement, ev: Event) => void) | null = null;
 let disposed = false;
 let itemSeq = 0;
 let statusError = '';
+let previewToken = 0;
+let liveUrl = '';
 
 const detailItem = computed(() => items.value.find((item) => item.key === detailKey.value) || null);
 const file = computed<UploadResponse | null>(() => detailItem.value?.upload || null);
@@ -589,6 +595,7 @@ function makeItem(picked: File): Item {
     key: 'i' + itemSeq,
     file: picked,
     url: URL.createObjectURL(picked),
+    thumb: '',
     checked: true,
     upload: null,
     state: 'uploading',
@@ -597,6 +604,48 @@ function makeItem(picked: File): Item {
     jobAction: '',
     error: '',
   };
+}
+
+// Decode, downscale and encode off the main thread. The old toDataURL path
+// froze the panel for 177-461 ms on a 24 MP picture; createImageBitmap and
+// convertToBlob do the same work on worker threads.
+async function encodeImage(blob: Blob, max: number, type: string, quality: number): Promise<Blob> {
+  const full = await createImageBitmap(blob, { imageOrientation: 'from-image' });
+  try {
+    const { width, height } = fitPreview(full.width, full.height, max);
+    const small =
+      width === full.width && height === full.height
+        ? full
+        : await createImageBitmap(full, { resizeWidth: width, resizeHeight: height, resizeQuality: 'high' });
+    const canvas = new OffscreenCanvas(small.width, small.height);
+    canvas.getContext('2d')!.drawImage(small, 0, 0);
+    if (small !== full) small.close();
+    return canvas.convertToBlob({ type, quality });
+  } finally {
+    full.close();
+  }
+}
+
+let thumbChain: Promise<unknown> = Promise.resolve();
+
+// The queue shows a 36px thumbnail; decoding the full picture for it keeps a
+// 96 MB bitmap per row alive. One decode at a time keeps a big drop safe.
+function queueThumb(item: Item) {
+  thumbChain = thumbChain
+    .then(async () => {
+      if (disposed || !items.value.some((row) => row.key === item.key)) return;
+      try {
+        const url = URL.createObjectURL(await encodeImage(item.file, THUMB_MAX, 'image/webp', 0.8));
+        if (disposed || !items.value.some((row) => row.key === item.key)) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        item.thumb = url;
+      } catch {
+        /* no decoder for this format: the row keeps its kind icon */
+      }
+    })
+    .catch(() => {});
 }
 
 async function addFiles(picked: File[]) {
@@ -626,6 +675,7 @@ async function addFiles(picked: File[]) {
       if (!data.ok) throw new Error(data.error || t('error.title'));
       item.upload = data;
       item.state = 'ready';
+      if (data.kind === 'image') queueThumb(item);
       if (data.kind === 'text') item.checked = false;
     } catch (err) {
       if (controller.signal.aborted) removeItem(item.key, true);
@@ -650,6 +700,7 @@ function removeItem(key: string, force = false) {
   const [item] = items.value.splice(index, 1);
   delete rowTargets.value[key];
   URL.revokeObjectURL(item.url);
+  if (item.thumb) URL.revokeObjectURL(item.thumb);
   if (detailKey.value === key) {
     detailKey.value = '';
     view.value = 'queue';
@@ -673,7 +724,10 @@ function clearQueue() {
   }
   confirmClear.value = false;
   clearTimeout(clearTimer);
-  items.value.forEach((item) => URL.revokeObjectURL(item.url));
+  items.value.forEach((item) => {
+    URL.revokeObjectURL(item.url);
+    if (item.thumb) URL.revokeObjectURL(item.thumb);
+  });
   items.value = [];
   rowTargets.value = {};
   detailKey.value = '';
@@ -1244,7 +1298,12 @@ onBeforeUnmount(() => {
   if (uploadAbort) uploadAbort.abort();
   if (ptcAbort) ptcAbort.abort();
   if (stopAt && mediaEl.value) mediaEl.value.removeEventListener('timeupdate', stopAt);
-  items.value.forEach((item) => URL.revokeObjectURL(item.url));
+  previewToken++;
+  releaseLive();
+  items.value.forEach((item) => {
+    URL.revokeObjectURL(item.url);
+    if (item.thumb) URL.revokeObjectURL(item.thumb);
+  });
 });
 
 watch(
@@ -1298,33 +1357,39 @@ watch([view, detailKey], () => {
   scrollTop();
 });
 
-watch([blobUrl, file, format, quality], () => {
+function releaseLive() {
+  if (liveUrl) URL.revokeObjectURL(liveUrl);
+  liveUrl = '';
+  livePreview.value = '';
+}
+
+watch([file, format, quality], () => {
   clearTimeout(liveTimer);
-  if (!blobUrl.value || !file.value || file.value.kind !== 'image' || !format.value) {
-    livePreview.value = '';
+  const picked = detailItem.value?.file;
+  if (!picked || !file.value || file.value.kind !== 'image' || !format.value) {
+    previewToken++; // a render still in flight must not land on the empty state
+    releaseLive();
     return;
   }
-  liveTimer = setTimeout(() => {
-    const image = new Image();
-    image.onload = () => {
-      try {
-        const width = image.naturalWidth || 1;
-        const height = image.naturalHeight || 1;
-        const scale = Math.min(1, 900 / Math.max(width, height));
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.max(1, Math.round(width * scale));
-        canvas.height = Math.max(1, Math.round(height * scale));
-        canvas.getContext('2d')!.drawImage(image, 0, 0, canvas.width, canvas.height);
-        const mime = format.value === 'jpg' ? 'image/jpeg' : format.value === 'webp' ? 'image/webp' : 'image/png';
-        livePreview.value = canvas.toDataURL(mime, Math.min(1, Math.max(0.05, quality.value / 100)));
-      } catch {
-        livePreview.value = '';
-      }
-    };
-    image.onerror = () => {
-      livePreview.value = '';
-    };
-    image.src = blobUrl.value;
+  const token = ++previewToken;
+  liveTimer = setTimeout(async () => {
+    try {
+      const blob = await encodeImage(
+        picked,
+        PREVIEW_MAX,
+        previewMime(format.value),
+        Math.min(1, Math.max(0.05, quality.value / 100)),
+      );
+      if (token !== previewToken) return;
+      const previous = liveUrl;
+      liveUrl = URL.createObjectURL(blob);
+      livePreview.value = liveUrl;
+      // Swap the <img> src before dropping the old URL, or it briefly breaks.
+      await nextTick();
+      if (previous) URL.revokeObjectURL(previous);
+    } catch {
+      if (token === previewToken) releaseLive();
+    }
   }, 120);
 });
 
