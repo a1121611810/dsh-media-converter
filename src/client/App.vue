@@ -23,6 +23,7 @@ import {
   sourceUrl,
   trimWindow,
   unavailableTarget,
+  withoutKnownUploads,
 } from './lib.js';
 import type { ConvertRequest, ConvertibleKind, DecodedPayload, QueueRow, ServerJob } from './lib.js';
 import type { MediaKind, StreamMeta } from '../../lib/plan.js';
@@ -899,6 +900,18 @@ function requestThumb(key: string) {
 }
 
 const INGEST_CHUNK = 40;
+
+// A few hundred rows must not mount in one long task: push them in slices
+// across frames so the panel stays interactive while the list fills in.
+async function pushRows(rows: Item[]) {
+  for (let index = 0; index < rows.length; index += INGEST_CHUNK) {
+    if (disposed) return;
+    items.value.push(...rows.slice(index, index + INGEST_CHUNK));
+    if (index + INGEST_CHUNK < rows.length) {
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    }
+  }
+}
 const UPLOAD_WORKERS = 3;
 
 async function addFiles(picked: File[]) {
@@ -906,15 +919,7 @@ async function addFiles(picked: File[]) {
   batchError.value = '';
   if (!status.value) await fetchStatus();
   const added = picked.map(makeItem);
-  // A few hundred rows must not mount in one long task: push them in slices
-  // across frames so the panel stays interactive while the list fills in.
-  for (let index = 0; index < added.length; index += INGEST_CHUNK) {
-    if (disposed) return;
-    items.value.push(...added.slice(index, index + INGEST_CHUNK));
-    if (index + INGEST_CHUNK < added.length) {
-      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
-    }
-  }
+  await pushRows(added);
   // Mutate the reactive proxies from the array, not the raw objects pushed in:
   // assigning to the raw copies would update the data but never re-render.
   const created = items.value.slice(-added.length);
@@ -968,12 +973,18 @@ async function addFiles(picked: File[]) {
 // Rows registered by path: the Host probed the original file, so there is no
 // browser File and no upload. Pushed in the same slices as a picked batch.
 async function addRegistered(uploads: UploadResponse[]) {
-  if (!uploads.length) return;
-  const added: Item[] = uploads.map((upload) => ({
+  showPathPicker.value = false;
+  // Re-adding a folder returns the records already in the queue; one row per
+  // upload id, or the same files would be converted twice.
+  const fresh = withoutKnownUploads(items.value, uploads);
+  if (!fresh.length) return;
+  const added: Item[] = fresh.map((upload) => ({
     key: 'i' + ++itemSeq,
     file: null,
     url: sourceUrl(upload.id),
-    thumb: upload.kind === 'image' ? sourceUrl(upload.id) : '',
+    // The row shows a 36px picture; streaming a 24 MP original there would
+    // decode it at full size. Big images keep the kind icon instead.
+    thumb: upload.kind === 'image' && upload.size <= 512 * 1024 ? sourceUrl(upload.id) : '',
     checked: upload.kind !== 'text',
     upload: markRaw(upload),
     state: 'ready',
@@ -983,14 +994,7 @@ async function addRegistered(uploads: UploadResponse[]) {
     jobAction: '',
     jobId: '',
   }));
-  showPathPicker.value = false;
-  for (let index = 0; index < added.length; index += INGEST_CHUNK) {
-    if (disposed) return;
-    items.value.push(...added.slice(index, index + INGEST_CHUNK));
-    if (index + INGEST_CHUNK < added.length) {
-      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
-    }
-  }
+  await pushRows(added);
   ensureTargets();
 }
 

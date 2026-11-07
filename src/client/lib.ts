@@ -172,6 +172,19 @@ export interface ServerJob {
   hardware: boolean;
 }
 
+// Files added by path can already be on screen (the Host dedupes by path and
+// hands back the existing record). Rows are keyed by upload id, so the panel
+// keeps only the ones it does not already hold — otherwise adding the same
+// folder twice would show every file twice.
+export function withoutKnownUploads<T extends { id: string }>(
+  rows: { upload: { id: string } | null }[],
+  incoming: T[],
+): T[] {
+  const known = new Set<string>();
+  for (const row of rows) if (row.upload) known.add(row.upload.id);
+  return incoming.filter((upload) => !known.has(upload.id));
+}
+
 // The state a run item puts on its queue row. The Host owns the batch, so the
 // panel derives rows from this instead of from its own in-flight requests; a
 // `waiting` item is the batch's queue and shows as an ordinary ready row.

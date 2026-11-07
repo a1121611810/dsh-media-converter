@@ -484,6 +484,9 @@ const MAX_BASE64_BYTES = 24 * 1024 * 1024;
 // Uploaded copies live in a temp directory. Big videos are big, so anything
 // older than this is dropped instead of filling the disk over a long session.
 const UPLOAD_TTL_MS = 2 * 60 * 60 * 1000;
+// A rebuilt page rebuilds its whole queue from /queue, so the cap has to cover
+// what /register allows to be added at once; a smaller cap silently drops rows.
+const QUEUE_LIMIT = 2000;
 // A finished job only has to outlive the poll that reads it.
 const JOB_TTL_MS = 30 * 60 * 1000;
 // An upload bigger than this is refused instead of filling the disk.
@@ -708,6 +711,16 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // check resolves both sides first: a plain prefix check is defeated by a
   // '..' segment inside the file name.
   const insideOutput = (file: unknown): file is string => typeof file === 'string' && isInsideDir(outDir, file);
+
+  // The panel may look at the places a person keeps media — home, mounted
+  // volumes, the temp dirs and the output dir — and nowhere else. This is the
+  // one-line fence between "the user's files" and "whatever the process reads".
+  const browseAllowed = (target: string): boolean => {
+    const resolved = path.resolve(target);
+    return [os.homedir(), '/Volumes', '/tmp', os.tmpdir(), outDir]
+      .map((root) => path.resolve(root))
+      .some((root) => resolved === root || isInsideDir(root, resolved));
+  };
 
   const uniqueOutput = async (name: string, extension: string, suffix = ''): Promise<string> => {
     const stem = safeBaseName(name) + suffix;
@@ -1803,6 +1816,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           try {
             const raw = requestUrl(req).searchParams.get('path') || '~';
             const dir = path.resolve(raw.replace(/^~(?=$|[/\\])/, os.homedir()));
+            if (!browseAllowed(dir)) return json(res, 200, errorPayload('只能浏览家目录、/Volumes 或临时目录'));
             const stat = await fsp.stat(dir).catch(() => null);
             if (!stat || !stat.isDirectory()) return json(res, 200, errorPayload('目录不存在或不可读'));
             const listing = await fsp.readdir(dir, { withFileTypes: true });
@@ -1850,6 +1864,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             const dir = String(body.dir || '');
             if (dir) {
               const root = path.resolve(dir.replace(/^~(?=$|[/\\])/, os.homedir()));
+              if (!browseAllowed(root))
+                return json(res, 200, errorPayload('只能添加家目录、/Volumes 或临时目录里的文件'));
               const depthLimit = body.recursive === true ? 4 : 0;
               const walk = async (current: string, depth: number): Promise<string[]> => {
                 if (depth > depthLimit) return [];
@@ -1871,7 +1887,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             }
             const files = [...new Set(requested)].slice(0, 2000);
             if (!files.length) return json(res, 200, errorPayload('没有可添加的媒体文件'));
-            const uploadsOut: UploadResponse[] = [];
+            const uploadsOut: { path: string; payload: UploadResponse }[] = [];
             const skipped: { path: string; reason: string }[] = [];
             // The probe is the only slow part; four at a time turns a folder of
             // a few hundred files into a few seconds without flooding ffmpeg.
@@ -1882,6 +1898,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                 cursor += 1;
                 if (index >= files.length) return;
                 const file = path.resolve(files[index]);
+                if (!browseAllowed(file)) {
+                  skipped.push({ path: file, reason: '不在允许的目录' });
+                  continue;
+                }
                 const name = path.basename(file);
                 const kind = kindByExt(extOf(name));
                 if (kind !== 'video' && kind !== 'audio' && kind !== 'image') {
@@ -1895,8 +1915,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                 }
                 const existing = [...uploads.values()].find((item) => item.path === file);
                 if (existing) {
-                  uploadsOut.push(
-                    uploadPayload(
+                  uploadsOut.push({
+                    path: file,
+                    payload: uploadPayload(
                       existing.id,
                       existing.name,
                       existing.kind,
@@ -1905,7 +1926,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                       existing.streams,
                       existing.meta,
                     ),
-                  );
+                  });
                   continue;
                 }
                 const stderr = await probe(bin, file);
@@ -1927,8 +1948,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                   at: Date.now(),
                 };
                 uploads.set(upload.id, upload);
-                uploadsOut.push(
-                  uploadPayload(
+                uploadsOut.push({
+                  path: file,
+                  payload: uploadPayload(
                     upload.id,
                     upload.name,
                     upload.kind,
@@ -1937,11 +1959,14 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                     upload.streams,
                     upload.meta,
                   ),
-                );
+                });
               }
             });
             await Promise.all(workers);
-            json(res, 200, { ok: true, uploads: uploadsOut, skipped });
+            // Four workers finish in any order; the panel shows the rows in
+            // the order it receives them, so answer in path order.
+            uploadsOut.sort((a, b) => a.path.localeCompare(b.path));
+            json(res, 200, { ok: true, uploads: uploadsOut.map((entry) => entry.payload), skipped });
           } catch (err) {
             json(res, 200, errorPayload(errorText(err)));
           }
@@ -2205,7 +2230,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           }
           // shortcut: only the newest rows come back after a page rebuild;
           // the working set is small, and uploads expire after the TTL anyway.
-          json(res, 200, { ok: true, items: items.slice(-200) });
+          json(res, 200, { ok: true, items: items.slice(-QUEUE_LIMIT) });
         },
       }),
       webServer.register({

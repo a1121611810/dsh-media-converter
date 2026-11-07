@@ -3,7 +3,7 @@
 // uploads a byte. A few hundred files register in one call, so the picker is
 // the fast path for big batches; the native picker and drag-drop stay for
 // ad-hoc files.
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import type { BrowseEntry, ErrorResponse, UploadResponse } from '../../../index.js';
 import { formatSize, readJson } from '../lib.js';
 
@@ -91,7 +91,16 @@ async function register(body: Record<string, unknown>) {
 const addSelected = () => void register({ paths: [...selected.value] });
 const addFolder = () => void register({ dir: path.value, recursive: recursive.value });
 
-onMounted(() => void load('~'));
+function onKey(event: KeyboardEvent) {
+  if (event.key === 'Escape') emit('close');
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKey);
+  void load('~');
+});
+
+onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
 </script>
 
 <template>
@@ -108,11 +117,11 @@ onMounted(() => void load('~'));
       <p class="mc-modal-hint">{{ t('path.hint') }}</p>
       <div class="mc-path-row">
         <input
+          v-model="path"
           class="mc-input mc-path-input"
-          :value="path"
           :aria-label="t('path.title')"
-          @keydown.enter="load(($event.target as HTMLInputElement).value)"
-          @change="load(($event.target as HTMLInputElement).value)"
+          @keydown.enter="load(path)"
+          @blur="load(path)"
         />
         <button type="button" class="mc-btn mc-btn-ghost" :disabled="loading" @click="load(parent)">
           {{ t('path.up') }}

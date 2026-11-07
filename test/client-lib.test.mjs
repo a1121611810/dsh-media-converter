@@ -15,6 +15,7 @@ import {
   rowPlan,
   runItemPatch,
   trimWindow,
+  withoutKnownUploads,
   unavailableTarget,
   sourceUrl,
 } from '../dist/src/client/lib.js';
@@ -159,6 +160,20 @@ assert.deepEqual(jobPatch('converting', serverJob({ state: 'cancelled' })), {
 // A row the user reset stays reset: an old result must not reappear.
 assert.equal(jobPatch('ready', serverJob({ state: 'done' })), null);
 assert.equal(jobPatch('done', serverJob({ state: 'done' })), null);
+
+// --- uploaded rows already on screen ----------------------------------------
+// Adding the same folder twice must not duplicate rows: the Host returns the
+// same upload ids, and the panel keeps one row per id.
+const onScreen = [{ upload: { id: 'a' } }, { upload: null }];
+assert.deepEqual(
+  withoutKnownUploads(onScreen, [{ id: 'a' }, { id: 'b' }]).map((upload) => upload.id),
+  ['b'],
+);
+assert.deepEqual(
+  withoutKnownUploads([], [{ id: 'a' }]).map((upload) => upload.id),
+  ['a'],
+);
+assert.deepEqual(withoutKnownUploads(onScreen, []), []);
 
 // --- run items (the Host-owned batch) ---------------------------------------
 // One batch item as GET /run returns it.

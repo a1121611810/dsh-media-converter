@@ -347,6 +347,34 @@ const folderAdded = await call('register', {
 assert.equal(folderAdded.data.ok, true, JSON.stringify(folderAdded.data));
 assert.equal(folderAdded.data.uploads.length, 2, 'the folder walk finds both images (deduped)');
 
+// Only the media places a person uses are browsable: home, mounted volumes,
+// temp dirs and the output dir. /etc is not one of them.
+const outsideBrowse = await call('browse?path=' + encodeURIComponent('/etc'));
+assert.equal(outsideBrowse.data.ok, false, 'a directory outside the allowed roots is refused');
+const outsideRegister = await call('register', {
+  method: 'POST',
+  body: JSON.stringify({ paths: ['/etc/hosts'] }),
+});
+assert.equal(outsideRegister.data.skipped[0].reason, '不在允许的目录');
+
+// The queue cap must cover what a single register adds, or a rebuilt page
+// silently drops the rows beyond the newest 200.
+const bulkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-bulk-'));
+for (let index = 0; index < 205; index += 1) {
+  fs.copyFileSync(sample, path.join(bulkDir, 'bulk-' + String(index).padStart(3, '0') + '.png'));
+}
+const bulk = await call('register', { method: 'POST', body: JSON.stringify({ dir: bulkDir }) });
+assert.equal(bulk.data.ok, true, JSON.stringify(bulk.data));
+assert.equal(bulk.data.uploads.length, 205);
+const bulkQueue = await call('queue');
+const queuedIds = new Set(bulkQueue.data.items.map((item) => item.upload.id));
+assert.equal(
+  bulk.data.uploads.filter((upload) => queuedIds.has(upload.id)).length,
+  205,
+  'every registered file fits in the rebuilt queue',
+);
+fs.rmSync(bulkDir, { recursive: true, force: true });
+
 const folderQueue = await call('queue');
 assert.ok(
   folderQueue.data.items.some((item) => item.upload.id === registeredId),
