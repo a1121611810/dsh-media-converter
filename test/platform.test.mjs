@@ -5,6 +5,7 @@ import {
   binaryNames,
   expandDirs,
   ffmpegCandidates,
+  hardwarePathAllowed,
   imageioPatterns,
   isInsideDir,
   revealCommand,
@@ -92,5 +93,11 @@ assert.equal(safeBaseName('nul.mp4', 'win32'), '_nul');
 assert.equal(safeBaseName('con.mp4', 'darwin'), 'con', 'the reservation is a Windows rule');
 assert.equal(safeBaseName('', 'darwin'), 'input');
 assert.equal(safeBaseName('.png', 'darwin'), 'output', 'a name that is only an extension');
+
+// --- the hardware transcode path ------------------------------------------------
+// videotoolbox is Apple-only; elsewhere the hardware ask degrades to software.
+assert.equal(hardwarePathAllowed('darwin'), true);
+assert.equal(hardwarePathAllowed('win32'), false);
+assert.equal(hardwarePathAllowed('linux'), false);
 
 console.log('platform.test.mjs: ok');

@@ -65,6 +65,7 @@ import type { PtcRates } from './lib/schedule.js';
 import {
   expandDirs,
   ffmpegCandidates,
+  hardwarePathAllowed,
   imageioPatterns,
   isInsideDir,
   revealCommand,
@@ -1177,7 +1178,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       const copy = copyArgs(upload.kind, format, upload.meta);
       if (copy) return { ext: format, kind: kindByExt(format), args: copy, copy: true };
     }
-    if (body.hardware) {
+    // videotoolbox is Apple-only; elsewhere the hardware ask silently gets
+    // the software plan instead of a doomed ffmpeg command.
+    if (body.hardware && hardwarePathAllowed(process.platform)) {
       const hw = hardwareFor(upload.kind, format, upload.size, upload.duration);
       if (hw) {
         return {

@@ -122,3 +122,9 @@ export function safeBaseName(raw: string, platform = process.platform): string {
   if (platform === 'win32' && WIN_RESERVED.test(stem)) stem = '_' + stem;
   return stem;
 }
+
+// The hardware transcode path speaks videotoolbox, which only exists on
+// Apple platforms; everywhere else the caller gets the software plan.
+export function hardwarePathAllowed(platform: string): boolean {
+  return platform === 'darwin';
+}
