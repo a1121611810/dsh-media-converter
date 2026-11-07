@@ -283,7 +283,7 @@ const ZH: Record<string, string> = {
   'ptc.modelHint': '默认用 DSH 当前主模型；换一个更快的已注册模型可以缩短等待',
   'ptc.modelLoading': '读取模型中…',
   'ptc.modelFailed': '模型列表读取失败，仍可用默认',
-  'ptc.planning': '模型决定中 · %s 秒 · 已输出 %s 字',
+  'ptc.planning': '模型决定中 · %s 秒',
   'ptc.converting': '转换 %s/%s（自适应并发）',
   'batch.noAudio': '勾选里没有带音轨的视频',
   'batch.noVideo': '勾选里没有视频',
@@ -293,7 +293,7 @@ const ZH: Record<string, string> = {
   'ptc.label': '用 DSH PTC 调度',
   'ptc.running': 'PTC 正在调度…',
   'ptc.note':
-    '关闭（默认）：这批任务由插件按每类文件的目标直接跑。快，不花 token。\n打开：主模型只返回每个文件的格式/质量计划（JSON），插件把它拼成程序交给 DSH PTC 在沙箱执行。会消耗 token；通常会多花几秒。\n适合需要逐文件调整的批次；统一转换关着更快。只影响「转成 X」；裁剪、提取、字幕、元数据仍按固定规则。\n大批量慎用：PTC 有执行时限（默认 2 分钟，最多 10 分钟），超时会整批中止。',
+    '关闭（默认）：这批任务由插件按每类文件的目标直接跑。快，不花 token。\n打开：主模型只返回每个文件的格式/质量计划（JSON），插件把它拼成程序交给 DSH PTC 在沙箱执行。会消耗 token；通常会多花几秒。\n适合需要逐文件调整的批次；统一转换关着更快。只影响「转成 X」；裁剪、提取、字幕、元数据仍按固定规则。\n大批量：整批会拆成多次沙箱执行，单次仍限 10 分钟，整批可以更长；切走会话或关掉页面后批次仍在后台继续。',
   'settings.groups.hint': '勾选控制显示，箭头调整顺序；隐藏的模块在面板中不显示。',
 };
 const EN: Record<string, string> = {
@@ -523,7 +523,7 @@ const EN: Record<string, string> = {
   'ptc.modelHint': 'Defaults to the DSH model; a faster registered model shortens the wait.',
   'ptc.modelLoading': 'Loading models…',
   'ptc.modelFailed': 'Could not load the model list; the default still works',
-  'ptc.planning': 'Planning · %ss · %s chars',
+  'ptc.planning': 'Planning · %ss',
   'ptc.converting': 'Converting %s/%s (adaptive)',
   'batch.noAudio': 'No video with audio is selected',
   'batch.noVideo': 'No video is selected',
@@ -533,7 +533,7 @@ const EN: Record<string, string> = {
   'ptc.label': 'Use DSH PTC scheduling',
   'ptc.running': 'PTC is scheduling…',
   'ptc.note':
-    'Off (default): the plugin runs this batch with the target of each kind. Fast, no tokens.\nOn: the main model only returns a per-file format/quality plan (JSON); the plugin composes it into a program and runs it in the DSH PTC sandbox. Costs tokens and usually a few seconds.\nBest for batches that need per-file adjustments; for one uniform format, off is faster. Only affects "Convert to X"; trim, extract, subtitles and metadata keep the fixed rules.\nLarge batches: PTC has an execution deadline (2 min by default, 10 min max); a timeout aborts the whole batch.',
+    'Off (default): the plugin runs this batch with the target of each kind. Fast, no tokens.\nOn: the main model only returns a per-file format/quality plan (JSON); the plugin composes it into a program and runs it in the DSH PTC sandbox. Costs tokens and usually a few seconds.\nBest for batches that need per-file adjustments; for one uniform format, off is faster. Only affects "Convert to X"; trim, extract, subtitles and metadata keep the fixed rules.\nLarge batches: the batch is split into several sandbox runs; one run still has the 10-minute deadline, but the batch as a whole can run longer, and it keeps going after the panel is closed.',
   'settings.groups.hint': 'Tick to show, arrows to order; hidden modules do not appear in the panel.',
 };
 

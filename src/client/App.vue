@@ -28,8 +28,6 @@ import type { ConvertRequest, ConvertibleKind, DecodedPayload, QueueRow, ServerJ
 import type { MediaKind, StreamMeta } from '../../lib/plan.js';
 import type {
   Base64Response,
-  BatchProgress,
-  BatchResponse,
   ErrorResponse,
   Job,
   ModelsResponse,
@@ -60,7 +58,6 @@ interface Item extends QueueRow {
   // The server job this row is polling, so a restored page can re-attach.
   jobId: string;
 }
-type PtcProgressResponse = BatchProgress & { ok: true };
 
 interface ActionItem {
   id: string;
@@ -85,7 +82,11 @@ const GPU_FORMATS = new Set(['mp4', 'mov', 'mkv', 'flv', 'ts']);
 const ptcModels = ref<PtcModelOption[]>([]);
 const ptcDefaultModel = ref<ModelsResponse['default']>(null);
 const ptcModelKey = ref('');
-const ptcProgress = ref<BatchProgress | null>(null);
+// The live run's stage: 'planning' while the model decides formats, then
+// 'converting'. Empty when no batch is running.
+const runStage = ref<'' | 'planning' | 'converting'>('');
+const runStartedAt = ref(0);
+const planningTick = ref(0);
 const ptcTiming = ref<{ modelMs?: number; runMs?: number } | null>(null);
 const modelsLoading = ref(false);
 const modelsError = ref('');
@@ -118,7 +119,6 @@ const batchRunning = ref(false);
 const confirmClear = ref(false);
 const dragging = ref(false);
 const runKeys = ref<string[]>([]);
-const runIndeterminate = ref(false);
 const lastRun = ref<{ done: number; failed: number; skipped: number; cancelled: number } | null>(null);
 
 const pageEl = ref<HTMLDivElement | null>(null);
@@ -129,7 +129,6 @@ const mediaEl = ref<HTMLMediaElement | null>(null);
 
 let uploadAbort: AbortController | null = null;
 let currentJobId = '';
-let ptcAbort: AbortController | null = null;
 let liveTimer: ReturnType<typeof setTimeout> | 0 = 0;
 let clearTimer: ReturnType<typeof setTimeout> | 0 = 0;
 let stopAt: ((this: HTMLMediaElement, ev: Event) => void) | null = null;
@@ -287,24 +286,12 @@ const finishedRunCount = computed(
 );
 const batchProgressText = computed(() => {
   if (!batchRunning.value) return '';
-  const progress = ptcProgress.value;
-  if (progress?.stage === 'planning') {
-    const seconds = Math.max(0, Math.round((Date.now() - progress.startedAt) / 1000));
-    return t('ptc.planning').replace('%s', String(seconds)).replace('%s', String(progress.modelChars));
-  }
-  if (progress?.stage === 'converting') {
-    const done = progress.items.filter((item) => item.state === 'done').length;
-    return t('ptc.converting').replace('%s', String(done)).replace('%s', String(progress.items.length));
-  }
-  if (runIndeterminate.value) return t('ptc.running');
+  if (runStage.value === 'planning') return t('ptc.planning').replace('%s', String(planningTick.value));
   return t('batch.running').replace('%s', String(finishedRunCount.value)).replace('%s', String(runKeys.value.length));
 });
 const batchProgressPercent = computed(() => {
-  if (!batchRunning.value || runIndeterminate.value || !runKeys.value.length) return null;
-  const progress = ptcProgress.value;
-  if (progress?.stage === 'converting') {
-    const done = progress.items.filter((item) => item.state === 'done').length;
-    return Math.round((done / progress.items.length) * 100);
+  if (!batchRunning.value || runStage.value === 'planning' || !runKeys.value.length) {
+    return null;
   }
   return Math.round((finishedRunCount.value / runKeys.value.length) * 100);
 });
@@ -626,12 +613,20 @@ function applyRun(run: RunInfo): void {
     activeRunId = run.id;
     batchRunning.value = true;
     runKeys.value = keys;
-    runIndeterminate.value = false;
+    runStage.value = run.stage === 'planning' ? 'planning' : run.kind === 'ptc' ? 'converting' : '';
+    runStartedAt.value = run.at;
+    // The planning line counts seconds; assigning the same number would not
+    // re-render, so a changed tick is what keeps it alive.
+    planningTick.value = Math.max(0, Math.round((Date.now() - run.at) / 1000));
     return;
   }
   activeRunId = '';
   batchRunning.value = false;
-  runIndeterminate.value = false;
+  runStage.value = '';
+  if (run.kind === 'ptc' && (run.modelMs !== undefined || run.runMs !== undefined)) {
+    ptcTiming.value = { modelMs: run.modelMs, runMs: run.runMs };
+  }
+  if (run.error) batchError.value = run.error;
   const count = (state: string) => run.items.filter((item) => item.state === state).length;
   lastRun.value = {
     done: count('done'),
@@ -1050,10 +1045,6 @@ async function postConvert(id: string, body: Record<string, unknown>): Promise<J
 }
 
 function cancelRun() {
-  if (ptcAbort) {
-    ptcAbort.abort();
-    return;
-  }
   if (!currentJobId) return;
   fetch('/api/media-convert/cancel', {
     method: 'POST',
@@ -1063,10 +1054,6 @@ function cancelRun() {
 }
 
 function cancelBatch() {
-  if (ptcAbort) {
-    ptcAbort.abort();
-    return;
-  }
   if (activeRunId) {
     // The run keeps the id: its next poll reports the cancelled rows.
     fetch('/api/media-convert/run/cancel', {
@@ -1091,8 +1078,9 @@ function summarizeRun() {
 
 // Hand the checked batch to the Host. The browser no longer walks the files:
 // the run keeps converting after this panel is closed or replaced, and its
-// record is what every later page instance restores from.
-async function runServerBatch(rows: Item[]) {
+// record is what every later page instance restores from. A PTC run is the
+// same shape — the Host asks the model for the plan and executes it in groups.
+async function runServerBatch(rows: Item[], ptc = false) {
   const audioKeys = new Set(audioTargets.value.map((item) => item.key));
   const videoKeys = new Set(videoTargets.value.map((item) => item.key));
   const items = rows.map((item) => {
@@ -1122,7 +1110,12 @@ async function runServerBatch(rows: Item[]) {
       await fetch('/api/media-convert/run', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ items, quality: batchQuality.value, hardware: useGpu.value || undefined }),
+        body: JSON.stringify({
+          items,
+          quality: batchQuality.value,
+          hardware: useGpu.value || undefined,
+          ...(ptc ? { ptc: true, model: ptcModel.value || undefined } : {}),
+        }),
       }),
     );
     if (!data.ok) throw new Error(data.error || t('error.title'));
@@ -1135,104 +1128,14 @@ async function runServerBatch(rows: Item[]) {
   await pollRun(run.id);
 }
 
-async function runPtc(rows: Item[]) {
-  const runId = 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-  const controller = new AbortController();
-  ptcAbort = controller;
-  ptcProgress.value = null;
-  rows.forEach((item) => {
-    item.state = 'converting';
-    item.percent = null;
-  });
-  const poll = setInterval(async () => {
-    try {
-      const data = await readJson<PtcProgressResponse | ErrorResponse>(
-        await fetch('/api/media-convert/batch/progress?id=' + encodeURIComponent(runId)),
-      );
-      if (!data.ok) return;
-      ptcProgress.value = data;
-      runIndeterminate.value = data.stage === 'planning';
-      for (const row of data.items) {
-        const item = rows.find((candidate) => candidate.upload?.id === row.id);
-        if (!item) continue;
-        if (row.state === 'converting') {
-          item.state = 'converting';
-          item.percent = row.percent;
-        } else if (row.state === 'done') {
-          item.percent = 100;
-        }
-      }
-    } catch {
-      // A missed poll is fine; the next one catches up.
-    }
-  }, 500);
-  try {
-    const data = await readJson<BatchResponse | ErrorResponse>(
-      await fetch('/api/media-convert/batch', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          items: rows.map((item) => {
-            const kind = item.upload!.kind;
-            return {
-              id: item.upload!.id,
-              format: isConvertible(kind) ? effectiveTarget(item) : '',
-              quality: kind === 'image' ? batchQuality.value : undefined,
-            };
-          }),
-          quality: batchQuality.value,
-          model: ptcModel.value || undefined,
-          hardware: useGpu.value || undefined,
-          runId,
-        }),
-        signal: controller.signal,
-      }),
-    );
-    if (!data.ok) throw new Error(data.error || t('error.title'));
-    ptcTiming.value = { modelMs: data.modelMs, runMs: data.runMs };
-    const byId = new Map(data.results.map((row) => [row.id, row]));
-    rows.forEach((item) => {
-      const row = byId.get(item.upload!.id);
-      if (row && !row.error && row.output) {
-        item.result = {
-          file: row.output,
-          size: row.size || 0,
-          kind: row.kind || item.upload!.kind,
-          copy: row.copy,
-          hardware: row.hardware,
-        };
-        item.state = 'done';
-        item.percent = 100;
-        item.jobAction = 'batch';
-      } else {
-        item.state = 'error';
-        item.error = row?.error || t('batch.missing');
-      }
-    });
-  } catch (err) {
-    const aborted = controller.signal.aborted;
-    rows.forEach((item) => {
-      if (item.state === 'converting') {
-        item.state = aborted ? 'cancelled' : 'ready';
-        item.percent = null;
-      }
-    });
-    if (!aborted) batchError.value = String((err && (err as Error).message) || err);
-  } finally {
-    clearInterval(poll);
-    ptcProgress.value = null;
-    ptcAbort = null;
-  }
-}
-
 async function startBatch() {
   if (busy.value || !batchTargets.value.length) return;
   batchError.value = '';
   lastRun.value = null;
   ptcTiming.value = null;
   const rows = batchTargets.value.slice();
+  const ptc = operation.value === 'convert' && usePtc.value && rows.length >= 2;
   runKeys.value = rows.map((item) => item.key);
-  runIndeterminate.value = false;
   batchRunning.value = true;
   rows.forEach((item) => {
     item.result = null;
@@ -1242,15 +1145,10 @@ async function startBatch() {
     item.jobAction = '';
   });
   try {
-    if (operation.value === 'convert' && usePtc.value && rows.length >= 2) {
-      runIndeterminate.value = true;
-      await runPtc(rows);
-    } else {
-      await runServerBatch(rows);
-    }
+    await runServerBatch(rows, ptc);
   } finally {
     batchRunning.value = false;
-    runIndeterminate.value = false;
+    runStage.value = '';
     currentJobId = '';
     lastRun.value = summarizeRun();
   }
@@ -1525,7 +1423,6 @@ onBeforeUnmount(() => {
   clearTimeout(liveTimer);
   clearTimeout(clearTimer);
   if (uploadAbort) uploadAbort.abort();
-  if (ptcAbort) ptcAbort.abort();
   if (stopAt && mediaEl.value) mediaEl.value.removeEventListener('timeupdate', stopAt);
   previewToken++;
   releaseLive();

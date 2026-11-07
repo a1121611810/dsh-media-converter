@@ -43,15 +43,16 @@ let ptcReasoning;
 // calls per evaluation; the fake uses a small cap so the test stays quick.
 const PTC_PENDING_LIMIT = 20;
 let ptcPeak = 0;
+let ptcRuns = 0;
 const ptcRuntime = {
   timeout: { defaultMs: 120000, maxMs: 600000 },
   resolve: (request) => request,
   run: async (spec) => {
     ptcProgram = spec.program;
+    ptcRuns += 1;
     const convert = spec.bindings[0].functions.convert;
     // Run the program the Host composed, with the runtime's pending-call gate.
     let pending = 0;
-    ptcPeak = 0;
     const media = {
       convert: async (args) => {
         pending += 1;
@@ -80,13 +81,16 @@ const llm = {
     assert.ok(Array.isArray(options.messages[0].content), 'messages carry content blocks');
     ptcPrompt = options.messages[0].content[0].text;
     ptcReasoning = options.reasoningEffort;
-    // One plan row per file the prompt lists, so a many-file batch stays real.
-    const ids = [...ptcPrompt.matchAll(/id=(\S+) name=/g)].map((match) => match[1]);
-    yield {
-      type: 'text-delta',
-      index: 0,
-      text: JSON.stringify({ files: ids.map((id) => ({ id, format: 'jpg', quality: 60 })) }),
-    };
+    // One plan row per file the prompt lists, picking each file's own target so
+    // videos, audio and images all get a format the Host accepts.
+    const rows = [...ptcPrompt.matchAll(/id=(\S+) name=[^\n]*? kind=(\S+) target=(\S*)/g)].map(
+      ([, id, kind, target]) => ({
+        id,
+        format: target || (kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : 'jpg'),
+        quality: 60,
+      }),
+    );
+    yield { type: 'text-delta', index: 0, text: JSON.stringify({ files: rows }) };
     yield { type: 'finish', reason: { kind: 'stop' } };
   },
 };
@@ -177,6 +181,17 @@ async function waitJob(job) {
   }
   assert.equal(current.state, 'done', current.error);
   assert.ok(fs.existsSync(current.out), 'output written');
+  return current;
+}
+
+// A batch run settles in the background, so tests poll it like the panel does.
+async function waitRun(run) {
+  let current = run;
+  for (let attempt = 0; attempt < 400 && current.state === 'running'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    current = (await call('run?id=' + run.id)).data.run;
+  }
+  assert.notEqual(current.state, 'running', 'the run settled');
   return current;
 }
 
@@ -282,24 +297,25 @@ assert.equal(ranged.body.length, 10);
 const sourceGone = await fetchBinary('source?id=unope');
 assert.equal(sourceGone.status, 404, 'an expired or unknown upload is reported');
 
-// --- PTC batch route -----------------------------------------------------
+// --- PTC batch: planned by the model, executed by the Host as a run ------
 testUploadId = upload.data.id;
-const batch = await call('batch', {
+const ptcStarted = await call('run', {
   method: 'POST',
-  body: JSON.stringify({ ids: [upload.data.id], format: 'jpg', quality: 60, runId: 'testrun' }),
+  body: JSON.stringify({ items: [{ id: upload.data.id, format: 'jpg', quality: 60 }], quality: 60, ptc: true }),
 });
-assert.equal(batch.data.ok, true, JSON.stringify(batch.data));
-assert.equal(batch.data.results.length, 1);
-assert.equal(batch.data.results[0].id, upload.data.id);
-assert.ok(fs.existsSync(batch.data.results[0].output), 'batch output exists');
-assert.equal(batch.data.results[0].kind, 'image');
-assert.ok(batch.data.results[0].size > 0);
-assert.ok(batch.data.modelMs >= 0, 'the batch response carries the model time');
-assert.ok(batch.data.runMs >= 0, 'the batch response carries the conversion time');
+assert.equal(ptcStarted.data.ok, true, JSON.stringify(ptcStarted.data));
+assert.equal(ptcStarted.data.run.kind, 'ptc');
+assert.equal(ptcStarted.data.run.stage, 'planning', 'a PTC run starts in planning');
+const ptcDone = await waitRun(ptcStarted.data.run);
+assert.equal(ptcDone.state, 'done');
+assert.equal(ptcDone.items[0].state, 'done');
+assert.equal(ptcDone.items[0].result.kind, 'image');
+assert.ok(fs.existsSync(ptcDone.items[0].result.file), 'the planned conversion wrote its output');
+assert.ok(ptcDone.modelMs >= 0 && ptcDone.runMs >= 0, 'the run carries both timings');
 assert.match(ptcProgram, /media\.convert/, 'the host composes the PTC program from the plan');
 assert.match(ptcProgram, new RegExp(upload.data.id), 'the plan carries the selected file');
 // The runtime refuses more than maxPendingCalls (128 by default) outstanding
-// binding calls; a 174-file batch must not be one Promise.all.
+// binding calls; a big plan must not be one Promise.all.
 assert.doesNotMatch(ptcProgram, /Promise\.all\(plan\.map/, 'a big plan is not one pending-call wave');
 assert.match(ptcProgram, /i \+= 16/, 'the plan runs in bounded waves');
 assert.match(ptcPrompt, /JSON/);
@@ -307,33 +323,49 @@ assert.match(ptcPrompt, /每个文件恰好一条/);
 assert.match(ptcPrompt, new RegExp('id=' + upload.data.id));
 assert.equal(ptcReasoning, 'low', 'the lowest reasoning effort is requested');
 
-// A big plan must not open one binding call per file: the runtime refuses more
-// than maxPendingCalls (128 by default) and a 174-file batch tripped it.
+// A skipped row never reaches the model; the plan covers only real work and
+// the skipped row keeps its reason after the run.
+const skipUpload = await call('upload?name=skip-me.png', { method: 'POST', body: fs.readFileSync(sample) });
+const ptcSkipped = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [
+      { id: upload.data.id, format: 'jpg' },
+      { id: skipUpload.data.id, skip: true, reason: 'hint.noAudio' },
+    ],
+    ptc: true,
+  }),
+});
+assert.equal(ptcSkipped.data.ok, true, JSON.stringify(ptcSkipped.data));
+const ptcSkippedDone = await waitRun(ptcSkipped.data.run);
+assert.equal(ptcSkippedDone.items[0].state, 'done');
+assert.equal(ptcSkippedDone.items[1].state, 'skipped', 'a skipped row is not planned');
+assert.equal(ptcSkippedDone.items[1].error, 'hint.noAudio');
+
+// 41 files exceed one group (40 files), so the Host starts a second sandbox
+// evaluation with its own timeout instead of one 10-minute-capped run.
 const many = [];
-for (let i = 0; i < 40; i += 1) {
+for (let i = 0; i < 41; i += 1) {
   const row = await call('upload?name=many-' + i + '.png', { method: 'POST', body: fs.readFileSync(sample) });
   assert.equal(row.data.ok, true, JSON.stringify(row.data));
   many.push(row.data.id);
 }
-const manyBatch = await call('batch', {
+ptcPeak = 0;
+const runsBefore = ptcRuns;
+const manyStarted = await call('run', {
   method: 'POST',
-  body: JSON.stringify({ ids: many, format: 'jpg', quality: 60, runId: 'manyrun' }),
+  body: JSON.stringify({ items: many.map((id) => ({ id, format: 'jpg', quality: 60 })), quality: 60, ptc: true }),
 });
-assert.equal(manyBatch.data.ok, true, JSON.stringify(manyBatch.data));
-assert.equal(manyBatch.data.results.length, 40);
+assert.equal(manyStarted.data.ok, true, JSON.stringify(manyStarted.data));
+const manyDone = await waitRun(manyStarted.data.run);
+assert.equal(manyDone.state, 'done');
+assert.equal(manyDone.items.filter((item) => item.state === 'done').length, 41);
+assert.equal(ptcRuns - runsBefore, 2, 'the batch was split into two evaluations');
 assert.ok(ptcPeak <= 16, `the program kept at most 16 binding calls pending (peak ${ptcPeak})`);
 assert.ok(
-  manyBatch.data.results.every((row) => !row.error),
+  manyDone.items.every((item) => !item.error),
   'no row was refused for too many pending binding calls',
 );
-
-const progress = await call('batch/progress?id=testrun');
-assert.equal(progress.data.ok, true, JSON.stringify(progress.data));
-assert.equal(progress.data.stage, 'done');
-assert.equal(progress.data.items[0].state, 'done');
-assert.equal(progress.data.items[0].percent, 100);
-assert.equal(progress.data.model.name, 'Test Model');
-assert.ok(progress.data.modelMs >= 0);
 
 const modelList = await call('models');
 assert.equal(modelList.data.ok, true);
@@ -342,44 +374,51 @@ assert.equal(modelList.data.default.model, 'test');
 assert.equal(modelList.data.default.name, 'Test Model');
 assert.ok(modelList.data.models.some((item) => item.provider === 'test' && item.id === 'test'));
 
-const explicit = await call('batch', {
+const explicit = await call('run', {
   method: 'POST',
   body: JSON.stringify({
     items: [{ id: testUploadId, format: 'jpg' }],
     model: { provider: 'test', model: 'test' },
     quality: 60,
+    ptc: true,
   }),
 });
 assert.equal(explicit.data.ok, true, JSON.stringify(explicit.data));
+await waitRun(explicit.data.run);
 assert.equal(ptcReasoning, 'low');
 
-const unregistered = await call('batch', {
+const unregistered = await call('run', {
   method: 'POST',
-  body: JSON.stringify({ items: [{ id: testUploadId, format: 'jpg' }], model: { provider: 'test', model: 'nope' } }),
+  body: JSON.stringify({
+    items: [{ id: testUploadId, format: 'jpg' }],
+    model: { provider: 'test', model: 'nope' },
+    ptc: true,
+  }),
 });
 assert.equal(unregistered.data.ok, false);
 assert.match(unregistered.data.error, /注册/);
 
-// A program-returned path is never trusted; the host uses the binding's record.
+// A program-returned path is never trusted; the Host reports what the binding
+// actually wrote.
 const realPtcRun = ptcRuntime.run;
 ptcRuntime.run = async (spec) => {
   await spec.bindings[0].functions.convert({ id: testUploadId, format: 'png' });
   return { value: [{ id: testUploadId, output: '/etc/passwd' }], logs: [] };
 };
-const smuggled = await call('batch', {
+const smuggledStarted = await call('run', {
   method: 'POST',
-  body: JSON.stringify({ ids: [upload.data.id], format: 'png' }),
+  body: JSON.stringify({ items: [{ id: testUploadId, format: 'png' }], ptc: true }),
 });
-assert.equal(smuggled.data.ok, true, JSON.stringify(smuggled.data));
-assert.notEqual(smuggled.data.results[0].output, '/etc/passwd');
-assert.ok(fs.existsSync(smuggled.data.results[0].output));
+const smuggled = await waitRun(smuggledStarted.data.run);
+assert.notEqual(smuggled.items[0].result.file, '/etc/passwd');
+assert.ok(fs.existsSync(smuggled.items[0].result.file));
 ptcRuntime.run = realPtcRun;
 
 // No runtime means a clear stop, never a silent fallback to fixed rules.
 services.ptcRuntime = undefined;
-const noPtc = await call('batch', {
+const noPtc = await call('run', {
   method: 'POST',
-  body: JSON.stringify({ ids: [upload.data.id], format: 'jpg' }),
+  body: JSON.stringify({ items: [{ id: upload.data.id, format: 'jpg' }], ptc: true }),
 });
 assert.equal(noPtc.data.ok, false);
 assert.match(noPtc.data.error, /PTC/);
@@ -722,6 +761,22 @@ for (let attempt = 0; attempt < 100 && cancelledRunState.items[0].state === 'con
 }
 assert.equal(cancelledRunState.state, 'cancelled');
 assert.equal(cancelledRunState.items[0].state, 'cancelled', 'the in-flight item dies with the run');
+
+// A PTC run is cancelled the same way: its own signal ends the sandbox and the
+// ffmpeg job inside it.
+const slowPtc = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: slowUpload.data.id, format: 'webm' }], ptc: true }),
+});
+assert.equal(slowPtc.data.ok, true, JSON.stringify(slowPtc.data));
+const slowPtcCancel = await call('run/cancel', {
+  method: 'POST',
+  body: JSON.stringify({ id: slowPtc.data.run.id }),
+});
+assert.equal(slowPtcCancel.data.ok, true, JSON.stringify(slowPtcCancel.data));
+const slowPtcState = await waitRun(slowPtc.data.run);
+assert.equal(slowPtcState.state, 'cancelled');
+assert.equal(slowPtcState.items[0].state, 'cancelled', 'the PTC sandbox is stopped with the run');
 
 const unknownRun = await call('run?id=nope');
 assert.deepEqual(unknownRun.data, { ok: true, run: null }, 'an unknown run is reported as absent');

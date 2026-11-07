@@ -52,7 +52,7 @@ import {
   trimArgs,
 } from './lib/plan.js';
 import type { ConvertPlan, MediaKind, MediaMeta, StreamInfo, TrimWindow } from './lib/plan.js';
-import { WEIGHTS, capacityFor, threadsFor } from './lib/schedule.js';
+import { WEIGHTS, capacityFor, planPtcGroups, threadsFor } from './lib/schedule.js';
 import {
   expandDirs,
   ffmpegCandidates,
@@ -260,7 +260,7 @@ export interface JobInfo {
 // starting one normal Job per file. The run is what a page restores from when
 // it is closed, reloaded, or switched away mid-batch — the browser is not the
 // thing that keeps the batch alive.
-export type RunState = 'running' | 'done' | 'cancelled';
+export type RunState = 'running' | 'done' | 'cancelled' | 'error';
 export type RunItemState = 'waiting' | 'converting' | 'skipped' | 'cancelled' | 'done' | 'error';
 export interface RunItemInfo {
   id: string;
@@ -278,7 +278,14 @@ export interface RunItemInfo {
 export interface RunInfo {
   id: string;
   state: RunState;
+  // 'ptc' runs are planned by the model and executed in bounded evaluation
+  // waves; `stage` tells a rebuilt page whether the model is still deciding.
+  kind: 'plain' | 'ptc';
+  stage?: 'planning' | 'converting';
   at: number;
+  modelMs?: number;
+  runMs?: number;
+  error?: string;
   items: RunItemInfo[];
 }
 
@@ -318,6 +325,7 @@ interface JsonBody {
   items?: unknown;
   model?: unknown;
   runId?: unknown;
+  ptc?: unknown;
 }
 
 // The answers of the routes, each built by a small function so the exported
@@ -430,17 +438,6 @@ export type DecodeResponse = ReturnType<typeof decodeTextPayload> | ReturnType<t
 
 const errorPayload = (error: string): ErrorResponse => ({ ok: false, error });
 
-// One row per requested file for the PTC batch route.
-export interface BatchResult {
-  id: string;
-  output?: string;
-  kind?: MediaKind;
-  size?: number;
-  copy?: boolean;
-  hardware?: boolean;
-  error?: string;
-}
-
 export interface PtcModelOption {
   provider: string;
   providerName: string;
@@ -454,32 +451,6 @@ export interface ModelsResponse {
   models: PtcModelOption[];
   unavailableProviders?: string[];
 }
-export interface BatchProgressItem {
-  id: string;
-  state: 'waiting' | 'converting' | 'done' | 'error';
-  percent: number | null;
-  format?: string;
-}
-export interface BatchProgress {
-  runId: string;
-  stage: 'planning' | 'converting' | 'done' | 'error';
-  startedAt: number;
-  modelChars: number;
-  modelMs?: number;
-  runMs?: number;
-  model: { provider: string; name: string } | null;
-  capacity: number;
-  active: number;
-  items: BatchProgressItem[];
-  error?: string;
-}
-const batchPayload = (results: BatchResult[], timing?: { modelMs?: number; runMs?: number }) => ({
-  ok: true as const,
-  results,
-  ...(timing?.modelMs === undefined ? {} : { modelMs: timing.modelMs }),
-  ...(timing?.runMs === undefined ? {} : { runMs: timing.runMs }),
-});
-export type BatchResponse = ReturnType<typeof batchPayload>;
 
 const PREFIX = '/api/media-convert';
 const MAX_BASE64_BYTES = 24 * 1024 * 1024;
@@ -649,8 +620,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
 
   const uploads = new Map<string, Upload>();
   const jobs = new Map<string, Job>();
-  const batches = new Map<string, BatchProgress>();
   const runs = new Map<string, RunInfo>();
+  const runControllers = new Map<string, AbortController>();
   let latestRun = '';
   const controllers = new Map<
     string,
@@ -905,6 +876,189 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     if (run.state === 'running') run.state = 'done';
   };
 
+  // PTC batch: the model decides per-file formats once, then the Host runs the
+  // plan in bounded evaluation groups. Each group is its own sandbox evaluation
+  // with its own timeout, so the batch may outlive the runtime's per-run cap and
+  // survives the panel going away.
+  const executePtcRun = async (
+    run: RunInfo,
+    requested: { provider: string; model: string } | null,
+    quality: number,
+    hardware: boolean,
+  ): Promise<void> => {
+    const controller = new AbortController();
+    runControllers.set(run.id, controller);
+    const { signal } = controller;
+    const runtime = ctx.get('ptcRuntime');
+    const policies = ctx.get('sandboxPolicy');
+    try {
+      // A cancel can land between the POST answer and this line; the run is
+      // already cancelled then, and the rows already say so.
+      if (run.state !== 'running') return;
+      if (!runtime || !policies) {
+        throw new Error('PTC 调度不可用：当前环境缺少 PTC 运行时（不会回退到固定规则）');
+      }
+      // A skipped row (a silent video asked for an audio-only target) never
+      // reaches the model: its format is empty, and the plan is validated
+      // against exactly the files that will be converted.
+      const planned = run.items.filter((item) => item.state !== 'skipped');
+      const files: Upload[] = [];
+      for (const item of planned) {
+        const upload = uploads.get(item.id);
+        if (upload) files.push(upload);
+      }
+      if (files.length !== planned.length) throw new Error('文件已失效，请重新选择');
+      const targets = new Map(planned.map((item) => [item.id, item.format]));
+      const model = await resolvePtcModel(requested);
+      run.stage = 'planning';
+      const modelStart = Date.now();
+      const plan = await collectPtcPlan(files, targets, quality, model, controller);
+      run.modelMs = Date.now() - modelStart;
+      for (const row of plan) {
+        const item = run.items.find((candidate) => candidate.id === row.id);
+        if (item) item.format = row.format;
+      }
+      run.stage = 'converting';
+      await fsp.mkdir(outDir, { recursive: true });
+      const policy = policies.resolve({ mode: 'read-only' });
+      const limits = runtime.timeout || { defaultMs: 120_000, maxMs: 600_000 };
+      const allowed = new Set(files.map((file) => file.id));
+      const runStart = Date.now();
+      for (const group of planPtcGroups(files, limits)) {
+        if (run.state !== 'running' || signal.aborted) break;
+        const groupIds = new Set(group.items.map((file) => file.id));
+        const rows = plan.filter((row) => groupIds.has(row.id));
+        if (!rows.length) continue;
+        const spec = runtime.resolve({
+          program: ptcProgramFor(rows),
+          bindings: [
+            {
+              global: 'media',
+              functions: {
+                convert: async (args: unknown) => {
+                  const a = (args || {}) as Record<string, unknown>;
+                  const upload = uploads.get(String(a.id || ''));
+                  if (!upload || !allowed.has(upload.id)) throw new Error('文件不在这一批里');
+                  const target = String(a.format || '');
+                  if (!formatsFor(upload.kind).includes(target)) {
+                    throw new Error(`不支持的输出格式: ${target}`);
+                  }
+                  const entry = run.items.find((item) => item.id === upload.id);
+                  if (entry) {
+                    entry.state = 'converting';
+                    entry.percent = null;
+                    entry.error = '';
+                  }
+                  const estimate = planFor(upload, { format: target, quality: Number(a.quality ?? quality), hardware });
+                  const weight = estimate.copy
+                    ? WEIGHTS.copy
+                    : estimate.hardware
+                      ? WEIGHTS.hardware
+                      : upload.kind === 'video'
+                        ? WEIGHTS.video
+                        : upload.kind === 'audio'
+                          ? WEIGHTS.audio
+                          : WEIGHTS.image;
+                  try {
+                    const finished = await schedule(
+                      weight,
+                      async (threads) => {
+                        const plan = planFor(
+                          upload,
+                          { format: target, quality: Number(a.quality ?? quality), hardware },
+                          threads,
+                        );
+                        const { job, done } = await startJob(upload, plan, null, '');
+                        if (entry) entry.jobId = job.id;
+                        const tick = entry
+                          ? setInterval(() => {
+                              entry.percent = job.percent;
+                            }, 300)
+                          : 0;
+                        try {
+                          return await awaitJob(job, done, signal);
+                        } finally {
+                          if (tick) clearInterval(tick);
+                        }
+                      },
+                      estimate.hardware,
+                    );
+                    if (entry) {
+                      entry.state = 'done';
+                      entry.percent = 100;
+                      entry.result = {
+                        file: finished.out,
+                        size: finished.size,
+                        kind: finished.kind,
+                        copy: finished.copy,
+                        hardware: finished.hardware,
+                      };
+                    }
+                    return {
+                      id: upload.id,
+                      output: finished.out,
+                      kind: finished.kind,
+                      sizeBytes: finished.size,
+                      copy: finished.copy,
+                      hardware: finished.hardware,
+                    };
+                  } catch (err) {
+                    if (entry) {
+                      entry.state = signal.aborted ? 'cancelled' : 'error';
+                      entry.percent = null;
+                      if (entry.state === 'error') entry.error = errorText(err);
+                    }
+                    throw err;
+                  }
+                },
+              },
+            },
+          ],
+          cwd: policy.workspaceRoot,
+          sandboxPolicy: policy,
+          timeoutMs: group.timeoutMs,
+          signal,
+        });
+        const watchdog = setTimeout(() => controller.abort(), group.timeoutMs + 5_000);
+        let result: { value?: unknown; logs?: string[]; error?: { kind: string; message: string } };
+        try {
+          result = await runtime.run(spec);
+        } finally {
+          clearTimeout(watchdog);
+        }
+        if (result.error) {
+          const message = `PTC 运行失败（${result.error.kind}）：${result.error.message}`;
+          for (const item of run.items) {
+            if (groupIds.has(item.id) && (item.state === 'waiting' || item.state === 'converting')) {
+              item.state = 'error';
+              item.percent = null;
+              item.error = message;
+            }
+          }
+          throw new Error(message);
+        }
+      }
+      run.runMs = Date.now() - runStart;
+      run.stage = undefined;
+      if (run.state === 'running') run.state = 'done';
+    } catch (err) {
+      run.stage = undefined;
+      if (run.state === 'running') {
+        run.state = signal.aborted ? 'cancelled' : 'error';
+        run.error = signal.aborted ? '' : errorText(err);
+      }
+      for (const item of run.items) {
+        if (item.state === 'waiting' || item.state === 'converting') {
+          const cancelled = signal.aborted || run.state === 'cancelled';
+          item.state = cancelled ? 'cancelled' : 'error';
+          item.percent = null;
+          if (!cancelled && !item.error) item.error = run.error || '处理失败';
+        }
+      }
+    } finally {
+      runControllers.delete(run.id);
+    }
+  };
   const planFor = (upload: Upload, body: JsonBody, threads = 0): ConvertPlan => {
     const mode = String(body.mode || 'convert');
     if (mode === 'extract-audio') return extractPlan(upload.streams, 'audio');
@@ -1007,6 +1161,99 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       }
       return { id: file.id, format, quality: Math.round(value) };
     });
+  };
+
+  // Which registered model plans this batch. An explicit choice must exist in
+  // the catalog; otherwise the current main model is used — no silent fallback.
+  const resolvePtcModel = async (
+    requested: { provider: string; model: string } | null,
+  ): Promise<{ provider: string; modelId: string; modelName: string }> => {
+    const llm = ctx.get('llm');
+    const main = ctx.get('agentDefaultModel');
+    if (!llm) throw new Error('模型服务不可用');
+    let provider = '';
+    let modelId = '';
+    if (requested) {
+      provider = requested.provider;
+      modelId = requested.model;
+      if (!provider || !modelId) throw new Error('模型选择不完整');
+      const catalog = await loadModelCatalog(llm);
+      if (!catalog.models.some((item) => item.provider === provider && item.id === modelId)) {
+        throw new Error('这个模型没有在 DSH 注册');
+      }
+    } else {
+      const selection = main?.currentSelection();
+      if (!selection?.provider || !selection.model) throw new Error('没有可用的主模型');
+      provider = selection.provider;
+      modelId = selection.model;
+    }
+    const catalog = await loadModelCatalog(llm);
+    const modelName = catalog.models.find((item) => item.provider === provider && item.id === modelId)?.name || modelId;
+    return { provider, modelId, modelName };
+  };
+
+  // The model only decides formats; the Host validates the JSON and builds the
+  // program itself. A stalled stream is cut after three minutes.
+  const collectPtcPlan = async (
+    files: Upload[],
+    targets: Map<string, string>,
+    quality: number,
+    model: { provider: string; modelId: string },
+    controller: AbortController,
+  ): Promise<{ id: string; format: string; quality?: number }[]> => {
+    const llm = ctx.get('llm');
+    if (!llm) throw new Error('模型服务不可用');
+    const { signal } = controller;
+    let reasoningEffort: string | undefined;
+    try {
+      const info = await llm.resolveModelInfo?.(model.provider, model.modelId, signal);
+      reasoningEffort = info?.reasoning?.efforts?.[0]?.id;
+    } catch {
+      // The reasoning hint is optional; the model still runs with its default.
+    }
+    let text = '';
+    let failure = '';
+    const modelTimer = setTimeout(() => controller.abort(), 180_000);
+    try {
+      for await (const chunk of llm.stream({
+        provider: model.provider,
+        model: model.modelId,
+        messages: [{ role: 'user', content: [{ type: 'text', text: ptcPlanPrompt(files, targets, quality) }] }],
+        maxTokens: 6000,
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+        signal,
+      })) {
+        if (chunk.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text;
+        else if (chunk.type === 'finish' && chunk.reason && chunk.reason.kind !== 'stop') {
+          failure = chunk.reason.failure?.message || chunk.reason.kind;
+        }
+      }
+    } catch (err) {
+      if (signal.aborted) throw new Error('模型调用超时或被取消');
+      throw new Error('模型调用失败：' + errorText(err));
+    } finally {
+      clearTimeout(modelTimer);
+    }
+    if (failure) throw new Error('模型调用失败：' + failure);
+    if (!text.trim()) throw new Error('模型没有返回计划');
+    return parsePtcPlan(text, files);
+  };
+
+  // One evaluation per group. The runtime refuses more than maxPendingCalls
+  // (128 by default) outstanding binding calls, so the plan runs in waves.
+  const ptcProgramFor = (rows: { id: string; format: string; quality?: number }[]): string => {
+    const wave = 16;
+    return (
+      'const plan = ' +
+      JSON.stringify(rows) +
+      ';\n' +
+      'const out = [];\n' +
+      `for (let i = 0; i < plan.length; i += ${wave}) {\n` +
+      `  const batch = plan.slice(i, i + ${wave});\n` +
+      '  out.push(...await Promise.all(batch.map(async (p) => { try { return await media.convert(p); } catch (e) { return { id: p.id, error: String((e && e.message) || e) }; } })));\n' +
+      '}\n' +
+      'return out;'
+    );
   };
 
   // Cooperative CPU-aware queue. ffmpeg processes are CPU-heavy, so the
@@ -1296,9 +1543,6 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         for (const [id, job] of jobs) {
           if (job.state !== 'running' && now - job.at > JOB_TTL_MS) jobs.delete(id);
         }
-        for (const [id, progress] of batches) {
-          if (now - progress.startedAt > 30 * 60 * 1000) batches.delete(id);
-        }
         // A finished run is kept for the same reason: a page that comes back
         // still restores the batch it started.
         for (const [id, run] of runs) {
@@ -1513,330 +1757,6 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       }),
       webServer.register({
         kind: 'exact',
-        path: PREFIX + '/batch/progress',
-        handler: (req, res) => {
-          if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
-          if (rejectUnauthenticated(req, res)) return;
-          const id = requestUrl(req).searchParams.get('id');
-          const progress = id ? batches.get(id) : undefined;
-          if (!progress) return json(res, 200, errorPayload('进度不存在'));
-          json(res, 200, { ok: true, ...progress });
-        },
-      }),
-      webServer.register({
-        kind: 'exact',
-        path: PREFIX + '/batch',
-        handler: async (req, res) => {
-          if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
-          if (rejectUnauthenticated(req, res)) return;
-          if (!ffmpeg) return json(res, 200, noFfmpeg);
-          let controller: AbortController | null = null;
-          let clientGone = false;
-          let progress: BatchProgress | null = null;
-          try {
-            const body = await readJson(req);
-            const rawItems = Array.isArray(body.items) ? body.items : [];
-            const targetById = new Map<string, string>();
-            for (const raw of rawItems) {
-              const item = (raw || {}) as Record<string, unknown>;
-              const id = String(item.id || '');
-              if (!id) continue;
-              targetById.set(id, String(item.format || ''));
-            }
-            const ids = [
-              ...new Set(
-                rawItems.length
-                  ? rawItems.map((raw) => String(((raw || {}) as Record<string, unknown>).id || ''))
-                  : (Array.isArray(body.ids) ? body.ids : []).map(String),
-              ),
-            ].filter(Boolean);
-            const format = String(body.format || '') || [...targetById.values()][0] || '';
-            const quality = Number(body.quality ?? 90);
-            const hardware = Boolean(body.hardware);
-            const runId =
-              String(body.runId || '') || 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-            if (!ids.length) throw new Error('没有要处理的文件');
-            if (!format) throw new Error('缺少目标格式');
-            const found = ids.map((id) => uploads.get(id));
-            if (found.some((file) => !file)) throw new Error('文件已失效，请重新选择');
-            const files = found as Upload[];
-            for (const file of files) if (!targetById.get(file.id)) targetById.set(file.id, format);
-            if ([...targetById.values()].some((target) => !target)) throw new Error('缺少目标格式');
-            const runtime = ctx.get('ptcRuntime');
-            const llm = ctx.get('llm');
-            const model = ctx.get('agentDefaultModel');
-            const policies = ctx.get('sandboxPolicy');
-            const requested =
-              body.model && typeof body.model === 'object' ? (body.model as Record<string, unknown>) : null;
-            if (!runtime || !llm || !policies || (!requested && !model)) {
-              return json(
-                res,
-                200,
-                errorPayload('PTC 调度不可用：当前环境缺少 PTC 运行时或模型服务（不会回退到固定规则）'),
-              );
-            }
-            let provider = '';
-            let modelId = '';
-            if (requested) {
-              provider = String(requested.provider || '');
-              modelId = String(requested.model || '');
-              if (!provider || !modelId) throw new Error('模型选择不完整');
-              const catalog = await loadModelCatalog(llm);
-              if (!catalog.models.some((item) => item.provider === provider && item.id === modelId)) {
-                throw new Error('这个模型没有在 DSH 注册');
-              }
-            } else {
-              const selection = model?.currentSelection();
-              if (!selection?.provider || !selection?.model) throw new Error('没有可用的主模型');
-              provider = selection.provider;
-              modelId = selection.model;
-            }
-            const modelCatalogForName = await loadModelCatalog(llm);
-            const modelName =
-              modelCatalogForName.models.find((item) => item.provider === provider && item.id === modelId)?.name ||
-              modelId;
-            progress = {
-              runId,
-              stage: 'planning',
-              startedAt: Date.now(),
-              modelChars: 0,
-              model: { provider, name: modelName },
-              capacity: capacityFor(cpuUsage, cpus),
-              active: activeWeight,
-              items: files.map((file) => ({ id: file.id, state: 'waiting', percent: null })),
-            };
-            batches.set(runId, progress);
-            controller = new AbortController();
-            const { signal } = controller;
-            let reasoningEffort: string | undefined;
-            try {
-              const info = await llm.resolveModelInfo?.(provider, modelId, signal);
-              reasoningEffort = info?.reasoning?.efforts?.[0]?.id;
-            } catch {
-              // The reasoning hint is optional; the model still runs with its default.
-            }
-            res.once('close', () => {
-              if (!res.writableEnded) {
-                clientGone = true;
-                controller?.abort();
-              }
-            });
-            let text = '';
-            let failure = '';
-            const modelTimer = setTimeout(() => controller?.abort(), 180_000);
-            try {
-              for await (const chunk of llm.stream({
-                provider,
-                model: modelId,
-                messages: [
-                  { role: 'user', content: [{ type: 'text', text: ptcPlanPrompt(files, targetById, quality) }] },
-                ],
-                maxTokens: 6000,
-                ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-                signal,
-              })) {
-                if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
-                  text += chunk.text;
-                  if (progress) progress.modelChars += chunk.text.length;
-                } else if (chunk.type === 'finish' && chunk.reason && chunk.reason.kind !== 'stop') {
-                  failure = chunk.reason.failure?.message || chunk.reason.kind;
-                }
-              }
-            } catch (err) {
-              if (clientGone) throw err;
-              if (signal.aborted) throw new Error('模型调用超时或被取消');
-              throw new Error('模型调用失败：' + errorText(err));
-            } finally {
-              clearTimeout(modelTimer);
-            }
-            if (failure) throw new Error('模型调用失败：' + failure);
-            if (!text.trim()) throw new Error('模型没有返回计划');
-            if (progress) {
-              progress.stage = 'converting';
-              progress.modelMs = Date.now() - progress.startedAt;
-            }
-            const plan = parsePtcPlan(text, files);
-            // The PTC runtime refuses more than `maxPendingCalls` binding calls
-            // per evaluation (128 by default), so a big batch cannot be one
-            // Promise.all — 174 files tripped "pending binding calls exceed
-            // configured limits". Walk the plan in small waves instead; the
-            // plugin's own schedule() still gates ffmpeg by CPU inside each call.
-            const wave = 16;
-            const program =
-              'const plan = ' +
-              JSON.stringify(plan) +
-              ';\n' +
-              'const out = [];\n' +
-              `for (let i = 0; i < plan.length; i += ${wave}) {\n` +
-              `  const batch = plan.slice(i, i + ${wave});\n` +
-              '  out.push(...await Promise.all(batch.map(async (p) => { try { return await media.convert(p); } catch (e) { return { id: p.id, error: String((e && e.message) || e) }; } })));\n' +
-              '}\n' +
-              'return out;';
-            await fsp.mkdir(outDir, { recursive: true });
-            const policy = policies.resolve({ mode: 'read-only' });
-            const totalMs = files.reduce((sum, file) => sum + (file.duration || 0) * 1000, 0);
-            const limits = runtime.timeout || { defaultMs: 120_000, maxMs: 600_000 };
-            const timeoutMs = Math.min(
-              limits.maxMs,
-              Math.max(limits.defaultMs, 60_000 + totalMs * 2 + files.length * 5_000),
-            );
-            // The model's returned paths are never trusted: the binding records
-            // what it actually wrote, and the answer is built from that map.
-            const converted = new Map<
-              string,
-              { output: string; kind: MediaKind; size: number; copy: boolean; hardware: boolean }
-            >();
-            // The program may only touch the files in this batch, not any other
-            // upload still living in the temp map.
-            const allowed = new Set(files.map((file) => file.id));
-            const spec = runtime.resolve({
-              program,
-              bindings: [
-                {
-                  global: 'media',
-                  functions: {
-                    convert: async (args: unknown) => {
-                      const a = (args || {}) as Record<string, unknown>;
-                      const upload = uploads.get(String(a.id || ''));
-                      if (!upload || !allowed.has(upload.id)) throw new Error('文件不在这一批里');
-                      const target = String(a.format || '');
-                      if (!formatsFor(upload.kind).includes(target)) {
-                        throw new Error(`不支持的输出格式: ${target}`);
-                      }
-                      const entry = progress?.items.find((item) => item.id === upload.id);
-                      if (entry) entry.state = 'converting';
-                      const estimate = planFor(upload, {
-                        format: target,
-                        quality: Number(a.quality ?? quality),
-                        hardware,
-                      });
-                      const weight = estimate.copy
-                        ? WEIGHTS.copy
-                        : estimate.hardware
-                          ? WEIGHTS.hardware
-                          : upload.kind === 'video'
-                            ? WEIGHTS.video
-                            : upload.kind === 'audio'
-                              ? WEIGHTS.audio
-                              : WEIGHTS.image;
-                      const finished = await schedule(
-                        weight,
-                        async (threads) => {
-                          const plan = planFor(
-                            upload,
-                            { format: target, quality: Number(a.quality ?? quality), hardware },
-                            threads,
-                          );
-                          const { job, done } = await startJob(upload, plan, null, '');
-                          const tick = entry
-                            ? setInterval(() => {
-                                entry.percent = job.percent;
-                              }, 300)
-                            : 0;
-                          try {
-                            const finished = await awaitJob(job, done, signal);
-                            if (entry) {
-                              entry.state = 'done';
-                              entry.percent = 100;
-                              entry.format = target;
-                            }
-                            return finished;
-                          } catch (err) {
-                            if (entry) {
-                              entry.state = 'error';
-                              entry.percent = null;
-                            }
-                            throw err;
-                          } finally {
-                            if (tick) clearInterval(tick);
-                          }
-                        },
-                        estimate.hardware,
-                      );
-                      const record = {
-                        output: finished.out,
-                        kind: finished.kind,
-                        size: finished.size,
-                        copy: finished.copy,
-                        hardware: finished.hardware,
-                      };
-                      converted.set(upload.id, record);
-                      return {
-                        id: upload.id,
-                        output: record.output,
-                        kind: record.kind,
-                        sizeBytes: record.size,
-                        copy: record.copy,
-                        hardware: record.hardware,
-                      };
-                    },
-                  },
-                },
-              ],
-              cwd: policy.workspaceRoot,
-              sandboxPolicy: policy,
-              timeoutMs,
-              signal,
-            });
-            const watchdog = setTimeout(() => controller?.abort(), timeoutMs + 5_000);
-            let result: { value?: unknown; logs?: string[]; error?: { kind: string; message: string } };
-            try {
-              result = await runtime.run(spec);
-            } finally {
-              clearTimeout(watchdog);
-            }
-            if (clientGone || res.writableEnded) return;
-            if (result.error) {
-              controller.abort();
-              throw new Error(`PTC 运行失败（${result.error.kind}）：${result.error.message}`);
-            }
-            const value = result.value;
-            const rows = Array.isArray(value)
-              ? value
-              : value && typeof value === 'object' && Array.isArray((value as { results?: unknown }).results)
-                ? (value as { results: unknown[] }).results
-                : [];
-            const rowErrors = new Map<string, string>();
-            for (const row of rows) {
-              if (!row || typeof row !== 'object') continue;
-              const r = row as { id?: unknown; error?: unknown };
-              if (r.id && r.error) rowErrors.set(String(r.id), String(r.error));
-            }
-            const results: BatchResult[] = files.map((upload) => {
-              const done = converted.get(upload.id);
-              if (done)
-                return {
-                  id: upload.id,
-                  output: done.output,
-                  kind: done.kind,
-                  size: done.size,
-                  copy: done.copy,
-                  hardware: done.hardware,
-                };
-              return { id: upload.id, error: rowErrors.get(upload.id) || '模型没有处理这个文件' };
-            });
-            if (progress) {
-              progress.stage = 'done';
-              progress.runMs = Date.now() - progress.startedAt - (progress.modelMs || 0);
-              console.log(
-                `[dsh-media-converter] PTC model=${progress.modelMs ?? 0}ms run=${progress.runMs ?? 0}ms files=${files.length} model=${provider}/${modelId}`,
-              );
-            }
-            json(res, 200, batchPayload(results, { modelMs: progress?.modelMs, runMs: progress?.runMs }));
-          } catch (err) {
-            if (clientGone || res.writableEnded) return;
-            if (progress) {
-              progress.stage = 'error';
-              progress.error = errorText(err);
-            }
-            json(res, 200, errorPayload(errorText(err)));
-          } finally {
-            controller = null;
-          }
-        },
-      }),
-      webServer.register({
-        kind: 'exact',
         path: `${PREFIX}/cancel`,
         handler: async (req, res) => {
           if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
@@ -1917,16 +1837,38 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               });
             }
             if (!items.length) return json(res, 200, errorPayload('没有要处理的文件'));
+            const ptc = body.ptc === true;
+            let requested: { provider: string; model: string } | null = null;
+            if (ptc) {
+              // Fail before answering when the runtime or model is missing: the
+              // panel then shows the same immediate error a single job would.
+              if (!ctx.get('ptcRuntime') || !ctx.get('sandboxPolicy')) {
+                return json(
+                  res,
+                  200,
+                  errorPayload('PTC 调度不可用：当前环境缺少 PTC 运行时或模型服务（不会回退到固定规则）'),
+                );
+              }
+              const rawModel =
+                body.model && typeof body.model === 'object' ? (body.model as Record<string, unknown>) : null;
+              requested = rawModel
+                ? { provider: String(rawModel.provider || ''), model: String(rawModel.model || '') }
+                : null;
+              await resolvePtcModel(requested);
+            }
             const run: RunInfo = {
               id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
               state: 'running',
+              kind: ptc ? 'ptc' : 'plain',
+              ...(ptc ? { stage: 'planning' as const } : {}),
               at: Date.now(),
               items,
             };
             runs.set(run.id, run);
             latestRun = run.id;
             json(res, 200, { ok: true, run });
-            void executeRun(run, Number(body.quality ?? 90), Boolean(body.hardware));
+            if (ptc) void executePtcRun(run, requested, Number(body.quality ?? 90), Boolean(body.hardware));
+            else void executeRun(run, Number(body.quality ?? 90), Boolean(body.hardware));
           } catch (err) {
             json(res, 200, errorPayload(errorText(err)));
           }
@@ -1945,6 +1887,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             if (run.state === 'running') {
               run.state = 'cancelled';
               for (const item of run.items) if (item.state === 'waiting') item.state = 'cancelled';
+              // A PTC run is stopped through its own signal: the sandbox ends
+              // and the ffmpeg jobs inside it are killed by awaitJob.
+              runControllers.get(run.id)?.abort();
               const current = run.items.find((item) => item.state === 'converting' && item.jobId);
               const job = current ? jobs.get(current.jobId) : undefined;
               if (job && job.state === 'running') {
