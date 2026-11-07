@@ -87,6 +87,10 @@ const ptcModelKey = ref('');
 const runStage = ref<'' | 'planning' | 'converting'>('');
 const runStartedAt = ref(0);
 const planningTick = ref(0);
+// Estimated wall time for the running batch (from the Host) and how long it
+// has been going, so the panel can show a live "about N left".
+const runEstimate = ref(0);
+const runTick = ref(0);
 const ptcTiming = ref<{ modelMs?: number; runMs?: number } | null>(null);
 const modelsLoading = ref(false);
 const modelsError = ref('');
@@ -287,7 +291,11 @@ const finishedRunCount = computed(
 const batchProgressText = computed(() => {
   if (!batchRunning.value) return '';
   if (runStage.value === 'planning') return t('ptc.planning').replace('%s', String(planningTick.value));
-  return t('batch.running').replace('%s', String(finishedRunCount.value)).replace('%s', String(runKeys.value.length));
+  const text = t('batch.running')
+    .replace('%s', String(finishedRunCount.value))
+    .replace('%s', String(runKeys.value.length));
+  const remaining = Math.round(runEstimate.value / 1000) - runTick.value;
+  return remaining > 0 ? text + ' · ' + t('batch.eta').replace('%s', formatClock(remaining)) : text;
 });
 const batchProgressPercent = computed(() => {
   if (!batchRunning.value || runStage.value === 'planning' || !runKeys.value.length) {
@@ -615,14 +623,18 @@ function applyRun(run: RunInfo): void {
     runKeys.value = keys;
     runStage.value = run.stage === 'planning' ? 'planning' : run.kind === 'ptc' ? 'converting' : '';
     runStartedAt.value = run.at;
-    // The planning line counts seconds; assigning the same number would not
-    // re-render, so a changed tick is what keeps it alive.
+    // The planning line and the ETA count seconds; assigning the same number
+    // would not re-render, so a changed tick is what keeps them alive.
     planningTick.value = Math.max(0, Math.round((Date.now() - run.at) / 1000));
+    runTick.value = planningTick.value;
+    runEstimate.value = run.estimatedMs || 0;
     return;
   }
   activeRunId = '';
   batchRunning.value = false;
   runStage.value = '';
+  runEstimate.value = 0;
+  runTick.value = 0;
   if (run.kind === 'ptc' && (run.modelMs !== undefined || run.runMs !== undefined)) {
     ptcTiming.value = { modelMs: run.modelMs, runMs: run.runMs };
   }

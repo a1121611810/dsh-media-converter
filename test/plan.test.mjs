@@ -20,7 +20,7 @@ import {
   supportsQuality,
   trimArgs,
 } from '../dist/lib/plan.js';
-import { capacityFor, planPtcGroups, threadsFor } from '../dist/lib/schedule.js';
+import { blendPtcRate, capacityFor, estimatePtcCost, planPtcGroups, threadsFor } from '../dist/lib/schedule.js';
 
 assert.equal(kindOf('movie.MOV'), 'video');
 assert.equal(kindOf('clip.gif'), 'image');
@@ -205,33 +205,44 @@ assert.equal(capacityFor(0.9, 2), 1);
 assert.equal(threadsFor(1, 1, 10), 0);
 assert.ok(threadsFor(2, 0.5, 10) >= 1);
 
-// --- PTC evaluation groups -------------------------------------------------
-// One sandbox evaluation has a 10-minute cap, so a big batch is split into
-// groups that each fit it; the batch as a whole may then run longer.
+// --- PTC cost model & evaluation groups ------------------------------------
+// Seeds are media-seconds per wall-second: a copy is nearly free, a video
+// re-encode is the slow case, and an image is a fixed cost.
+assert.ok(estimatePtcCost({ duration: 10, kind: 'video', copy: true }) < 1000);
+assert.ok(estimatePtcCost({ duration: 60, kind: 'video' }) > estimatePtcCost({ duration: 60, kind: 'audio' }));
+assert.equal(estimatePtcCost({ duration: 0, kind: 'image' }), 400);
+// A measured fast run lifts the seeded rate and shrinks the next estimate.
+const faster = blendPtcRate(6, 60, 3000); // 20x realtime observed
+assert.ok(faster > 6 && faster < 20);
+assert.equal(blendPtcRate(6, 60, 200), 6, 'a job too short to measure says nothing');
+
 const ptcLimits = { defaultMs: 120_000, maxMs: 600_000 };
-// Ten 10-second clips fit one group: 60s + 10x20s + 10x5s = 310s.
-const shortClips = Array.from({ length: 10 }, () => ({ duration: 10 }));
-assert.deepEqual(planPtcGroups(shortClips, ptcLimits), [{ items: shortClips, timeoutMs: 310_000 }]);
-// The hard file cap splits a batch even when the time estimate would fit.
-const manyClips = Array.from({ length: 41 }, () => ({ duration: 0 }));
+const videoCost = (duration) => estimatePtcCost({ duration, kind: 'video' });
+// Ten short clips fit one evaluation; the timeout never drops below defaultMs.
+const shortClips = Array.from({ length: 10 }, (_, index) => ({ id: 'c' + index, costMs: videoCost(10) }));
+const oneGroup = planPtcGroups(shortClips, ptcLimits);
+assert.equal(oneGroup.length, 1);
+assert.equal(oneGroup[0].items.length, 10);
+assert.ok(oneGroup[0].timeoutMs >= 120_000);
+// The file cap splits a batch even when the time estimate would fit.
+const manyClips = Array.from({ length: 41 }, (_, index) => ({ id: 'm' + index, costMs: 400 }));
 assert.deepEqual(
   planPtcGroups(manyClips, ptcLimits).map((group) => group.items.length),
   [40, 1],
 );
-// Three 5-minute clips cannot share an evaluation: each is its own group and
-// every timeout is clamped to the runtime maximum.
-const longClips = Array.from({ length: 3 }, () => ({ duration: 300 }));
+// Long clips fill a group until the time budget is used, then start another.
+const longClips = Array.from({ length: 12 }, (_, index) => ({ id: 'l' + index, costMs: videoCost(300) }));
 const longGroups = planPtcGroups(longClips, ptcLimits);
 assert.deepEqual(
   longGroups.map((group) => group.items.length),
-  [1, 1, 1],
+  [11, 1],
 );
-assert.deepEqual(
-  longGroups.map((group) => group.timeoutMs),
-  [600_000, 600_000, 600_000],
-);
-// A tiny group never gets less than the runtime's default timeout.
-assert.deepEqual(planPtcGroups([{ duration: 0 }], ptcLimits), [{ items: [{ duration: 0 }], timeoutMs: 120_000 }]);
+assert.equal(longGroups[0].timeoutMs, 600_000, 'a full group is clamped to the runtime cap');
+// A single file that cannot fit one evaluation still gets its own group.
+const huge = [{ id: 'huge', costMs: videoCost(7200) }];
+const hugeGroup = planPtcGroups(huge, ptcLimits);
+assert.equal(hugeGroup.length, 1);
+assert.equal(hugeGroup[0].timeoutMs, 600_000);
 assert.deepEqual(planPtcGroups([], ptcLimits), []);
 
 console.log('plan.test.mjs: ok');

@@ -317,7 +317,10 @@ assert.match(ptcProgram, new RegExp(upload.data.id), 'the plan carries the selec
 // The runtime refuses more than maxPendingCalls (128 by default) outstanding
 // binding calls; a big plan must not be one Promise.all.
 assert.doesNotMatch(ptcProgram, /Promise\.all\(plan\.map/, 'a big plan is not one pending-call wave');
-assert.match(ptcProgram, /i \+= 16/, 'the plan runs in bounded waves');
+// The wave follows the live CPU capacity (1-4 slots -> 4-16 calls).
+const waveMatch = ptcProgram.match(/i \+= (\d+)/);
+assert.ok(waveMatch, 'the plan runs in bounded waves');
+assert.ok(Number(waveMatch[1]) >= 4 && Number(waveMatch[1]) <= 32, `wave ${waveMatch[1]}`);
 assert.match(ptcPrompt, /JSON/);
 assert.match(ptcPrompt, /每个文件恰好一条/);
 assert.match(ptcPrompt, new RegExp('id=' + upload.data.id));
@@ -360,8 +363,10 @@ assert.equal(manyStarted.data.ok, true, JSON.stringify(manyStarted.data));
 const manyDone = await waitRun(manyStarted.data.run);
 assert.equal(manyDone.state, 'done');
 assert.equal(manyDone.items.filter((item) => item.state === 'done').length, 41);
-assert.equal(ptcRuns - runsBefore, 2, 'the batch was split into two evaluations');
-assert.ok(ptcPeak <= 16, `the program kept at most 16 binding calls pending (peak ${ptcPeak})`);
+// The file cap follows the machine, so the group count is derived the same way.
+const maxPerGroup = Math.max(4, Math.min(64, os.availableParallelism() * 4));
+assert.equal(ptcRuns - runsBefore, Math.ceil(41 / maxPerGroup), `41 files were split by the ${maxPerGroup}-file cap`);
+assert.ok(ptcPeak <= 32, `the program kept at most one wave pending (peak ${ptcPeak})`);
 assert.ok(
   manyDone.items.every((item) => !item.error),
   'no row was refused for too many pending binding calls',
@@ -761,6 +766,22 @@ for (let attempt = 0; attempt < 100 && cancelledRunState.items[0].state === 'con
 }
 assert.equal(cancelledRunState.state, 'cancelled');
 assert.equal(cancelledRunState.items[0].state, 'cancelled', 'the in-flight item dies with the run');
+
+// The ETA comes from measured throughput: a second batch of the same clip
+// estimates differently once the first run has calibrated this machine.
+async function ptcEta() {
+  const started = await call('run', {
+    method: 'POST',
+    body: JSON.stringify({ items: [{ id: slowUpload.data.id, format: 'webm' }], ptc: true }),
+  });
+  const done = await waitRun(started.data.run);
+  assert.equal(done.state, 'done', done.error);
+  return done.estimatedMs;
+}
+const firstEta = await ptcEta();
+const secondEta = await ptcEta();
+assert.ok(firstEta > 0 && secondEta > 0, 'a PTC run reports its estimate');
+assert.notEqual(secondEta, firstEta, 'the estimate follows the measured throughput');
 
 // A PTC run is cancelled the same way: its own signal ends the sandbox and the
 // ffmpeg job inside it.

@@ -32,6 +32,45 @@ export function threadsFor(capacity: number, weight: number, cpus: number): numb
 // and the whole batch can run longer than one evaluation may.
 export const PTC_GROUP_MAX_FILES = 40;
 
+// Throughput seeds in "media seconds per wall second" (images are a fixed cost).
+// They are only the first guess: every finished job blends its real rate in, so
+// the estimates follow the machine, the codec and the copy/hardware paths.
+export interface PtcRates {
+  copy: number;
+  hardware: number;
+  video: number;
+  audio: number;
+  imageMs: number;
+}
+
+export const PTC_DEFAULT_RATES: PtcRates = { copy: 200, hardware: 15, video: 6, audio: 40, imageMs: 400 };
+
+export interface PtcCostInput {
+  duration: number;
+  kind: 'video' | 'audio' | 'image' | 'text' | 'file';
+  copy?: boolean;
+  hardware?: boolean;
+}
+
+// How long one file is expected to take, from its own duration and the rates.
+export function estimatePtcCost(file: PtcCostInput, rates: PtcRates = PTC_DEFAULT_RATES): number {
+  const durationMs = Math.max(0, file.duration) * 1000;
+  if (file.copy) return Math.max(150, durationMs / Math.max(1, rates.copy));
+  if (file.kind === 'image' || file.kind === 'file' || file.kind === 'text' || durationMs === 0) {
+    return Math.max(100, rates.imageMs);
+  }
+  const rate = file.hardware ? rates.hardware : file.kind === 'video' ? rates.video : rates.audio;
+  return durationMs / Math.max(0.5, rate) + 400;
+}
+
+// Blend one finished job into a rate. Slow or very short jobs say little, so
+// they are ignored; a single fast outlier cannot take the estimate over.
+export function blendPtcRate(rate: number, mediaSeconds: number, wallMs: number): number {
+  if (!(mediaSeconds > 0) || !(wallMs >= 300)) return rate;
+  const observed = Math.max(0.2, mediaSeconds / (wallMs / 1000));
+  return Math.max(0.5, rate * 0.6 + observed * 0.4);
+}
+
 export interface PtcGroupLimits {
   defaultMs: number;
   maxMs: number;
@@ -41,29 +80,38 @@ export interface PtcGroupLimits {
 export interface PtcGroup<T> {
   items: T[];
   timeoutMs: number;
+  estimateMs: number;
 }
 
-// Conservative estimate of one group's encode time: a fixed start-up, twice the
-// media duration, and five seconds per file for planning/IO. Clamped into the
-// runtime's [defaultMs, maxMs] window.
-export function planPtcGroups<T extends { duration: number }>(files: T[], limits: PtcGroupLimits): PtcGroup<T>[] {
-  const maxFiles = Math.max(1, limits.maxFiles ?? PTC_GROUP_MAX_FILES);
+// Fixed per-evaluation overhead plus a small per-file cost (handshake, IO).
+const PTC_STARTUP_MS = 5_000;
+const PTC_PER_FILE_MS = 1_500;
+
+// Group by the real cost of the files: fill one evaluation until its estimate
+// approaches the runtime cap, then start another. The timeout is the estimate
+// with a margin, clamped into the runtime's [defaultMs, maxMs] window.
+export function planPtcGroups<T extends { costMs: number }>(items: T[], limits: PtcGroupLimits): PtcGroup<T>[] {
+  const maxFiles = Math.max(1, Math.round(limits.maxFiles ?? PTC_GROUP_MAX_FILES));
   const clamp = (ms: number) => Math.min(limits.maxMs, Math.max(limits.defaultMs, ms));
-  const estimate = (items: T[]) =>
-    Math.max(0, 60_000 + items.reduce((sum, file) => sum + Math.max(0, file.duration) * 2000, 0) + items.length * 5000);
+  const estimate = (group: T[]) =>
+    PTC_STARTUP_MS + group.length * PTC_PER_FILE_MS + group.reduce((sum, item) => sum + Math.max(0, item.costMs), 0);
   const groups: PtcGroup<T>[] = [];
   let current: T[] = [];
-  for (const file of files) {
-    const next = [...current, file];
+  for (const item of items) {
+    const next = [...current, item];
     // One file that cannot fit the cap still gets its own group: refusing it
     // here would only move the same failure into the result rows.
     if (current.length && (next.length > maxFiles || estimate(next) > limits.maxMs)) {
-      groups.push({ items: current, timeoutMs: clamp(estimate(current)) });
-      current = [file];
+      const estimateMs = estimate(current);
+      groups.push({ items: current, timeoutMs: clamp(Math.round(estimateMs * 1.4)), estimateMs });
+      current = [item];
     } else {
       current = next;
     }
   }
-  if (current.length) groups.push({ items: current, timeoutMs: clamp(estimate(current)) });
+  if (current.length) {
+    const estimateMs = estimate(current);
+    groups.push({ items: current, timeoutMs: clamp(Math.round(estimateMs * 1.4)), estimateMs });
+  }
   return groups;
 }

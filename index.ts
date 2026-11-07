@@ -52,7 +52,16 @@ import {
   trimArgs,
 } from './lib/plan.js';
 import type { ConvertPlan, MediaKind, MediaMeta, StreamInfo, TrimWindow } from './lib/plan.js';
-import { WEIGHTS, capacityFor, planPtcGroups, threadsFor } from './lib/schedule.js';
+import {
+  PTC_DEFAULT_RATES,
+  WEIGHTS,
+  blendPtcRate,
+  capacityFor,
+  estimatePtcCost,
+  planPtcGroups,
+  threadsFor,
+} from './lib/schedule.js';
+import type { PtcRates } from './lib/schedule.js';
 import {
   expandDirs,
   ffmpegCandidates,
@@ -285,6 +294,8 @@ export interface RunInfo {
   at: number;
   modelMs?: number;
   runMs?: number;
+  // Estimated wall time for the whole batch, from the measured throughput.
+  estimatedMs?: number;
   error?: string;
   items: RunItemInfo[];
 }
@@ -622,6 +633,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   const jobs = new Map<string, Job>();
   const runs = new Map<string, RunInfo>();
   const runControllers = new Map<string, AbortController>();
+  // Measured encode throughput (media seconds per wall second) per path. The
+  // seeds are conservative; every finished job blends its real speed in, so
+  // PTC estimates follow this machine instead of a fixed guess.
+  const ptcRates: PtcRates = { ...PTC_DEFAULT_RATES };
   let latestRun = '';
   const controllers = new Map<
     string,
@@ -686,6 +701,30 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       () => false,
     );
     return taken ? path.join(outDir, `${stem}-${Date.now().toString(36)}.${extension}`) : candidate;
+  };
+
+  // One finished job tells the estimator how fast this machine really is. Short
+  // or failed jobs say nothing; blendPtcRate ignores those.
+  const recordPtcRate = (job: Job, mediaSeconds: number, wallMs: number): void => {
+    // Images are a fixed per-file cost, so they calibrate that constant
+    // directly instead of a media rate.
+    if (job.kind === 'image') {
+      if (wallMs >= 50 && wallMs < 60_000) {
+        ptcRates.imageMs = Math.max(50, ptcRates.imageMs * 0.6 + wallMs * 0.4);
+      }
+      return;
+    }
+    const key = job.copy
+      ? 'copy'
+      : job.hardware
+        ? 'hardware'
+        : job.kind === 'video'
+          ? 'video'
+          : job.kind === 'audio'
+            ? 'audio'
+            : '';
+    if (!key) return;
+    ptcRates[key] = blendPtcRate(ptcRates[key], mediaSeconds, wallMs);
   };
 
   const startJob = async (
@@ -784,6 +823,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           job.size = (await fsp.stat(out)).size;
           job.state = 'done';
           job.percent = 100;
+          recordPtcRate(job, span, Date.now() - job.at);
         } catch (err) {
           // ffmpeg can create the output before failing; never report that as done.
           await fsp.rm(out, { force: true }).catch(() => {});
@@ -877,9 +917,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   };
 
   // PTC batch: the model decides per-file formats once, then the Host runs the
-  // plan in bounded evaluation groups. Each group is its own sandbox evaluation
-  // with its own timeout, so the batch may outlive the runtime's per-run cap and
-  // survives the panel going away.
+  // plan in cost-sized evaluation groups. The limits follow the machine: each
+  // file's cost comes from measured throughput, a group is as large as the
+  // runtime's time cap allows, and the binding wave follows the live CPU
+  // capacity instead of a fixed constant.
   const executePtcRun = async (
     run: RunInfo,
     requested: { provider: string; model: string } | null,
@@ -924,96 +965,128 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       const limits = runtime.timeout || { defaultMs: 120_000, maxMs: 600_000 };
       const allowed = new Set(files.map((file) => file.id));
       const runStart = Date.now();
-      for (const group of planPtcGroups(files, limits)) {
+      // Cost every planned file once: a copy or hardware path skips the
+      // encoder, and the measured rates track this machine's real speed.
+      const costs = new Map<string, number>();
+      let totalCost = 0;
+      for (const row of plan) {
+        const upload = uploads.get(row.id);
+        if (!upload) continue;
+        const preview = planFor(upload, { format: row.format, quality: row.quality ?? quality, hardware });
+        const cost = estimatePtcCost(
+          {
+            duration: upload.duration,
+            kind: upload.kind,
+            copy: Boolean(preview.copy),
+            hardware: Boolean(preview.hardware),
+          },
+          ptcRates,
+        );
+        costs.set(row.id, cost);
+        totalCost += cost;
+      }
+      // The ETA the panel shows is the same cost, but wall time with the
+      // scheduler's idle concurrency (groups stay sized on the serial cost so a
+      // slow machine can never overrun one evaluation).
+      const parallel = Math.max(1, capacityFor(0, cpus));
+      run.estimatedMs = Math.round((totalCost + plan.length * 1500) / parallel + 5000);
+      // A group larger than the CPU can chew on only piles up pending binding
+      // calls, so the file cap follows the machine too.
+      const groups = planPtcGroups(
+        plan.map((row) => ({ id: row.id, costMs: costs.get(row.id) ?? 0 })),
+        {
+          defaultMs: limits.defaultMs,
+          maxMs: limits.maxMs,
+          maxFiles: Math.max(4, Math.min(64, cpus * 4)),
+        },
+      );
+      const convert = async (args: unknown): Promise<unknown> => {
+        const a = (args || {}) as Record<string, unknown>;
+        const upload = uploads.get(String(a.id || ''));
+        if (!upload || !allowed.has(upload.id)) throw new Error('文件不在这一批里');
+        const target = String(a.format || '');
+        if (!formatsFor(upload.kind).includes(target)) {
+          throw new Error(`不支持的输出格式: ${target}`);
+        }
+        const entry = run.items.find((item) => item.id === upload.id);
+        if (entry) {
+          entry.state = 'converting';
+          entry.percent = null;
+          entry.error = '';
+        }
+        const estimate = planFor(upload, { format: target, quality: Number(a.quality ?? quality), hardware });
+        const weight = estimate.copy
+          ? WEIGHTS.copy
+          : estimate.hardware
+            ? WEIGHTS.hardware
+            : upload.kind === 'video'
+              ? WEIGHTS.video
+              : upload.kind === 'audio'
+                ? WEIGHTS.audio
+                : WEIGHTS.image;
+        try {
+          const finished = await schedule(
+            weight,
+            async (threads) => {
+              const plan = planFor(
+                upload,
+                { format: target, quality: Number(a.quality ?? quality), hardware },
+                threads,
+              );
+              const { job, done } = await startJob(upload, plan, null, '');
+              if (entry) entry.jobId = job.id;
+              const tick = entry
+                ? setInterval(() => {
+                    entry.percent = job.percent;
+                  }, 300)
+                : 0;
+              try {
+                return await awaitJob(job, done, signal);
+              } finally {
+                if (tick) clearInterval(tick);
+              }
+            },
+            estimate.hardware,
+          );
+          if (entry) {
+            entry.state = 'done';
+            entry.percent = 100;
+            entry.result = {
+              file: finished.out,
+              size: finished.size,
+              kind: finished.kind,
+              copy: finished.copy,
+              hardware: finished.hardware,
+            };
+          }
+          return {
+            id: upload.id,
+            output: finished.out,
+            kind: finished.kind,
+            sizeBytes: finished.size,
+            copy: finished.copy,
+            hardware: finished.hardware,
+          };
+        } catch (err) {
+          if (entry) {
+            entry.state = signal.aborted ? 'cancelled' : 'error';
+            entry.percent = null;
+            if (entry.state === 'error') entry.error = errorText(err);
+          }
+          throw err;
+        }
+      };
+      for (const group of groups) {
         if (run.state !== 'running' || signal.aborted) break;
-        const groupIds = new Set(group.items.map((file) => file.id));
+        const groupIds = new Set(group.items.map((row) => row.id));
         const rows = plan.filter((row) => groupIds.has(row.id));
         if (!rows.length) continue;
+        // Concurrency the CPU can actually use right now; 1-4 slots become a
+        // 4-16 call wave, well under the runtime's pending-call default.
+        const wave = Math.max(4, Math.min(32, capacityFor(cpuUsage, cpus) * 4));
         const spec = runtime.resolve({
-          program: ptcProgramFor(rows),
-          bindings: [
-            {
-              global: 'media',
-              functions: {
-                convert: async (args: unknown) => {
-                  const a = (args || {}) as Record<string, unknown>;
-                  const upload = uploads.get(String(a.id || ''));
-                  if (!upload || !allowed.has(upload.id)) throw new Error('文件不在这一批里');
-                  const target = String(a.format || '');
-                  if (!formatsFor(upload.kind).includes(target)) {
-                    throw new Error(`不支持的输出格式: ${target}`);
-                  }
-                  const entry = run.items.find((item) => item.id === upload.id);
-                  if (entry) {
-                    entry.state = 'converting';
-                    entry.percent = null;
-                    entry.error = '';
-                  }
-                  const estimate = planFor(upload, { format: target, quality: Number(a.quality ?? quality), hardware });
-                  const weight = estimate.copy
-                    ? WEIGHTS.copy
-                    : estimate.hardware
-                      ? WEIGHTS.hardware
-                      : upload.kind === 'video'
-                        ? WEIGHTS.video
-                        : upload.kind === 'audio'
-                          ? WEIGHTS.audio
-                          : WEIGHTS.image;
-                  try {
-                    const finished = await schedule(
-                      weight,
-                      async (threads) => {
-                        const plan = planFor(
-                          upload,
-                          { format: target, quality: Number(a.quality ?? quality), hardware },
-                          threads,
-                        );
-                        const { job, done } = await startJob(upload, plan, null, '');
-                        if (entry) entry.jobId = job.id;
-                        const tick = entry
-                          ? setInterval(() => {
-                              entry.percent = job.percent;
-                            }, 300)
-                          : 0;
-                        try {
-                          return await awaitJob(job, done, signal);
-                        } finally {
-                          if (tick) clearInterval(tick);
-                        }
-                      },
-                      estimate.hardware,
-                    );
-                    if (entry) {
-                      entry.state = 'done';
-                      entry.percent = 100;
-                      entry.result = {
-                        file: finished.out,
-                        size: finished.size,
-                        kind: finished.kind,
-                        copy: finished.copy,
-                        hardware: finished.hardware,
-                      };
-                    }
-                    return {
-                      id: upload.id,
-                      output: finished.out,
-                      kind: finished.kind,
-                      sizeBytes: finished.size,
-                      copy: finished.copy,
-                      hardware: finished.hardware,
-                    };
-                  } catch (err) {
-                    if (entry) {
-                      entry.state = signal.aborted ? 'cancelled' : 'error';
-                      entry.percent = null;
-                      if (entry.state === 'error') entry.error = errorText(err);
-                    }
-                    throw err;
-                  }
-                },
-              },
-            },
-          ],
+          program: ptcProgramFor(rows, wave),
+          bindings: [{ global: 'media', functions: { convert } }],
           cwd: policy.workspaceRoot,
           sandboxPolicy: policy,
           timeoutMs: group.timeoutMs,
@@ -1241,8 +1314,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
 
   // One evaluation per group. The runtime refuses more than maxPendingCalls
   // (128 by default) outstanding binding calls, so the plan runs in waves.
-  const ptcProgramFor = (rows: { id: string; format: string; quality?: number }[]): string => {
-    const wave = 16;
+  const ptcProgramFor = (rows: { id: string; format: string; quality?: number }[], wave: number): string => {
     return (
       'const plan = ' +
       JSON.stringify(rows) +
