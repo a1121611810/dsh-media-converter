@@ -252,6 +252,16 @@ export interface QueueItem {
   job: JobInfo | null;
 }
 
+// One row of the server-side directory browser the panel uses to add files by
+// path instead of sending them through the browser.
+export interface BrowseEntry {
+  name: string;
+  path: string;
+  dir: boolean;
+  size: number;
+  kind: MediaKind;
+}
+
 export interface JobInfo {
   id: string;
   uploadId: string;
@@ -305,6 +315,9 @@ interface Upload {
   id: string;
   name: string;
   path: string;
+  // True only for a copy in the temp dir: a file registered by path is the
+  // user's own and must never be deleted by the TTL sweep or on unload.
+  owned: boolean;
   kind: MediaKind;
   duration: number;
   size: number;
@@ -337,6 +350,9 @@ interface JsonBody {
   model?: unknown;
   runId?: unknown;
   ptc?: unknown;
+  paths?: unknown;
+  dir?: unknown;
+  recursive?: unknown;
 }
 
 // The answers of the routes, each built by a small function so the exported
@@ -1431,6 +1447,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       id: 'tool',
       name,
       path: file,
+      owned: false,
       kind,
       duration: parseDuration(stderr),
       size: stat.size,
@@ -1608,7 +1625,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         for (const [id, upload] of uploads) {
           if (now - upload.at > UPLOAD_TTL_MS) {
             uploads.delete(id);
-            fs.rm(upload.path, { force: true }, () => {});
+            if (upload.owned) fs.rm(upload.path, { force: true }, () => {});
           }
         }
         // Finished jobs are only kept so the poll that reads them still works.
@@ -1751,6 +1768,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               id,
               name,
               path: file,
+              owned: true,
               kind,
               duration: parseDuration(stderr),
               size: written,
@@ -1769,6 +1787,163 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             if (file) await fsp.rm(file, { force: true }).catch(() => {});
             console.error('[dsh-media-converter] upload failed:', err instanceof Error ? err.message : err);
             json(res, 500, errorPayload(errorText(err)));
+          }
+        },
+      }),
+      // The Host can read the disk itself, so a few hundred files never pass
+      // through the browser: the panel browses directories and registers
+      // absolute paths. Registered files are the user's own and are never
+      // deleted (see Upload.owned).
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/browse`,
+        handler: async (req, res) => {
+          if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
+          if (rejectUnauthenticated(req, res)) return;
+          try {
+            const raw = requestUrl(req).searchParams.get('path') || '~';
+            const dir = path.resolve(raw.replace(/^~(?=$|[/\\])/, os.homedir()));
+            const stat = await fsp.stat(dir).catch(() => null);
+            if (!stat || !stat.isDirectory()) return json(res, 200, errorPayload('目录不存在或不可读'));
+            const listing = await fsp.readdir(dir, { withFileTypes: true });
+            const dirs: BrowseEntry[] = [];
+            const files: BrowseEntry[] = [];
+            for (const entry of listing) {
+              // Dotfiles stay hidden: a media browser has no business listing
+              // caches and credentials, and the native picker hides them too.
+              if (entry.name.startsWith('.')) continue;
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                dirs.push({ name: entry.name, path: full, dir: true, size: 0, kind: 'file' });
+              } else if (entry.isFile()) {
+                const kind = kindByExt(extOf(entry.name));
+                // Only convertible media: text/unknown files have no place in a
+                // batch queue and would only add noise to a folder listing.
+                if (kind !== 'video' && kind !== 'audio' && kind !== 'image') continue;
+                const size = await fsp.stat(full).then(
+                  (value) => value.size,
+                  () => 0,
+                );
+                files.push({ name: entry.name, path: full, dir: false, size, kind });
+              }
+            }
+            const byName = (a: BrowseEntry, b: BrowseEntry) => a.name.localeCompare(b.name);
+            dirs.sort(byName);
+            files.sort(byName);
+            json(res, 200, { ok: true, path: dir, parent: path.dirname(dir), entries: [...dirs, ...files] });
+          } catch (err) {
+            json(res, 200, errorPayload(errorText(err)));
+          }
+        },
+      }),
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/register`,
+        handler: async (req, res) => {
+          if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
+          if (rejectUnauthenticated(req, res)) return;
+          if (!ffmpeg) return json(res, 200, noFfmpeg);
+          const bin = ffmpeg;
+          try {
+            const body = await readJson(req);
+            const requested = Array.isArray(body.paths) ? body.paths.map(String).filter(Boolean) : [];
+            const dir = String(body.dir || '');
+            if (dir) {
+              const root = path.resolve(dir.replace(/^~(?=$|[/\\])/, os.homedir()));
+              const depthLimit = body.recursive === true ? 4 : 0;
+              const walk = async (current: string, depth: number): Promise<string[]> => {
+                if (depth > depthLimit) return [];
+                const entries = await fsp.readdir(current, { withFileTypes: true }).catch(() => []);
+                const out: string[] = [];
+                for (const entry of entries) {
+                  if (entry.name.startsWith('.')) continue;
+                  const full = path.join(current, entry.name);
+                  if (entry.isDirectory()) out.push(...(await walk(full, depth + 1)));
+                  else if (entry.isFile()) {
+                    const kind = kindByExt(extOf(entry.name));
+                    if (kind === 'video' || kind === 'audio' || kind === 'image') out.push(full);
+                  }
+                  if (out.length >= 2000) return out.slice(0, 2000);
+                }
+                return out;
+              };
+              requested.push(...(await walk(root, 0)));
+            }
+            const files = [...new Set(requested)].slice(0, 2000);
+            if (!files.length) return json(res, 200, errorPayload('没有可添加的媒体文件'));
+            const uploadsOut: UploadResponse[] = [];
+            const skipped: { path: string; reason: string }[] = [];
+            // The probe is the only slow part; four at a time turns a folder of
+            // a few hundred files into a few seconds without flooding ffmpeg.
+            let cursor = 0;
+            const workers = Array.from({ length: Math.min(4, files.length) }, async () => {
+              for (;;) {
+                const index = cursor;
+                cursor += 1;
+                if (index >= files.length) return;
+                const file = path.resolve(files[index]);
+                const name = path.basename(file);
+                const kind = kindByExt(extOf(name));
+                if (kind !== 'video' && kind !== 'audio' && kind !== 'image') {
+                  skipped.push({ path: file, reason: '不是媒体文件' });
+                  continue;
+                }
+                const stat = await fsp.stat(file).catch(() => null);
+                if (!stat || !stat.isFile()) {
+                  skipped.push({ path: file, reason: '文件不存在' });
+                  continue;
+                }
+                const existing = [...uploads.values()].find((item) => item.path === file);
+                if (existing) {
+                  uploadsOut.push(
+                    uploadPayload(
+                      existing.id,
+                      existing.name,
+                      existing.kind,
+                      existing.duration,
+                      existing.size,
+                      existing.streams,
+                      existing.meta,
+                    ),
+                  );
+                  continue;
+                }
+                const stderr = await probe(bin, file);
+                const probed = kindOf(name, stderr);
+                if (!probed) {
+                  skipped.push({ path: file, reason: '无法识别的媒体文件' });
+                  continue;
+                }
+                const upload: Upload = {
+                  id: `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+                  name,
+                  path: file,
+                  owned: false,
+                  kind: probed,
+                  duration: parseDuration(stderr),
+                  size: stat.size,
+                  streams: parseStreams(stderr),
+                  meta: parseMeta(stderr),
+                  at: Date.now(),
+                };
+                uploads.set(upload.id, upload);
+                uploadsOut.push(
+                  uploadPayload(
+                    upload.id,
+                    upload.name,
+                    upload.kind,
+                    upload.duration,
+                    upload.size,
+                    upload.streams,
+                    upload.meta,
+                  ),
+                );
+              }
+            });
+            await Promise.all(workers);
+            json(res, 200, { ok: true, uploads: uploadsOut, skipped });
+          } catch (err) {
+            json(res, 200, errorPayload(errorText(err)));
           }
         },
       }),
@@ -2169,7 +2344,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       disposers.forEach((dispose) => dispose());
       for (const child of children) child.kill('SIGTERM');
       if (cpuTimer) clearInterval(cpuTimer);
-      for (const upload of uploads.values()) fs.rm(upload.path, { force: true }, () => {});
+      for (const upload of uploads.values()) {
+        if (upload.owned) fs.rm(upload.path, { force: true }, () => {});
+      }
       uploads.clear();
       jobs.clear();
       controllers.clear();

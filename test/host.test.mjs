@@ -297,6 +297,62 @@ assert.equal(ranged.body.length, 10);
 const sourceGone = await fetchBinary('source?id=unope');
 assert.equal(sourceGone.status, 404, 'an expired or unknown upload is reported');
 
+// --- adding files by path (no browser upload) -----------------------------
+// The Host can read the disk itself: the panel browses a directory and
+// registers absolute paths, so a few hundred files never pass through the
+// browser. A registered file is the user's own and must never be deleted.
+const browseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-browse-'));
+fs.mkdirSync(path.join(browseDir, 'nested'));
+fs.writeFileSync(path.join(browseDir, '.hidden.png'), fs.readFileSync(sample));
+fs.writeFileSync(path.join(browseDir, 'notes.txt'), 'hello');
+const browseFile = path.join(browseDir, 'direct.png');
+fs.copyFileSync(sample, browseFile);
+const nestedFile = path.join(browseDir, 'nested', 'deep.png');
+fs.copyFileSync(sample, nestedFile);
+
+const browse = await call('browse?path=' + encodeURIComponent(browseDir));
+assert.equal(browse.data.ok, true, JSON.stringify(browse.data));
+assert.equal(browse.data.path, browseDir);
+const names = browse.data.entries.map((entry) => entry.name);
+assert.ok(names.includes('nested'), 'a subdirectory is listed');
+assert.ok(names.includes('direct.png'), 'a media file is listed');
+assert.ok(!names.includes('notes.txt'), 'a text file is not media');
+assert.ok(!names.includes('.hidden.png'), 'dotfiles stay hidden');
+assert.equal(browse.data.entries[0].dir, true, 'directories sort first');
+
+const missingDir = await call('browse?path=' + encodeURIComponent(path.join(browseDir, 'nope')));
+assert.equal(missingDir.data.ok, false, 'a missing directory is refused');
+
+const registered = await call('register', {
+  method: 'POST',
+  body: JSON.stringify({
+    paths: [browseFile, path.join(browseDir, 'notes.txt'), path.join(browseDir, 'missing.mp4')],
+  }),
+});
+assert.equal(registered.data.ok, true, JSON.stringify(registered.data));
+assert.equal(registered.data.uploads.length, 1);
+assert.equal(registered.data.uploads[0].name, 'direct.png');
+assert.equal(registered.data.uploads[0].kind, 'image');
+assert.equal(registered.data.skipped.length, 2, 'non-media and missing paths are reported, not fatal');
+const registeredId = registered.data.uploads[0].id;
+
+const registeredSource = await fetchBinary('source?id=' + registeredId);
+assert.equal(registeredSource.status, 200, 'a registered file streams from its original path');
+assert.ok(registeredSource.body.length > 0);
+
+const folderAdded = await call('register', {
+  method: 'POST',
+  body: JSON.stringify({ dir: browseDir, recursive: true }),
+});
+assert.equal(folderAdded.data.ok, true, JSON.stringify(folderAdded.data));
+assert.equal(folderAdded.data.uploads.length, 2, 'the folder walk finds both images (deduped)');
+
+const folderQueue = await call('queue');
+assert.ok(
+  folderQueue.data.items.some((item) => item.upload.id === registeredId),
+  'a registered file appears in the queue',
+);
+
 // --- PTC batch: planned by the model, executed by the Host as a run ------
 testUploadId = upload.data.id;
 const ptcStarted = await call('run', {
@@ -1045,5 +1101,10 @@ assert.deepEqual(
 assert.deepEqual(resolveGroups(''), ['convert', 'edit', 'view'], 'an empty config keeps the built-in order');
 
 cleanups.forEach((dispose) => dispose());
+// The disposer removes the temp copies it owns; a file registered by path is
+// the user's own and must survive.
+assert.ok(fs.existsSync(browseFile), 'a registered file is never deleted by the plugin');
+assert.ok(fs.existsSync(nestedFile), 'a nested registered file is never deleted');
+fs.rmSync(browseDir, { recursive: true, force: true });
 fs.rmSync(outDir, { recursive: true, force: true });
 console.log('host.test.mjs: ok');

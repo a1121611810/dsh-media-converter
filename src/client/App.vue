@@ -40,6 +40,7 @@ import CompareSlider from './vue/CompareSlider.vue';
 import ResultBlock from './vue/ResultBlock.vue';
 import BatchCard from './vue/BatchCard.vue';
 import QueueGroup from './vue/QueueGroup.vue';
+import PathPicker from './vue/PathPicker.vue';
 import ActionGrid from './vue/ActionGrid.vue';
 
 const props = defineProps({
@@ -121,6 +122,7 @@ const panelOpen = ref(false);
 const moreFormats = ref(false);
 const batchRunning = ref(false);
 const confirmClear = ref(false);
+const showPathPicker = ref(false);
 const dragging = ref(false);
 const runKeys = ref<string[]>([]);
 const lastRun = ref<{ done: number; failed: number; skipped: number; cancelled: number } | null>(null);
@@ -963,6 +965,35 @@ async function addFiles(picked: File[]) {
   ensureTargets();
 }
 
+// Rows registered by path: the Host probed the original file, so there is no
+// browser File and no upload. Pushed in the same slices as a picked batch.
+async function addRegistered(uploads: UploadResponse[]) {
+  if (!uploads.length) return;
+  const added: Item[] = uploads.map((upload) => ({
+    key: 'i' + ++itemSeq,
+    file: null,
+    url: sourceUrl(upload.id),
+    thumb: upload.kind === 'image' ? sourceUrl(upload.id) : '',
+    checked: upload.kind !== 'text',
+    upload: markRaw(upload),
+    state: 'ready',
+    percent: null,
+    result: null,
+    error: '',
+    jobAction: '',
+    jobId: '',
+  }));
+  showPathPicker.value = false;
+  for (let index = 0; index < added.length; index += INGEST_CHUNK) {
+    if (disposed) return;
+    items.value.push(...added.slice(index, index + INGEST_CHUNK));
+    if (index + INGEST_CHUNK < added.length) {
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    }
+  }
+  ensureTargets();
+}
+
 function cancelUploads() {
   if (uploadAbort) uploadAbort.abort();
 }
@@ -1617,6 +1648,9 @@ watch([action, panelOpen], async () => {
           <p class="mc-empty-title">{{ t('queue.emptyTitle') }}</p>
           <p class="mc-empty-hint">{{ t('queue.emptyHint') }}</p>
           <button type="button" class="mc-btn mc-btn-primary" @click.stop="openPicker">{{ t('queue.choose') }}</button>
+          <button type="button" class="mc-btn mc-btn-ghost" @click.stop="showPathPicker = true">
+            {{ t('queue.fromPath') }}
+          </button>
           <p class="mc-empty-privacy">{{ t('queue.privacy') }}</p>
         </div>
 
@@ -1635,6 +1669,9 @@ watch([action, panelOpen], async () => {
             </button>
             <button type="button" class="mc-btn mc-btn-ghost" :disabled="busy" @click="openPicker">
               {{ t('queue.add') }}
+            </button>
+            <button type="button" class="mc-btn mc-btn-ghost" :disabled="busy" @click="showPathPicker = true">
+              {{ t('queue.fromPath') }}
             </button>
             <button
               type="button"
@@ -2178,6 +2215,7 @@ watch([action, panelOpen], async () => {
     </template>
 
     <input ref="inputEl" type="file" hidden multiple @change="onPick" />
+    <PathPicker v-if="showPathPicker" :t="t" @close="showPathPicker = false" @added="addRegistered" />
     <div v-if="status && status.outputDir" class="mc-foot">
       <span>{{ t('footer.out') }}:</span><span>{{ status.outputDir }}</span>
     </div>

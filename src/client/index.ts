@@ -227,6 +227,17 @@ const ZH: Record<string, string> = {
   'queue.all': '全选',
   'queue.selected': '已选 %s / %s',
   'queue.select': '选择 %s',
+  'queue.fromPath': '从路径添加',
+  'path.title': '从路径添加',
+  'path.hint': '宿主直接读取本机文件：不经过浏览器上传，也不复制文件',
+  'path.close': '关闭',
+  'path.up': '上级目录',
+  'path.recursive': '包含子文件夹',
+  'path.selected': '已选 %s 个',
+  'path.add': '添加选中的 %s 个',
+  'path.addFolder': '添加整个文件夹',
+  'path.empty': '这个目录里没有媒体文件',
+  'path.skipped': '有 %s 个文件被跳过',
   'queue.add': '添加文件',
   'queue.clear': '清空',
   'queue.confirmClear': '确认清空',
@@ -468,6 +479,17 @@ const EN: Record<string, string> = {
   'queue.all': 'Select all',
   'queue.selected': '%s of %s selected',
   'queue.select': 'Select %s',
+  'queue.fromPath': 'Add by path',
+  'path.title': 'Add files by path',
+  'path.hint': 'The Host reads local files directly: nothing is uploaded through the browser and nothing is copied',
+  'path.close': 'Close',
+  'path.up': 'Parent folder',
+  'path.recursive': 'Include subfolders',
+  'path.selected': '%s selected',
+  'path.add': 'Add %s selected',
+  'path.addFolder': 'Add the whole folder',
+  'path.empty': 'No media files in this folder',
+  'path.skipped': '%s files were skipped',
   'queue.add': 'Add files',
   'queue.clear': 'Clear',
   'queue.confirmClear': 'Confirm clear',
@@ -1040,6 +1062,22 @@ const CSS = `
       .mc-rowbar > i { display: block; height: 100%; background: var(--dsw-static-deepseek-500, #4d6bfe); transition: width .2s var(--mc-ease); }
       .mc-rowbar.indet > i { width: 38%; animation: mc-slide 1.2s ease-in-out infinite; }
       .mc-row-error { grid-column: 3 / -1; margin: 0; color: var(--dsw-alias-state-error-primary, #d5483f); font-size: 12px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+      .mc-modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 24px; background: rgba(0,0,0,.35); }
+      .mc-modal-card { width: min(720px, 100%); max-height: min(80vh, 760px); display: flex; flex-direction: column; gap: 10px; padding: 16px 18px; border-radius: 14px; background: var(--dsw-alias-bg-layer-1, #fff); border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3)); box-shadow: 0 18px 50px rgba(0,0,0,.28); }
+      .mc-modal-head { display: flex; align-items: center; justify-content: space-between; }
+      .mc-modal-hint { margin: 0; font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-path-row { display: flex; gap: 8px; }
+      .mc-path-input { flex: 1; min-width: 0; }
+      .mc-path-recursive { gap: 6px; }
+      .mc-browse { flex: 1; min-height: 220px; max-height: 46vh; overflow: auto; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3)); border-radius: 10px; padding: 4px; }
+      .mc-browse.busy { opacity: .55; pointer-events: none; }
+      .mc-browse-row { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+      .mc-browse-row:hover { background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,.1)); }
+      .mc-browse-row.is-dir .mc-browse-name { font-weight: 600; }
+      .mc-browse-icon { width: 14px; color: var(--dsw-alias-label-tertiary, inherit); }
+      .mc-browse-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mc-browse-empty { padding: 12px; }
+      .mc-modal-foot { display: flex; align-items: center; gap: 8px; }
       .mc-task { display: flex; flex-direction: column; gap: 11px; padding: 14px 16px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); border-radius: 12px; background: var(--dsw-alias-bg-layer-1, transparent); }
       .mc-task-head { display: flex; align-items: baseline; gap: 10px; }
       .mc-task-title { font-size: 14px; font-weight: 600; }
