@@ -39,13 +39,36 @@ let testUploadId = '';
 let ptcPrompt = '';
 let ptcProgram = '';
 let ptcReasoning;
+// The real runtime refuses more than maxPendingCalls (128 by default) binding
+// calls per evaluation; the fake uses a small cap so the test stays quick.
+const PTC_PENDING_LIMIT = 20;
+let ptcPeak = 0;
 const ptcRuntime = {
   timeout: { defaultMs: 120000, maxMs: 600000 },
   resolve: (request) => request,
   run: async (spec) => {
     ptcProgram = spec.program;
     const convert = spec.bindings[0].functions.convert;
-    return { value: [await convert({ id: testUploadId, format: 'jpg', quality: 60 })], logs: [] };
+    // Run the program the Host composed, with the runtime's pending-call gate.
+    let pending = 0;
+    ptcPeak = 0;
+    const media = {
+      convert: async (args) => {
+        pending += 1;
+        ptcPeak = Math.max(ptcPeak, pending);
+        if (pending > PTC_PENDING_LIMIT) {
+          pending -= 1;
+          return { id: args && args.id, error: 'pending binding calls exceed configured limits' };
+        }
+        try {
+          return await convert(args);
+        } finally {
+          pending -= 1;
+        }
+      },
+    };
+    const value = await new Function('media', `return (async () => { ${spec.program}\n})();`)(media);
+    return { value, logs: [] };
   },
 };
 const llm = {
@@ -57,10 +80,12 @@ const llm = {
     assert.ok(Array.isArray(options.messages[0].content), 'messages carry content blocks');
     ptcPrompt = options.messages[0].content[0].text;
     ptcReasoning = options.reasoningEffort;
+    // One plan row per file the prompt lists, so a many-file batch stays real.
+    const ids = [...ptcPrompt.matchAll(/id=(\S+) name=/g)].map((match) => match[1]);
     yield {
       type: 'text-delta',
       index: 0,
-      text: JSON.stringify({ files: [{ id: testUploadId, format: 'jpg', quality: 60 }] }),
+      text: JSON.stringify({ files: ids.map((id) => ({ id, format: 'jpg', quality: 60 })) }),
     };
     yield { type: 'finish', reason: { kind: 'stop' } };
   },
@@ -273,10 +298,34 @@ assert.ok(batch.data.modelMs >= 0, 'the batch response carries the model time');
 assert.ok(batch.data.runMs >= 0, 'the batch response carries the conversion time');
 assert.match(ptcProgram, /media\.convert/, 'the host composes the PTC program from the plan');
 assert.match(ptcProgram, new RegExp(upload.data.id), 'the plan carries the selected file');
+// The runtime refuses more than maxPendingCalls (128 by default) outstanding
+// binding calls; a 174-file batch must not be one Promise.all.
+assert.doesNotMatch(ptcProgram, /Promise\.all\(plan\.map/, 'a big plan is not one pending-call wave');
+assert.match(ptcProgram, /i \+= 16/, 'the plan runs in bounded waves');
 assert.match(ptcPrompt, /JSON/);
 assert.match(ptcPrompt, /每个文件恰好一条/);
 assert.match(ptcPrompt, new RegExp('id=' + upload.data.id));
 assert.equal(ptcReasoning, 'low', 'the lowest reasoning effort is requested');
+
+// A big plan must not open one binding call per file: the runtime refuses more
+// than maxPendingCalls (128 by default) and a 174-file batch tripped it.
+const many = [];
+for (let i = 0; i < 40; i += 1) {
+  const row = await call('upload?name=many-' + i + '.png', { method: 'POST', body: fs.readFileSync(sample) });
+  assert.equal(row.data.ok, true, JSON.stringify(row.data));
+  many.push(row.data.id);
+}
+const manyBatch = await call('batch', {
+  method: 'POST',
+  body: JSON.stringify({ ids: many, format: 'jpg', quality: 60, runId: 'manyrun' }),
+});
+assert.equal(manyBatch.data.ok, true, JSON.stringify(manyBatch.data));
+assert.equal(manyBatch.data.results.length, 40);
+assert.ok(ptcPeak <= 16, `the program kept at most 16 binding calls pending (peak ${ptcPeak})`);
+assert.ok(
+  manyBatch.data.results.every((row) => !row.error),
+  'no row was refused for too many pending binding calls',
+);
 
 const progress = await call('batch/progress?id=testrun');
 assert.equal(progress.data.ok, true, JSON.stringify(progress.data));

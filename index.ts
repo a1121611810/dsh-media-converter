@@ -1656,11 +1656,22 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               progress.modelMs = Date.now() - progress.startedAt;
             }
             const plan = parsePtcPlan(text, files);
+            // The PTC runtime refuses more than `maxPendingCalls` binding calls
+            // per evaluation (128 by default), so a big batch cannot be one
+            // Promise.all — 174 files tripped "pending binding calls exceed
+            // configured limits". Walk the plan in small waves instead; the
+            // plugin's own schedule() still gates ffmpeg by CPU inside each call.
+            const wave = 16;
             const program =
               'const plan = ' +
               JSON.stringify(plan) +
               ';\n' +
-              'return await Promise.all(plan.map(async (p) => { try { return await media.convert(p); } catch (e) { return { id: p.id, error: String((e && e.message) || e) }; } }));';
+              'const out = [];\n' +
+              `for (let i = 0; i < plan.length; i += ${wave}) {\n` +
+              `  const batch = plan.slice(i, i + ${wave});\n` +
+              '  out.push(...await Promise.all(batch.map(async (p) => { try { return await media.convert(p); } catch (e) { return { id: p.id, error: String((e && e.message) || e) }; } })));\n' +
+              '}\n' +
+              'return out;';
             await fsp.mkdir(outDir, { recursive: true });
             const policy = policies.resolve({ mode: 'read-only' });
             const totalMs = files.reduce((sum, file) => sum + (file.duration || 0) * 1000, 0);
