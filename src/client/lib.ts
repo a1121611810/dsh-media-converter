@@ -1,7 +1,7 @@
 // Framework-free helpers shared by the panel (App.vue) and its tests.
 // Nothing here touches the DOM except downloadText/previewUrl consumers.
 import type { MediaKind, TrimWindow } from '../../lib/plan.js';
-import type { DecodeResponse, UploadResponse } from '../../index.js';
+import type { DecodeResponse, RunItemInfo, UploadResponse } from '../../index.js';
 
 export const TAG_KEYS = ['title', 'artist', 'album', 'comment', 'date', 'genre'];
 
@@ -28,10 +28,12 @@ export interface ResultPayload {
   copy?: boolean;
   hardware?: boolean;
 }
-// One queue row, shared by App, FileQueue and QueueGroup.
+// One queue row, shared by App, FileQueue and QueueGroup. `file` is null on
+// rows restored from a saved page state: the browser File is gone, only the
+// server-side upload remains.
 export interface QueueRow {
   key: string;
-  file: File;
+  file: File | null;
   url: string;
   thumb: string;
   checked: boolean;
@@ -143,6 +145,98 @@ export async function readJson<T>(resp: Response): Promise<T> {
   } catch {
     throw new Error(text.slice(0, 120) || 'HTTP ' + resp.status);
   }
+}
+
+// Preview URL for the uploaded original: the browser File is gone after a
+// page rebuild, so restored rows stream from the server instead of a blob URL.
+export function sourceUrl(id: string): string {
+  return '/api/media-convert/source?id=' + encodeURIComponent(id);
+}
+
+// States that mean "a job is in flight". A server job in one of these states
+// re-attaches the row instead of leaving it as a dead "ready".
+const RUNNING_STATES = new Set(['converting', 'cancelling']);
+
+// The server's record of one job (GET /jobs, embedded in /queue): enough to
+// build a row's state, result and progress from the server alone.
+export interface ServerJob {
+  id: string;
+  uploadId: string;
+  state: string;
+  percent: number | null;
+  out: string;
+  size: number;
+  error: string | null;
+  kind: MediaKind;
+  copy: boolean;
+  hardware: boolean;
+}
+
+// The state a run item puts on its queue row. The Host owns the batch, so the
+// panel derives rows from this instead of from its own in-flight requests; a
+// `waiting` item is the batch's queue and shows as an ordinary ready row.
+export interface RunItemPatch {
+  state: string;
+  percent: number | null;
+  error: string;
+  jobAction: string;
+  // undefined keeps the row's current result (a done item without one).
+  result?: ResultPayload | null;
+}
+
+export function runItemPatch(entry: RunItemInfo): RunItemPatch {
+  if (entry.state === 'waiting') {
+    return { state: 'ready', percent: null, error: '', jobAction: '', result: null };
+  }
+  if (entry.state === 'skipped') {
+    return { state: 'skipped', percent: null, error: entry.error, jobAction: '', result: null };
+  }
+  if (entry.state === 'done') {
+    return { state: 'done', percent: entry.percent ?? 100, error: '', jobAction: 'batch', result: entry.result };
+  }
+  if (entry.state === 'error') {
+    return { state: 'error', percent: null, error: entry.error, jobAction: '', result: null };
+  }
+  if (entry.state === 'cancelled') {
+    return { state: 'cancelled', percent: null, error: '', jobAction: '', result: null };
+  }
+  return { state: entry.state, percent: entry.percent, error: '', jobAction: '', result: null };
+}
+
+// What a restored row should take from a server job. A running job always
+// wins; a finished one only rewrites a row that was itself mid-run when the
+// snapshot was taken, so an old result cannot reappear on a reset row.
+export interface JobPatch {
+  state?: string;
+  percent?: number | null;
+  result?: ResultPayload | null;
+  error?: string;
+  jobId?: string;
+  attach?: boolean;
+}
+
+export function jobPatch(snapshotState: string, job: ServerJob): JobPatch | null {
+  if (job.state === 'running' || job.state === 'cancelling') {
+    return {
+      state: job.state === 'cancelling' ? 'cancelling' : 'converting',
+      percent: job.percent,
+      error: '',
+      jobId: job.id,
+      attach: true,
+    };
+  }
+  if (!RUNNING_STATES.has(snapshotState)) return null;
+  if (job.state === 'done') {
+    return {
+      state: 'done',
+      percent: 100,
+      error: '',
+      result: { file: job.out, size: job.size, kind: job.kind, copy: job.copy, hardware: job.hardware },
+    };
+  }
+  if (job.state === 'error') return { state: 'error', percent: null, error: job.error || '' };
+  if (job.state === 'cancelled') return { state: 'cancelled', percent: null };
+  return null;
 }
 
 // Media without a picture still needs a probe; this mirrors the Host's rule so

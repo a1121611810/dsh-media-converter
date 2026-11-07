@@ -10,10 +10,13 @@ import {
   formatSize,
   isConvertible,
   parseTimecode,
+  jobPatch,
   previewMime,
   rowPlan,
+  runItemPatch,
   trimWindow,
   unavailableTarget,
+  sourceUrl,
 } from '../dist/src/client/lib.js';
 
 assert.deepEqual(fitPreview(4000, 3000), { width: 900, height: 675 });
@@ -101,5 +104,122 @@ assert.deepEqual(rowPlan(rows, { video: 'mp4', audio: 'mp3', image: 'png' }, { b
   { key: 'b', target: 'jpg', error: '' },
   { key: 'c', target: 'mp4', error: '' },
 ]);
+
+// --- server queue -----------------------------------------------------------
+// Rows are rebuilt from the server, so the only client-side helper left is the
+// upload preview URL.
+assert.equal(sourceUrl('u abc'), '/api/media-convert/source?id=u%20abc');
+// The restored row's preview URL points at the server copy of the upload.
+assert.equal(sourceUrl('u abc'), '/api/media-convert/source?id=u%20abc');
+
+// --- server job reconciliation ----------------------------------------------
+// A rebuilt page trusts the server's job record over its own snapshot.
+const serverJob = (patch) => ({
+  id: 'j1',
+  uploadId: 'uabc',
+  state: 'running',
+  percent: null,
+  out: '/out/x.mp4',
+  size: 10,
+  error: null,
+  kind: 'video',
+  copy: false,
+  hardware: false,
+  ...patch,
+});
+
+// A running job always re-attaches, whatever the snapshot said.
+assert.deepEqual(jobPatch('ready', serverJob({ percent: 42 })), {
+  state: 'converting',
+  percent: 42,
+  error: '',
+  jobId: 'j1',
+  attach: true,
+});
+assert.equal(jobPatch('converting', serverJob({ state: 'cancelling' })).state, 'cancelling');
+
+// A finished job updates a row that was itself mid-run when the snapshot was
+// taken (the page went away before it saw the result).
+assert.deepEqual(jobPatch('converting', serverJob({ state: 'done', size: 33 })), {
+  state: 'done',
+  percent: 100,
+  error: '',
+  result: { file: '/out/x.mp4', size: 33, kind: 'video', copy: false, hardware: false },
+});
+assert.deepEqual(jobPatch('cancelling', serverJob({ state: 'error', error: 'boom' })), {
+  state: 'error',
+  percent: null,
+  error: 'boom',
+});
+assert.deepEqual(jobPatch('converting', serverJob({ state: 'cancelled' })), {
+  state: 'cancelled',
+  percent: null,
+});
+
+// A row the user reset stays reset: an old result must not reappear.
+assert.equal(jobPatch('ready', serverJob({ state: 'done' })), null);
+assert.equal(jobPatch('done', serverJob({ state: 'done' })), null);
+
+// --- run items (the Host-owned batch) ---------------------------------------
+// One batch item as GET /run returns it.
+const runItem = (patch) => ({
+  id: 'uabc',
+  mode: '',
+  format: 'jpg',
+  state: 'waiting',
+  percent: null,
+  jobId: '',
+  error: '',
+  result: null,
+  ...patch,
+});
+
+// The batch's queue is an ordinary ready row, and an earlier result or error
+// is dropped: this row is about to be converted again.
+assert.deepEqual(runItemPatch(runItem({})), {
+  state: 'ready',
+  percent: null,
+  error: '',
+  jobAction: '',
+  result: null,
+});
+// A skipped row keeps the panel's own locale key, so the reason survives a
+// rebuilt page and reads in the user's language.
+assert.deepEqual(runItemPatch(runItem({ state: 'skipped', error: 'hint.noAudio' })), {
+  state: 'skipped',
+  percent: null,
+  error: 'hint.noAudio',
+  jobAction: '',
+  result: null,
+});
+assert.deepEqual(runItemPatch(runItem({ state: 'converting', percent: 42 })), {
+  state: 'converting',
+  percent: 42,
+  error: '',
+  jobAction: '',
+  result: null,
+});
+const runDone = { file: '/out/x.jpg', size: 9, kind: 'image', copy: false, hardware: false };
+assert.deepEqual(runItemPatch(runItem({ state: 'done', percent: 100, jobId: 'j2', result: runDone })), {
+  state: 'done',
+  percent: 100,
+  error: '',
+  jobAction: 'batch',
+  result: runDone,
+});
+assert.deepEqual(runItemPatch(runItem({ state: 'error', error: 'boom' })), {
+  state: 'error',
+  percent: null,
+  error: 'boom',
+  jobAction: '',
+  result: null,
+});
+assert.deepEqual(runItemPatch(runItem({ state: 'cancelled' })), {
+  state: 'cancelled',
+  percent: null,
+  error: '',
+  jobAction: '',
+  result: null,
+});
 
 console.log('client-lib.test.mjs: ok');

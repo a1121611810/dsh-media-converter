@@ -23,7 +23,7 @@ const emit = defineEmits<{
   'update:target': [key: string, value: string];
 }>();
 
-const nameOf = (item: QueueRow): string => item.upload?.name || item.file.name;
+const nameOf = (item: QueueRow): string => item.upload?.name || item.file?.name || '';
 const kindOf = (item: QueueRow): string => item.upload?.kind || '';
 const kindLabel = (item: QueueRow): string => {
   const kind = kindOf(item);
@@ -137,7 +137,7 @@ const statusOf = (item: QueueRow): string => {
           </select>
         </span>
         <span class="mc-num">{{ item.upload ? formatDuration(item.upload.duration) : '' }}</span>
-        <span class="mc-num">{{ item.upload ? formatSize(item.upload.size) : formatSize(item.file.size) }}</span>
+        <span class="mc-num">{{ item.upload ? formatSize(item.upload.size) : formatSize(item.file?.size || 0) }}</span>
         <span class="mc-status">
           <span class="mc-dot" :class="'dot-' + dotOf(item)" aria-hidden="true"></span>
           <span class="mc-status-text" :title="statusOf(item)">{{ statusOf(item) }}</span>

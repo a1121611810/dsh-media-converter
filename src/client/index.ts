@@ -212,6 +212,9 @@ const ZH: Record<string, string> = {
   'settings.refresh': '刷新界面',
   'settings.refresh.title': '重新加载整个界面，等同于按 Ctrl+R（未保存的修改会丢失）',
   'settings.composerButton': '在输入框工具排显示「媒体工具箱」按钮',
+  'settings.persistState': '关闭页面后保留队列状态',
+  'settings.persistState.hint':
+    '打开后，关掉页面再进入会恢复队列与每个文件的运行状态；正在处理的批次由本机后台继续执行，切走再回来不会重置。重启 DSH 或超过 2 小时后文件会失效，需重新添加。',
   'settings.groups': '动作面板模块',
   'settings.groups.show': '显示',
   'settings.groups.up': '上移',
@@ -449,6 +452,9 @@ const EN: Record<string, string> = {
   'settings.refresh': 'Refresh page',
   'settings.refresh.title': 'Reload the whole app, the same as pressing Ctrl+R (unsaved edits are lost)',
   'settings.composerButton': 'Show the Media Toolbox button in the composer tool row',
+  'settings.persistState': 'Keep the queue after the page is closed',
+  'settings.persistState.hint':
+    'When on, reopening the page restores the queue and each file’s state; a running batch keeps going in the background on this machine, so switching away does not reset it. Files expire after a DSH restart or 2 hours and must be re-added.',
   'settings.groups': 'Action panel modules',
   'settings.groups.show': 'Show',
   'settings.groups.up': 'Up',
@@ -619,6 +625,7 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
     ffmpegPath: '',
     maxUploadMb: '2048',
     composerButton: true,
+    persistState: false,
   });
   const [rows, setRows] = React.useState<{ key: string; on: boolean }[]>([]);
   const [phase, setPhase] = React.useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -639,6 +646,7 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
             ffmpegPath: '',
             maxUploadMb: String(next.maxUploadMb),
             composerButton: next.composerButton !== false,
+            persistState: next.persistState === true,
           });
           setRows(
             [...next.groups, ...GROUP_KEYS.filter((key) => !next.groups.includes(key))].map((key) => ({
@@ -662,6 +670,7 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
         ffmpegPath: form.ffmpegPath,
         maxUploadMb: Number(form.maxUploadMb),
         composerButton: form.composerButton,
+        persistState: form.persistState,
         groups: rows
           .filter((row) => row.on)
           .map((row) => row.key)
@@ -754,6 +763,18 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
         }),
         t('settings.composerButton'),
       ),
+      h(
+        'label',
+        { className: 'mc-settings-check' },
+        h('input', {
+          type: 'checkbox',
+          checked: form.persistState,
+          onChange: (event: { target: { checked: boolean } }) =>
+            setForm((current) => ({ ...current, persistState: event.target.checked })),
+        }),
+        t('settings.persistState'),
+      ),
+      h('small', { className: 'mc-settings-hint' }, t('settings.persistState.hint')),
     ),
     h(
       'div',

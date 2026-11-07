@@ -14,14 +14,17 @@ import {
   formatDuration,
   formatSize,
   isConvertible,
+  jobPatch,
   previewMime,
   previewUrl,
   readJson,
   rowPlan,
+  runItemPatch,
+  sourceUrl,
   trimWindow,
   unavailableTarget,
 } from './lib.js';
-import type { ConvertRequest, ConvertibleKind, DecodedPayload, QueueRow } from './lib.js';
+import type { ConvertRequest, ConvertibleKind, DecodedPayload, QueueRow, ServerJob } from './lib.js';
 import type { MediaKind, StreamMeta } from '../../lib/plan.js';
 import type {
   Base64Response,
@@ -31,6 +34,7 @@ import type {
   Job,
   ModelsResponse,
   PtcModelOption,
+  RunInfo,
   StatusResponse,
   UploadResponse,
 } from '../../index.js';
@@ -53,6 +57,8 @@ type Phase = 'idle' | 'uploading' | 'converting' | 'ready' | 'done';
 interface Item extends QueueRow {
   state: ItemState;
   jobAction: string;
+  // The server job this row is polling, so a restored page can re-attach.
+  jobId: string;
 }
 type PtcProgressResponse = BatchProgress & { ok: true };
 
@@ -124,7 +130,6 @@ const mediaEl = ref<HTMLMediaElement | null>(null);
 let uploadAbort: AbortController | null = null;
 let currentJobId = '';
 let ptcAbort: AbortController | null = null;
-let stopRequested = false;
 let liveTimer: ReturnType<typeof setTimeout> | 0 = 0;
 let clearTimer: ReturnType<typeof setTimeout> | 0 = 0;
 let stopAt: ((this: HTMLMediaElement, ev: Event) => void) | null = null;
@@ -509,6 +514,226 @@ const gridGroups = computed(() =>
   groups.value.map(([key, label]) => ({ key, label, items: itemsOf(key) })).filter((group) => group.items.length),
 );
 
+// The toolbox setting: keep the queue across page close/reopen. When on, the
+// queue is rebuilt from the server — uploads and jobs are the single source of
+// truth, so every mount (first load, a rebuilt page, a second window) shows the
+// same files and the same running jobs. When off the page behaves as before.
+const persistOn = computed(() => status.value?.persistState === true);
+
+interface ServerQueueItem {
+  upload: UploadResponse;
+  job: ServerJob | null;
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') void loadServerQueue();
+}
+
+// Rebuild the queue from the server. Rows keep their identity (and their
+// checked state) when the same upload is already on screen, so a poll that is
+// already driving a row is never replaced under it. The browser File is gone,
+// so previews stream from /source.
+async function loadServerQueue() {
+  if (!persistOn.value) return;
+  let list: ServerQueueItem[] = [];
+  try {
+    const data = await readJson<{ ok: true; items: ServerQueueItem[] } | ErrorResponse>(
+      await fetch('/api/media-convert/queue'),
+    );
+    if (!data.ok) return;
+    list = data.items;
+  } catch {
+    return;
+  }
+  if (disposed) return;
+  const current = items.value.slice();
+  const known = new Map(current.filter((i) => i.upload).map((i) => [i.upload!.id, i]));
+  const seen = new Set<string>();
+  const next: Item[] = [];
+  for (const { upload, job } of list) {
+    seen.add(upload.id);
+    const prev = known.get(upload.id);
+    if (prev) {
+      prev.upload = upload;
+      applyServerJob(prev, job);
+      next.push(prev);
+    } else {
+      next.push(serverRow(upload, job));
+    }
+  }
+  // A row the server does not know yet is still uploading, so it keeps its
+  // place instead of flickering away mid-upload.
+  for (const item of current) if (!item.upload || !seen.has(item.upload.id)) next.push(item);
+  items.value = next;
+  ensureTargets();
+  await restoreRun();
+  // A row attached to a single job (the detail page's convert) polls that job
+  // itself; batch rows are already driven by the run record above.
+  for (const item of items.value) {
+    if ((item.state === 'converting' || item.state === 'cancelling') && !runUploads.has(item.upload?.id || '')) {
+      void resumeItem(item);
+    }
+  }
+}
+
+// The batch the Host is walking for the page that started it. A rebuilt page
+// restores its rows and summary from this record, so switching sessions or
+// closing the panel does not reset the batch to "ready".
+let activeRunId = '';
+let runUploads = new Set<string>();
+const runPolls = new Set<string>();
+
+async function restoreRun() {
+  let run: RunInfo | null = null;
+  try {
+    const data = await readJson<{ ok: true; run: RunInfo | null } | ErrorResponse>(
+      await fetch('/api/media-convert/run'),
+    );
+    if (!data.ok) return;
+    run = data.run;
+  } catch {
+    return;
+  }
+  // Only a live run is restored: a finished one is already reflected in the
+  // per-row jobs /queue returned, and re-applying it could overwrite a newer
+  // conversion the user started afterwards.
+  if (disposed || !run || run.state !== 'running') return;
+  applyRun(run);
+  void pollRun(run.id);
+}
+
+// One server run -> the rows on screen. `waiting` items are the batch's queue,
+// which the panel shows as "ready" just like a file that has not started.
+function applyRun(run: RunInfo): void {
+  const byUpload = new Map(items.value.filter((i) => i.upload).map((i) => [i.upload!.id, i]));
+  runUploads = new Set(run.items.map((item) => item.id));
+  const keys: string[] = [];
+  for (const entry of run.items) {
+    const row = byUpload.get(entry.id);
+    if (!row) continue;
+    keys.push(row.key);
+    const patch = runItemPatch(entry);
+    row.state = patch.state as ItemState;
+    row.percent = patch.percent;
+    // A skipped row's reason is a locale key the panel wrote when it handed
+    // the batch over, so it reads in the user's language after a rebuild.
+    row.error = entry.state === 'skipped' && patch.error ? t(patch.error) : patch.error;
+    if (patch.result !== undefined) row.result = patch.result;
+    row.jobAction = patch.jobAction;
+    if (entry.jobId) row.jobId = entry.jobId;
+  }
+  if (run.state === 'running') {
+    activeRunId = run.id;
+    batchRunning.value = true;
+    runKeys.value = keys;
+    runIndeterminate.value = false;
+    return;
+  }
+  activeRunId = '';
+  batchRunning.value = false;
+  runIndeterminate.value = false;
+  const count = (state: string) => run.items.filter((item) => item.state === state).length;
+  lastRun.value = {
+    done: count('done'),
+    failed: count('error'),
+    skipped: count('skipped'),
+    cancelled: count('cancelled'),
+  };
+}
+
+async function pollRun(id: string): Promise<void> {
+  if (runPolls.has(id)) return;
+  runPolls.add(id);
+  try {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (disposed || activeRunId !== id) return;
+      let data: { ok: true; run: RunInfo | null } | ErrorResponse;
+      try {
+        data = await readJson<{ ok: true; run: RunInfo | null } | ErrorResponse>(
+          await fetch('/api/media-convert/run?id=' + encodeURIComponent(id)),
+        );
+      } catch {
+        continue; // a missed poll is fine; the next one catches up
+      }
+      if (!data.ok || !data.run) return;
+      applyRun(data.run);
+      if (data.run.state !== 'running') return;
+    }
+  } finally {
+    runPolls.delete(id);
+  }
+}
+
+function serverRow(upload: UploadResponse, job: ServerJob | null): Item {
+  const patch = job ? jobPatch('converting', job) : null;
+  return {
+    key: 'i' + ++itemSeq,
+    file: null,
+    url: sourceUrl(upload.id),
+    thumb: '',
+    checked: upload.kind !== 'text',
+    upload,
+    state: (patch?.state as ItemState) || 'ready',
+    percent: patch?.percent ?? null,
+    result: patch?.result ?? null,
+    error: patch?.error || '',
+    jobAction: '',
+    jobId: patch?.jobId || '',
+  };
+}
+
+// Merge one server job into a row that is already on screen. A running job
+// always wins; a finished one only rewrites a row that was itself mid-run, so
+// a row the user reset never gets its old result back.
+function applyServerJob(item: Item, job: ServerJob | null): void {
+  if (!job) return;
+  const patch = jobPatch(item.state, job);
+  if (!patch) return;
+  item.state = patch.state as ItemState;
+  item.percent = patch.percent ?? null;
+  if (patch.error !== undefined) item.error = patch.error;
+  if (patch.result !== undefined) item.result = patch.result;
+  if (patch.jobId) item.jobId = patch.jobId;
+}
+
+// A row attached to a running server job: keep polling it and apply the same
+// terminal mapping runCurrent would. A 404 means the job is gone (DSH
+// restarted, TTL), so the row falls back to ready.
+const activePolls = new Set<string>();
+
+async function resumeItem(item: Item) {
+  if (!item.jobId || activePolls.has(item.jobId)) return;
+  const jobId = item.jobId;
+  activePolls.add(jobId);
+  currentJobId = jobId;
+  try {
+    const job = await pollJob(jobId, (value) => {
+      item.percent = value;
+    });
+    if (job.state === 'error') {
+      item.state = 'error';
+      item.error = job.error || t('error.title');
+      item.percent = null;
+    } else if (job.state === 'cancelled') {
+      item.state = 'cancelled';
+      item.percent = null;
+    } else {
+      item.result = { file: job.out, size: job.size, kind: job.kind, copy: job.copy, hardware: job.hardware };
+      item.state = 'done';
+      item.percent = 100;
+    }
+  } catch {
+    item.state = 'ready';
+    item.percent = null;
+    item.error = '';
+  } finally {
+    item.jobId = '';
+    activePolls.delete(jobId);
+    if (currentJobId) currentJobId = '';
+  }
+}
+
 async function fetchStatus(): Promise<StatusResponse | null> {
   try {
     const data = await readJson<StatusResponse | ErrorResponse>(await fetch('/api/media-convert/status'));
@@ -602,6 +827,7 @@ function makeItem(picked: File): Item {
     percent: null,
     result: null,
     jobAction: '',
+    jobId: '',
     error: '',
   };
 }
@@ -633,7 +859,7 @@ let thumbChain: Promise<unknown> = Promise.resolve();
 function queueThumb(item: Item) {
   thumbChain = thumbChain
     .then(async () => {
-      if (disposed || !items.value.some((row) => row.key === item.key)) return;
+      if (disposed || !item.file || !items.value.some((row) => row.key === item.key)) return;
       try {
         const url = URL.createObjectURL(await encodeImage(item.file, THUMB_MAX, 'image/webp', 0.8));
         if (disposed || !items.value.some((row) => row.key === item.key)) {
@@ -660,15 +886,16 @@ async function addFiles(picked: File[]) {
   const controller = new AbortController();
   uploadAbort = controller;
   for (const item of created) {
-    if (controller.signal.aborted) {
+    const picked = item.file;
+    if (!picked || controller.signal.aborted) {
       removeItem(item.key, true);
       continue;
     }
     try {
       const data = await readJson<UploadResponse | ErrorResponse>(
-        await fetch('/api/media-convert/upload?name=' + encodeURIComponent(item.file.name), {
+        await fetch('/api/media-convert/upload?name=' + encodeURIComponent(picked.name), {
           method: 'POST',
-          body: item.file,
+          body: picked,
           signal: controller.signal,
         }),
       );
@@ -766,7 +993,7 @@ function initDetail(item: Item) {
   panelOpen.value = false;
   moreFormats.value = false;
   format.value = item.upload ? formatTable.value[item.upload.kind]?.[0] || '' : '';
-  outputName.value = (item.upload?.name || item.file.name).replace(/\.[^.]*$/, '');
+  outputName.value = (item.upload?.name || item.file?.name || 'output').replace(/\.[^.]*$/, '');
   trimStart.value = '';
   trimEnd.value = '';
   metaTags.value = Object.fromEntries(
@@ -836,7 +1063,19 @@ function cancelRun() {
 }
 
 function cancelBatch() {
-  stopRequested = true;
+  if (ptcAbort) {
+    ptcAbort.abort();
+    return;
+  }
+  if (activeRunId) {
+    // The run keeps the id: its next poll reports the cancelled rows.
+    fetch('/api/media-convert/run/cancel', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: activeRunId }),
+    }).catch(() => {});
+    return;
+  }
   cancelRun();
 }
 
@@ -850,65 +1089,50 @@ function summarizeRun() {
   };
 }
 
-async function runSequential(rows: Item[]) {
+// Hand the checked batch to the Host. The browser no longer walks the files:
+// the run keeps converting after this panel is closed or replaced, and its
+// record is what every later page instance restores from.
+async function runServerBatch(rows: Item[]) {
   const audioKeys = new Set(audioTargets.value.map((item) => item.key));
   const videoKeys = new Set(videoTargets.value.map((item) => item.key));
-  for (const item of rows) {
-    if (stopRequested) break;
-    let body: Record<string, unknown> | null = null;
-    if (operation.value === 'convert') {
-      const row = planByKey.value.get(item.key);
-      if (!row || row.error) {
-        item.state = 'skipped';
-        item.error = row?.error ? t(row.error) : '';
-        continue;
-      }
-      body = {
-        format: row.target,
-        quality: row.target === 'jpg' || row.target === 'webp' ? batchQuality.value : undefined,
-        hardware: useGpu.value || undefined,
-      };
-    } else if (operation.value === 'audio') {
-      if (!audioKeys.has(item.key)) {
-        item.state = 'skipped';
-        item.error = item.upload!.kind === 'video' ? t('hint.noAudio') : t('batch.notApplicable');
-        continue;
-      }
-      body = { mode: 'extract-audio' };
-    } else {
-      if (!videoKeys.has(item.key)) {
-        item.state = 'skipped';
-        item.error = t('batch.notApplicable');
-        continue;
-      }
-      body = { mode: 'extract-video' };
+  const items = rows.map((item) => {
+    const id = item.upload!.id;
+    if (operation.value === 'audio') {
+      return audioKeys.has(item.key)
+        ? { id, mode: 'extract-audio' }
+        : { id, skip: true, reason: item.upload!.kind === 'video' ? 'hint.noAudio' : 'batch.notApplicable' };
     }
-    item.state = 'converting';
-    item.percent = null;
-    item.error = '';
-    try {
-      await postConvert(item.upload!.id, body);
-      const job = await pollJob(currentJobId, (value) => {
-        item.percent = value;
-      });
-      if (job.state === 'error') throw new Error(job.error || t('error.title'));
-      if (job.state === 'cancelled') {
-        item.state = 'cancelled';
-        item.percent = null;
-        continue;
-      }
-      item.result = { file: job.out, size: job.size, kind: job.kind, copy: job.copy, hardware: job.hardware };
-      item.state = 'done';
-      item.percent = 100;
-      item.jobAction = 'batch';
-    } catch (err) {
-      item.state = stopRequested ? 'cancelled' : 'error';
-      item.error = stopRequested ? '' : String((err && (err as Error).message) || err);
-    } finally {
-      currentJobId = '';
-      if (item.state !== 'done') item.percent = null;
+    if (operation.value === 'video') {
+      return videoKeys.has(item.key)
+        ? { id, mode: 'extract-video' }
+        : { id, skip: true, reason: 'batch.notApplicable' };
     }
+    const row = planByKey.value.get(item.key);
+    if (!row || row.error) return { id, skip: true, reason: row?.error || '' };
+    return {
+      id,
+      format: row.target,
+      quality: row.target === 'jpg' || row.target === 'webp' ? batchQuality.value : undefined,
+      hardware: useGpu.value || undefined,
+    };
+  });
+  let run: RunInfo;
+  try {
+    const data = await readJson<{ ok: true; run: RunInfo } | ErrorResponse>(
+      await fetch('/api/media-convert/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ items, quality: batchQuality.value, hardware: useGpu.value || undefined }),
+      }),
+    );
+    if (!data.ok) throw new Error(data.error || t('error.title'));
+    run = data.run;
+  } catch (err) {
+    batchError.value = String((err && (err as Error).message) || err);
+    return;
   }
+  applyRun(run);
+  await pollRun(run.id);
 }
 
 async function runPtc(rows: Item[]) {
@@ -1010,7 +1234,6 @@ async function startBatch() {
   runKeys.value = rows.map((item) => item.key);
   runIndeterminate.value = false;
   batchRunning.value = true;
-  stopRequested = false;
   rows.forEach((item) => {
     item.result = null;
     item.error = '';
@@ -1023,7 +1246,7 @@ async function startBatch() {
       runIndeterminate.value = true;
       await runPtc(rows);
     } else {
-      await runSequential(rows);
+      await runServerBatch(rows);
     }
   } finally {
     batchRunning.value = false;
@@ -1044,6 +1267,8 @@ async function runCurrent(body: Partial<ConvertRequest>, forAction: string) {
   item.jobAction = forAction;
   try {
     await postConvert(item.upload.id, { name: outputName.value.trim() || undefined, ...body });
+    item.jobId = currentJobId;
+    activePolls.add(currentJobId);
     const job = await pollJob(currentJobId, (value) => {
       item.percent = value;
     });
@@ -1060,7 +1285,9 @@ async function runCurrent(body: Partial<ConvertRequest>, forAction: string) {
     item.state = 'error';
     item.error = String((err && (err as Error).message) || err);
   } finally {
+    activePolls.delete(item.jobId || currentJobId);
     currentJobId = '';
+    item.jobId = '';
   }
 }
 
@@ -1287,12 +1514,14 @@ function onWindowKey(event: KeyboardEvent) {
 
 onMounted(() => {
   window.addEventListener('keydown', onWindowKey);
+  document.addEventListener('visibilitychange', onVisibilityChange);
   loadStatusWithRetry();
 });
 
 onBeforeUnmount(() => {
   disposed = true;
   window.removeEventListener('keydown', onWindowKey);
+  document.removeEventListener('visibilitychange', onVisibilityChange);
   clearTimeout(liveTimer);
   clearTimeout(clearTimer);
   if (uploadAbort) uploadAbort.abort();
@@ -1327,6 +1556,12 @@ watch([allChecked, someChecked], () => {
 });
 
 watch(status, () => ensureTargets(), { immediate: true });
+
+// Once the status arrives the panel knows whether persistence is on: rebuild
+// the queue from the server, or leave the page as a plain workbench.
+watch(status, (data) => {
+  if (data?.persistState === true) void loadServerQueue();
+});
 
 watch(
   () => batchTargets.value.length,
@@ -1543,12 +1778,15 @@ watch([action, panelOpen], async () => {
       </div>
 
       <div class="mc-detail-title">
-        <h2 class="mc-detail-name" :title="detailItem.upload?.name || detailItem.file.name">
-          {{ detailItem.upload?.name || detailItem.file.name }}
+        <h2 class="mc-detail-name" :title="detailItem.upload?.name || detailItem.file?.name">
+          {{ detailItem.upload?.name || detailItem.file?.name }}
         </h2>
         <p class="mc-sub">
           {{
-            [file ? formatSize(file.size) : formatSize(detailItem.file.size), file ? formatDuration(file.duration) : '']
+            [
+              file ? formatSize(file.size) : formatSize(detailItem.file?.size || 0),
+              file ? formatDuration(file.duration) : '',
+            ]
               .filter(Boolean)
               .join(' · ')
           }}

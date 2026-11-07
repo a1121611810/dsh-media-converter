@@ -157,6 +157,7 @@ export interface Config {
   maxUploadMb: number;
   composerButton: boolean;
   groups: string;
+  persistState: boolean;
 }
 
 export const Config = Schema.object({
@@ -165,6 +166,7 @@ export const Config = Schema.object({
   maxUploadMb: Schema.number().default(2048).volatile(),
   composerButton: Schema.boolean().default(true).volatile(),
   groups: Schema.string().default('convert,edit,view').volatile(),
+  persistState: Schema.boolean().default(false).volatile(),
 });
 
 // The action panel's module keys, in their built-in order. A configured
@@ -201,6 +203,9 @@ interface Tools {
 export type JobState = 'running' | 'cancelling' | 'cancelled' | 'done' | 'error';
 export interface Job {
   id: string;
+  // The upload this job belongs to, so a page that was torn down can find
+  // its still-running jobs again by file rather than by job id.
+  uploadId: string;
   state: JobState;
   percent: number | null;
   out: string;
@@ -216,6 +221,65 @@ export interface Job {
 export interface ErrorResponse {
   ok: false;
   error: string;
+}
+
+// The jobs the page may still care about, keyed by the upload they belong to.
+// The server is the authority on "is something still running": a page that was
+// torn down and rebuilt asks here instead of trusting its own snapshot.
+// One queue row as the page rebuilds it: the upload plus its latest job. The
+// server is the source of truth, so a rebuilt page shows the same files and
+// the same running jobs as any other window.
+export interface QueueItem {
+  upload: {
+    ok: true;
+    id: string;
+    name: string;
+    kind: MediaKind;
+    duration: number;
+    size: number;
+    streams: StreamInfo;
+    meta: MediaMeta;
+  };
+  job: JobInfo | null;
+}
+
+export interface JobInfo {
+  id: string;
+  uploadId: string;
+  state: JobState;
+  percent: number | null;
+  out: string;
+  size: number;
+  error: string | null;
+  kind: MediaKind;
+  copy: boolean;
+  hardware: boolean;
+}
+
+// One checked batch is a server-side "run": the Host walks its items in order,
+// starting one normal Job per file. The run is what a page restores from when
+// it is closed, reloaded, or switched away mid-batch — the browser is not the
+// thing that keeps the batch alive.
+export type RunState = 'running' | 'done' | 'cancelled';
+export type RunItemState = 'waiting' | 'converting' | 'skipped' | 'cancelled' | 'done' | 'error';
+export interface RunItemInfo {
+  id: string;
+  // 'extract-audio' / 'extract-video' for an audio/video batch, '' for convert.
+  mode: string;
+  format: string;
+  state: RunItemState;
+  percent: number | null;
+  jobId: string;
+  // A skipped row carries the panel's own locale key (e.g. 'hint.noAudio'),
+  // so the restored row explains itself in the user's language.
+  error: string;
+  result: { file: string; size: number; kind: MediaKind; copy: boolean; hardware: boolean } | null;
+}
+export interface RunInfo {
+  id: string;
+  state: RunState;
+  at: number;
+  items: RunItemInfo[];
 }
 
 // An uploaded file the Host keeps on disk until the job is done.
@@ -249,6 +313,7 @@ interface JsonBody {
   maxUploadMb?: unknown;
   composerButton?: unknown;
   groups?: unknown;
+  persistState?: unknown;
   ids?: unknown;
   items?: unknown;
   model?: unknown;
@@ -319,6 +384,7 @@ const statusPayload = (
   version: string,
   composerButton: boolean,
   groups: string[],
+  persistState: boolean,
   hardware: HardwareInfo,
 ) => ({
   ok: true as const,
@@ -328,6 +394,7 @@ const statusPayload = (
   version,
   composerButton,
   groups,
+  persistState,
   hardware,
   formats: FORMATS,
 });
@@ -559,6 +626,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   let uploadLimit = `${MAX_UPLOAD_MB} MB`;
   let composerButton = true;
   let groups: string[] = [...GROUP_KEYS];
+  let persistState = false;
   const resolveConfig = (raw: Partial<Config>) => {
     // A configured '~/Movies/x' means the home directory, not a folder literally
     // named '~' under the working directory.
@@ -573,6 +641,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     uploadLimit = maxUploadBytes >= 1048576 ? `${Math.round(maxUploadBytes / 1048576)} MB` : `${maxUploadBytes} B`;
     composerButton = unwrap(raw.composerButton) !== false;
     groups = resolveGroups(unwrap(raw.groups));
+    persistState = unwrap(raw.persistState) === true;
   };
   resolveConfig(cfg);
   const tmpDir = path.join(os.tmpdir(), 'dsh-media-toolbox');
@@ -581,6 +650,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   const uploads = new Map<string, Upload>();
   const jobs = new Map<string, Job>();
   const batches = new Map<string, BatchProgress>();
+  const runs = new Map<string, RunInfo>();
+  let latestRun = '';
   const controllers = new Map<
     string,
     { controller: AbortController; child: ReturnType<typeof spawn>; killTimer: NodeJS.Timeout | null }
@@ -656,6 +727,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     const out = await uniqueOutput(name || upload.name, plan.ext, plan.stemSuffix || '');
     const job: Job = {
       id: `j${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      uploadId: upload.id,
       state: 'running',
       percent: null,
       out,
@@ -775,6 +847,62 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     if (job.state === 'error') throw new Error(job.error || '处理失败');
     if (job.state !== 'done') throw new Error(`任务没有完成（${job.state}）`);
     return job;
+  };
+
+  // Walk a run's items in order. Each item is an ordinary job, so /queue and
+  // /job keep answering for it while the run drives the batch; the run record
+  // only adds the batch-level view a rebuilt page restores from. The loop is
+  // never tied to a request: closing the panel does not stop the batch.
+  const executeRun = async (run: RunInfo, quality: number, hardware: boolean): Promise<void> => {
+    for (const item of run.items) {
+      if (run.state !== 'running') break;
+      if (item.state !== 'waiting') continue;
+      const upload = uploads.get(item.id);
+      if (!upload) {
+        item.state = 'error';
+        item.error = '文件已失效，请重新选择';
+        continue;
+      }
+      item.state = 'converting';
+      item.percent = null;
+      try {
+        const plan = planFor(upload, { mode: item.mode, format: item.format, quality, hardware }, 0);
+        const { job, done } = await startJob(upload, plan, null, '');
+        item.jobId = job.id;
+        // A cancel can land between "this item started" and the process
+        // existing; the run is already cancelled then, so stop it right away.
+        if (run.state !== 'running' && job.state === 'running') {
+          job.state = 'cancelling';
+          controllers.get(job.id)?.controller.abort();
+        }
+        const tick = setInterval(() => {
+          item.percent = job.percent;
+        }, 250);
+        tick.unref();
+        try {
+          await done;
+        } finally {
+          clearInterval(tick);
+        }
+        if (job.state === 'done') {
+          item.state = 'done';
+          item.percent = 100;
+          item.result = { file: job.out, size: job.size, kind: job.kind, copy: job.copy, hardware: job.hardware };
+        } else if (job.state === 'cancelled') {
+          item.state = 'cancelled';
+          item.percent = null;
+        } else {
+          item.state = 'error';
+          item.percent = null;
+          item.error = job.error || '处理失败';
+        }
+      } catch (err) {
+        item.state = run.state === 'running' ? 'error' : 'cancelled';
+        item.percent = null;
+        if (item.state === 'error') item.error = errorText(err);
+      }
+    }
+    if (run.state === 'running') run.state = 'done';
   };
 
   const planFor = (upload: Upload, body: JsonBody, threads = 0): ConvertPlan => {
@@ -1171,6 +1299,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         for (const [id, progress] of batches) {
           if (now - progress.startedAt > 30 * 60 * 1000) batches.delete(id);
         }
+        // A finished run is kept for the same reason: a page that comes back
+        // still restores the batch it started.
+        for (const [id, run] of runs) {
+          if (run.state !== 'running' && now - run.at > 30 * 60 * 1000) runs.delete(id);
+        }
       },
       10 * 60 * 1000,
     );
@@ -1194,6 +1327,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               version,
               composerButton,
               groups,
+              persistState,
               hardware,
             ),
           );
@@ -1230,6 +1364,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             if (body.groups !== undefined) {
               if (typeof body.groups !== 'string') throw new Error('groups 必须是字符串');
               patch.groups = body.groups;
+            }
+            if (body.persistState !== undefined) {
+              if (typeof body.persistState !== 'boolean') throw new Error('persistState 必须是布尔值');
+              patch.persistState = body.persistState;
             }
             if (Object.keys(patch).length === 0) return json(res, 200, errorPayload('没有要保存的字段'));
             // No expectedRevision: last write wins; the service validates the
@@ -1729,6 +1867,169 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           json(res, 200, { ok: true, ...job });
         },
       }),
+      // The batch itself, owned by the Host. POST answers immediately and the
+      // run keeps walking its items; GET (no id = the newest run) is what a
+      // rebuilt page restores the batch and its per-file states from.
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/run`,
+        handler: async (req, res) => {
+          if (rejectUnauthenticated(req, res)) return;
+          if (req.method === 'GET') {
+            const id = requestUrl(req).searchParams.get('id');
+            const run = id ? runs.get(id) : runs.get(latestRun);
+            return json(res, 200, { ok: true, run: run || null });
+          }
+          if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
+          if (!ffmpeg) return json(res, 200, noFfmpeg);
+          try {
+            const body = await readJson(req);
+            const raw = Array.isArray(body.items) ? body.items : [];
+            const items: RunItemInfo[] = [];
+            for (const entry of raw) {
+              const row = (entry || {}) as Record<string, unknown>;
+              const id = String(row.id || '');
+              if (!uploads.has(id)) return json(res, 200, errorPayload('文件已失效，请重新选择'));
+              // A row the panel already knows it cannot convert (a silent video
+              // asked for an audio-only target) travels with the run so it is
+              // still explained after a page rebuild.
+              const skipped = row.skip === true;
+              items.push({
+                id,
+                mode: String(row.mode || ''),
+                format: String(row.format || ''),
+                state: skipped ? 'skipped' : 'waiting',
+                percent: null,
+                jobId: '',
+                error: skipped ? String(row.reason || '') : '',
+                result: null,
+              });
+            }
+            if (!items.length) return json(res, 200, errorPayload('没有要处理的文件'));
+            const run: RunInfo = {
+              id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+              state: 'running',
+              at: Date.now(),
+              items,
+            };
+            runs.set(run.id, run);
+            latestRun = run.id;
+            json(res, 200, { ok: true, run });
+            void executeRun(run, Number(body.quality ?? 90), Boolean(body.hardware));
+          } catch (err) {
+            json(res, 200, errorPayload(errorText(err)));
+          }
+        },
+      }),
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/run/cancel`,
+        handler: async (req, res) => {
+          if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
+          if (rejectUnauthenticated(req, res)) return;
+          try {
+            const body = await readJson(req);
+            const run = runs.get(String(body.id || ''));
+            if (!run) return json(res, 200, errorPayload('任务不存在'));
+            if (run.state === 'running') {
+              run.state = 'cancelled';
+              for (const item of run.items) if (item.state === 'waiting') item.state = 'cancelled';
+              const current = run.items.find((item) => item.state === 'converting' && item.jobId);
+              const job = current ? jobs.get(current.jobId) : undefined;
+              if (job && job.state === 'running') {
+                // The same door as a single cancel: ffmpeg gets SIGTERM first.
+                job.state = 'cancelling';
+                job.error = null;
+                const entry = controllers.get(job.id);
+                if (entry) {
+                  entry.controller.abort();
+                  entry.killTimer = setTimeout(() => {
+                    if (entry.child.exitCode === null && entry.child.signalCode === null) entry.child.kill('SIGKILL');
+                  }, 3000);
+                  entry.killTimer.unref();
+                }
+              }
+            }
+            json(res, 200, { ok: true, run });
+          } catch (err) {
+            json(res, 200, errorPayload(errorText(err)));
+          }
+        },
+      }),
+      // Every job the server still remembers, so a rebuilt page can re-attach
+      // a row to a running job (or pick up a result it finished while away).
+      // Everything the panel needs to rebuild its queue: the uploads still on
+      // disk, each with its newest job. Newest uploads first.
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/queue`,
+        handler: (req, res) => {
+          if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
+          if (rejectUnauthenticated(req, res)) return;
+          const newest = new Map<string, Job>();
+          for (const job of jobs.values()) newest.set(job.uploadId, job);
+          const items: QueueItem[] = [];
+          // Oldest first while walking; the newest rows are what the panel
+          // shows, so the cap trims from the front below.
+          for (const upload of uploads.values()) {
+            const job = newest.get(upload.id);
+            items.push({
+              upload: {
+                ok: true,
+                id: upload.id,
+                name: upload.name,
+                kind: upload.kind,
+                duration: upload.duration,
+                size: upload.size,
+                streams: upload.streams,
+                meta: upload.meta,
+              },
+              job: job
+                ? {
+                    id: job.id,
+                    uploadId: job.uploadId,
+                    state: job.state,
+                    percent: job.percent,
+                    out: job.out,
+                    size: job.size,
+                    error: job.error,
+                    kind: job.kind,
+                    copy: job.copy,
+                    hardware: job.hardware,
+                  }
+                : null,
+            });
+          }
+          // shortcut: only the newest rows come back after a page rebuild;
+          // the working set is small, and uploads expire after the TTL anyway.
+          json(res, 200, { ok: true, items: items.slice(-200) });
+        },
+      }),
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/jobs`,
+        handler: (req, res) => {
+          if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
+          if (rejectUnauthenticated(req, res)) return;
+          const list: JobInfo[] = [];
+          for (const job of jobs.values()) {
+            list.push({
+              id: job.id,
+              uploadId: job.uploadId,
+              state: job.state,
+              percent: job.percent,
+              out: job.out,
+              size: job.size,
+              error: job.error,
+              kind: job.kind,
+              copy: job.copy,
+              hardware: job.hardware,
+            });
+            if (list.length >= 50) break;
+          }
+          json(res, 200, { ok: true, jobs: list });
+        },
+      }),
       webServer.register({
         kind: 'exact',
         path: `${PREFIX}/preview`,
@@ -1738,6 +2039,21 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           const file = requestUrl(req).searchParams.get('file');
           if (!insideOutput(file)) return json(res, 403, errorPayload('只能预览输出目录里的文件'));
           await serveFile(req, res, file);
+        },
+      }),
+      // The uploaded original, so a page restored after close can play and trim
+      // a queue row whose browser-side File is gone. Same trust fence and Range
+      // support as the output preview.
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/source`,
+        handler: async (req, res) => {
+          if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
+          if (rejectUnauthenticated(req, res)) return;
+          const id = requestUrl(req).searchParams.get('id');
+          const upload = id ? uploads.get(id) : undefined;
+          if (!upload) return json(res, 404, errorPayload('文件已失效，请重新选择'));
+          await serveFile(req, res, upload.path);
         },
       }),
       webServer.register({

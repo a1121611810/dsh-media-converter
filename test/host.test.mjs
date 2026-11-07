@@ -134,11 +134,11 @@ function makeRes() {
 }
 
 // Streaming routes need a real writable response.
-async function fetchBinary(route) {
+async function fetchBinary(route, options = {}) {
   const handler = routes.get('/api/media-convert/' + route.split('?')[0]);
   assert.ok(handler, `route ${route} registered`);
   const res = makeRes();
-  await handler(fakeReq({ url: '/api/media-convert/' + route }), res);
+  await handler(fakeReq({ url: '/api/media-convert/' + route, ...options }), res);
   await res.done;
   res.body = Buffer.concat(res.chunks);
   return res;
@@ -171,6 +171,7 @@ const status = await call('status');
 assert.equal(status.data.ok, true);
 assert.equal(status.data.maxUploadMb, 2048, 'the default upload cap is reported');
 assert.equal(status.data.composerButton, true, 'the composer button defaults on');
+assert.equal(status.data.persistState, false, 'page-state persistence defaults off');
 assert.equal(typeof status.data.version, 'string', 'the plugin version is reported');
 assert.ok(status.data.version.length > 0, 'a version is present');
 assert.deepEqual(status.data.groups, ['convert', 'edit', 'view'], 'the built-in group order is reported');
@@ -196,6 +197,12 @@ assert.equal(upload.data.kind, 'image');
 assert.equal(upload.data.name, 'evil name.png'); // basename wins, no traversal
 assert.equal(upload.data.streams.video, true); // ffmpeg calls a still image a video stream
 
+// Before any job exists the upload has no entry: a page that only picked a
+// file must not invent a task.
+const noJobs = await call('jobs');
+assert.equal(noJobs.data.ok, true);
+assert.ok(!noJobs.data.jobs.some((job) => job.uploadId === upload.data.id), 'an unconverted upload has no job');
+
 const converted = await call('convert', {
   method: 'POST',
   body: JSON.stringify({ id: upload.data.id, format: 'jpg', quality: 60 }),
@@ -203,6 +210,26 @@ const converted = await call('convert', {
 assert.equal(converted.data.ok, true, JSON.stringify(converted.data));
 const imageJob = await waitJob(converted.data.job);
 assert.equal(imageJob.kind, 'image');
+
+// The queue is what a rebuilt page renders: every live upload plus its newest
+// job, so no client-side snapshot is needed.
+const queue = await call('queue');
+assert.equal(queue.data.ok, true);
+const queued = queue.data.items.find((item) => item.upload.id === upload.data.id);
+assert.ok(queued, 'the upload is in the queue');
+assert.equal(queued.upload.name, 'evil name.png');
+assert.equal(queued.job.state, 'done');
+assert.equal(queued.job.uploadId, upload.data.id);
+
+// The jobs list is what a rebuilt page reconciles against: it ties the job
+// back to the upload it belongs to and carries the finished result.
+const finishedJobs = await call('jobs');
+assert.equal(finishedJobs.data.ok, true);
+const finished = finishedJobs.data.jobs.find((job) => job.id === imageJob.id);
+assert.ok(finished, 'the finished job is listed');
+assert.equal(finished.uploadId, upload.data.id);
+assert.equal(finished.state, 'done');
+assert.equal(finished.out, imageJob.out);
 
 const preview = await fetchBinary('preview?file=' + encodeURIComponent(imageJob.out));
 assert.equal(preview.status, 200);
@@ -217,6 +244,18 @@ const previewEscape = await fetchBinary(
   'preview?file=' + encodeURIComponent(path.join(outDir, '..', '..', 'etc', 'hosts')),
 );
 assert.equal(previewEscape.status, 403, 'a traversal out of the output directory is refused');
+
+// The uploaded original streams back (with ranges) so a page restored after
+// a close can play and trim a row whose browser-side File is gone.
+const source = await fetchBinary('source?id=' + upload.data.id);
+assert.equal(source.status, 200);
+assert.equal(source.headers['content-type'], 'image/png');
+assert.ok(source.body.length > 0);
+const ranged = await fetchBinary('source?id=' + upload.data.id, { headers: { range: 'bytes=0-9' } });
+assert.equal(ranged.status, 206, 'a range request is honoured');
+assert.equal(ranged.body.length, 10);
+const sourceGone = await fetchBinary('source?id=unope');
+assert.equal(sourceGone.status, 404, 'an expired or unknown upload is reported');
 
 // --- PTC batch route -----------------------------------------------------
 testUploadId = upload.data.id;
@@ -571,6 +610,84 @@ assert.equal(fs.existsSync(cancelState.out), false, 'cancelled job leaves no out
 const unknownCancel = await call('cancel', { method: 'POST', body: JSON.stringify({ id: 'nope' }) });
 assert.equal(unknownCancel.data.ok, false, 'cancelling an unknown job reports it');
 
+// --- batch runs belong to the Host ---------------------------------------
+// The panel hands over a checked batch and may then be closed, reloaded, or
+// rebuilt. The run keeps walking its files and is what the next page restores
+// its rows from, so the batch never resets to "waiting" on a page switch.
+const runImage = await call('upload?name=run.png', { method: 'POST', body: fs.readFileSync(sample) });
+assert.equal(runImage.data.ok, true, JSON.stringify(runImage.data));
+const started = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [
+      { id: runImage.data.id, format: 'jpg', quality: 55 },
+      { id: slowUpload.data.id, skip: true, reason: 'batch.notApplicable' },
+    ],
+  }),
+});
+assert.equal(started.data.ok, true, JSON.stringify(started.data));
+assert.equal(started.data.run.state, 'running', 'the response does not wait for the batch');
+assert.equal(started.data.run.items[0].state, 'waiting');
+assert.equal(started.data.run.items[1].state, 'skipped', 'a row the panel cannot convert travels as skipped');
+assert.equal(started.data.run.items[1].error, 'batch.notApplicable', 'the skip reason survives a rebuild');
+
+let runState = started.data.run;
+for (let attempt = 0; attempt < 150 && runState.state === 'running'; attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  runState = (await call('run?id=' + started.data.run.id)).data.run;
+}
+assert.equal(runState.state, 'done');
+assert.equal(runState.items[0].state, 'done');
+assert.equal(runState.items[0].percent, 100);
+assert.ok(fs.existsSync(runState.items[0].result.file), 'the run wrote the output');
+assert.equal(runState.items[0].result.kind, 'image');
+assert.equal(runState.items[1].state, 'skipped', 'a skipped item is never executed');
+assert.equal(runState.items[1].jobId, '', 'a skipped item starts no job');
+
+// A rebuilt page asks without an id and gets the newest run back.
+const latestRun = await call('run');
+assert.equal(latestRun.data.ok, true);
+assert.equal(latestRun.data.run.id, runState.id, 'the newest run is restored without an id');
+
+// Per-row state still comes from /queue: each run item is an ordinary job.
+const runQueue = await call('queue');
+const runRow = runQueue.data.items.find((item) => item.upload.id === runImage.data.id);
+assert.equal(runRow.job.state, 'done', 'the run item is a normal job in the queue');
+
+// Cancelling a run kills the item in flight and stops the rest.
+const slowRun = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: slowUpload.data.id, format: 'webm' }] }),
+});
+assert.equal(slowRun.data.ok, true, JSON.stringify(slowRun.data));
+const runCancelled = await call('run/cancel', {
+  method: 'POST',
+  body: JSON.stringify({ id: slowRun.data.run.id }),
+});
+assert.equal(runCancelled.data.ok, true, JSON.stringify(runCancelled.data));
+assert.equal(runCancelled.data.run.state, 'cancelled');
+let cancelledRunState = runCancelled.data.run;
+for (let attempt = 0; attempt < 100 && cancelledRunState.items[0].state === 'converting'; attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  cancelledRunState = (await call('run?id=' + slowRun.data.run.id)).data.run;
+}
+assert.equal(cancelledRunState.state, 'cancelled');
+assert.equal(cancelledRunState.items[0].state, 'cancelled', 'the in-flight item dies with the run');
+
+const unknownRun = await call('run?id=nope');
+assert.deepEqual(unknownRun.data, { ok: true, run: null }, 'an unknown run is reported as absent');
+const unknownRunCancel = await call('run/cancel', { method: 'POST', body: JSON.stringify({ id: 'nope' }) });
+assert.equal(unknownRunCancel.data.ok, false, 'cancelling an unknown run reports it');
+const emptyRun = await call('run', { method: 'POST', body: JSON.stringify({ items: [] }) });
+assert.equal(emptyRun.data.ok, false, 'an empty batch is refused');
+const staleRunItem = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: 'missing', format: 'jpg' }] }),
+});
+assert.equal(staleRunItem.data.ok, false, 'a batch naming a stale upload is refused');
+const unauthenticatedRun = await call('run', { auth: false });
+assert.equal(unauthenticatedRun.status, 401, 'the run routes sit behind the trust fence');
+
 // --- an upload that does not arrive whole ---------------------------------
 // A truncated body would only fail later as an "unrecognisable media file",
 // so it has to be reported as what it is.
@@ -765,6 +882,16 @@ assert.equal(emptySave.data.ok, false, 'an empty patch is reported');
 await call('config', { method: 'POST', body: JSON.stringify({ composerButton: false, groups: 'view,convert' }) });
 const uiUpdate = settingsCalls.filter((call) => call[0] === 'update').at(-1);
 assert.deepEqual(uiUpdate[2], { composerButton: false, groups: 'view,convert' });
+
+// The page-state toggle saves and applies like the other UI fields.
+await call('config', { method: 'POST', body: JSON.stringify({ persistState: true }) });
+const persistUpdate = settingsCalls.filter((call) => call[0] === 'update').at(-1);
+assert.deepEqual(persistUpdate[2], { persistState: true });
+const persisted = await call('status');
+assert.equal(persisted.data.persistState, true, 'the toggle applies to the running instance');
+const badPersist = await call('config', { method: 'POST', body: JSON.stringify({ persistState: 'yes' }) });
+assert.equal(badPersist.data.ok, false, 'a non-boolean toggle is refused');
+assert.match(badPersist.data.error, /persistState/);
 
 // The save applies to the running instance: the very next status read serves
 // the new values, with no restart and no reload.
