@@ -193,8 +193,12 @@ assert.ok(copyArgs('audio', 'mp3', { video: null, audio: { codec: 'mp3' } }));
 assert.equal(copyArgs('audio', 'mp3', { video: null, audio: { codec: 'aac' } }), null);
 
 // VideoToolbox only for the libx264 containers.
-assert.ok(hardwareFor('video', 'mp4', 10 * 1024 * 1024, 10).args.includes('h264_videotoolbox'));
-assert.deepEqual(hardwareFor('video', 'mp4', 10 * 1024 * 1024, 10).inputArgs, ['-hwaccel', 'videotoolbox']);
+const hwPlan = hardwareFor('video', 'mp4', 10 * 1024 * 1024, 10);
+assert.ok(hwPlan.args.includes('h264_videotoolbox'));
+assert.deepEqual(hwPlan.inputArgs, ['-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox']);
+// No -pix_fmt on purpose: forcing a conversion would download the GPU frames
+// and break the zero-copy path.
+assert.ok(!hwPlan.args.includes('-pix_fmt'));
 assert.equal(hardwareFor('video', 'webm', 10 * 1024 * 1024, 10), null);
 
 // CPU-aware capacity and thread split.

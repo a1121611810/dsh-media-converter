@@ -303,7 +303,11 @@ export function copyArgs(kind: MediaKind, format: string, meta: MediaMeta | null
 }
 
 // Apple VideoToolbox H.264. Only the containers that currently use libx264
-// are eligible; the quality/bitrate estimate is explained in the UI.
+// are eligible; the quality/bitrate estimate is explained in the UI. Frames
+// stay on the GPU end to end: -hwaccel_output_format keeps the decoder's
+// videotoolbox_vld frames, which the encoder accepts directly, and no
+// -pix_fmt is set on purpose — forcing yuv420p would download every frame
+// to the CPU for conversion and defeat the zero-copy path.
 const HW_AUDIO: Record<string, string[]> = {
   mp4: ['-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'],
   mov: ['-c:a', 'aac', '-b:a', '192k'],
@@ -323,7 +327,7 @@ export function hardwareFor(
   const totalKbps = duration > 0 ? (size * 8) / duration / 1000 : 0;
   const videoKbps = Math.min(12000, Math.max(1500, Math.round(totalKbps - 192)));
   return {
-    inputArgs: ['-hwaccel', 'videotoolbox'],
+    inputArgs: ['-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox'],
     args: [
       '-c:v',
       'h264_videotoolbox',
@@ -335,8 +339,6 @@ export function hardwareFor(
       String(videoKbps * 2) + 'k',
       '-allow_sw',
       '1',
-      '-pix_fmt',
-      'yuv420p',
       ...audio,
     ],
   };
