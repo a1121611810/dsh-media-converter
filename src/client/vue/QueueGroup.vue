@@ -33,6 +33,7 @@ const emit = defineEmits<{
   reveal: [file: string];
   remove: [key: string];
   'update:row-target': [key: string, value: string];
+  thumb: [key: string];
 }>();
 
 const box = ref<HTMLInputElement | null>(null);
@@ -102,6 +103,7 @@ const setQuality = (event: Event) => emit('update:quality', Number((event.target
       @open="emit('open', $event)"
       @reveal="emit('reveal', $event)"
       @remove="emit('remove', $event)"
+      @thumb="emit('thumb', $event)"
     />
   </section>
 </template>

@@ -1012,7 +1012,7 @@ const CSS = `
       .mc-row-target { width: 72px; min-width: 0; padding: 2px 4px; height: 24px; font-size: 11px; }
       .mc-list-head { padding: 2px 8px 6px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--dsw-alias-label-tertiary, inherit); }
       .mc-list { list-style: none; margin: 0; padding: 0; }
-      .mc-item { padding: 10px 8px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); transition: background-color .15s; }
+      .mc-item { padding: 10px 8px; border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); transition: background-color .15s; content-visibility: auto; contain-intrinsic-size: auto 56px; }
       .mc-item:hover { background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); }
       .mc-thumb { width: 36px; height: 36px; box-sizing: border-box; border-radius: 6px; overflow: hidden; display: grid; place-items: center; background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); color: var(--dsw-alias-label-secondary, inherit); }
       .mc-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // Presentational queue rows for the batch workbench. All state lives in App;
 // this component only renders and reports intent.
+import { onBeforeUnmount } from 'vue';
+import type { ObjectDirective } from 'vue';
 import { formatDuration, formatSize } from '../lib.js';
 import type { QueueRow } from '../lib.js';
 
@@ -21,7 +23,46 @@ const emit = defineEmits<{
   reveal: [file: string];
   remove: [key: string];
   'update:target': [key: string, value: string];
+  // A row came near the viewport, so its thumbnail is worth decoding.
+  thumb: [key: string];
 }>();
+
+// Hundreds of images must not decode their full-size bitmaps up front: a row
+// asks for its thumbnail only when it comes near the viewport.
+const rowKeys = new WeakMap<Element, string>();
+let observer: IntersectionObserver | null = null;
+
+function ensureObserver(): IntersectionObserver {
+  if (observer) return observer;
+  observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        observer?.unobserve(entry.target);
+        const key = rowKeys.get(entry.target);
+        if (key) emit('thumb', key);
+      }
+    },
+    { rootMargin: '300px' },
+  );
+  return observer;
+}
+
+const vThumb: ObjectDirective<HTMLElement, string> = {
+  mounted(el, binding) {
+    rowKeys.set(el, binding.value);
+    ensureObserver().observe(el);
+  },
+  updated(el, binding) {
+    rowKeys.set(el, binding.value);
+  },
+  unmounted(el) {
+    observer?.unobserve(el);
+    rowKeys.delete(el);
+  },
+};
+
+onBeforeUnmount(() => observer?.disconnect());
 
 const nameOf = (item: QueueRow): string => item.upload?.name || item.file?.name || '';
 const kindOf = (item: QueueRow): string => item.upload?.kind || '';
@@ -81,7 +122,7 @@ const statusOf = (item: QueueRow): string => {
       <span></span>
     </div>
     <ul class="mc-list">
-      <li v-for="item in items" :key="item.key" class="mc-item" :class="'is-' + item.state">
+      <li v-for="item in items" :key="item.key" v-thumb="item.key" class="mc-item" :class="'is-' + item.state">
         <label class="mc-check">
           <input
             type="checkbox"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { PropType } from 'vue';
 import {
   CONVERTIBLE_KINDS,
@@ -549,7 +549,7 @@ async function loadServerQueue() {
     seen.add(upload.id);
     const prev = known.get(upload.id);
     if (prev) {
-      prev.upload = upload;
+      prev.upload = markRaw(upload);
       applyServerJob(prev, job);
       next.push(prev);
     } else {
@@ -680,7 +680,7 @@ function serverRow(upload: UploadResponse, job: ServerJob | null): Item {
     url: sourceUrl(upload.id),
     thumb: '',
     checked: upload.kind !== 'text',
-    upload,
+    upload: markRaw(upload),
     state: (patch?.state as ItemState) || 'ready',
     percent: patch?.percent ?? null,
     result: patch?.result ?? null,
@@ -860,10 +860,16 @@ async function encodeImage(blob: Blob, max: number, type: string, quality: numbe
 }
 
 let thumbChain: Promise<unknown> = Promise.resolve();
+// Rows the list reported as visible, and rows whose thumbnail is already being
+// decoded. A few hundred files would otherwise decode every image up front.
+const visibleThumbs = new Set<string>();
+const queuedThumbs = new Set<string>();
 
 // The queue shows a 36px thumbnail; decoding the full picture for it keeps a
 // 96 MB bitmap per row alive. One decode at a time keeps a big drop safe.
 function queueThumb(item: Item) {
+  if (!item.file || item.thumb || queuedThumbs.has(item.key)) return;
+  queuedThumbs.add(item.key);
   thumbChain = thumbChain
     .then(async () => {
       if (disposed || !item.file || !items.value.some((row) => row.key === item.key)) return;
@@ -878,38 +884,60 @@ function queueThumb(item: Item) {
         /* no decoder for this format: the row keeps its kind icon */
       }
     })
-    .catch(() => {});
+    .catch(() => {})
+    .finally(() => queuedThumbs.delete(item.key));
 }
+
+// The list asks for a thumbnail when a row comes near the viewport. The upload
+// may still be in flight; the flag lets it queue the decode once it lands.
+function requestThumb(key: string) {
+  visibleThumbs.add(key);
+  const item = items.value.find((row) => row.key === key);
+  if (item && item.file && item.upload?.kind === 'image') queueThumb(item);
+}
+
+const INGEST_CHUNK = 40;
+const UPLOAD_WORKERS = 3;
 
 async function addFiles(picked: File[]) {
   if (!picked.length || busy.value) return;
   batchError.value = '';
   if (!status.value) await fetchStatus();
   const added = picked.map(makeItem);
-  items.value.push(...added);
+  // A few hundred rows must not mount in one long task: push them in slices
+  // across frames so the panel stays interactive while the list fills in.
+  for (let index = 0; index < added.length; index += INGEST_CHUNK) {
+    if (disposed) return;
+    items.value.push(...added.slice(index, index + INGEST_CHUNK));
+    if (index + INGEST_CHUNK < added.length) {
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    }
+  }
   // Mutate the reactive proxies from the array, not the raw objects pushed in:
   // assigning to the raw copies would update the data but never re-render.
   const created = items.value.slice(-added.length);
   const controller = new AbortController();
   uploadAbort = controller;
-  for (const item of created) {
-    const picked = item.file;
-    if (!picked || controller.signal.aborted) {
+  const uploadOne = async (item: Item) => {
+    const file = item.file;
+    if (!file || controller.signal.aborted) {
       removeItem(item.key, true);
-      continue;
+      return;
     }
     try {
       const data = await readJson<UploadResponse | ErrorResponse>(
-        await fetch('/api/media-convert/upload?name=' + encodeURIComponent(picked.name), {
+        await fetch('/api/media-convert/upload?name=' + encodeURIComponent(file.name), {
           method: 'POST',
-          body: picked,
+          body: file,
           signal: controller.signal,
         }),
       );
       if (!data.ok) throw new Error(data.error || t('error.title'));
-      item.upload = data;
+      // The Host's answer is read-only; keeping it raw avoids a deep reactive
+      // proxy (meta/streams/tags) for every one of a few hundred rows.
+      item.upload = markRaw(data);
       item.state = 'ready';
-      if (data.kind === 'image') queueThumb(item);
+      if (data.kind === 'image' && visibleThumbs.has(item.key)) requestThumb(item.key);
       if (data.kind === 'text') item.checked = false;
     } catch (err) {
       if (controller.signal.aborted) removeItem(item.key, true);
@@ -918,7 +946,19 @@ async function addFiles(picked: File[]) {
         item.error = String((err && (err as Error).message) || err);
       }
     }
-  }
+  };
+  // Each upload waits on a server-side ffmpeg probe, so a serial loop turns a
+  // few hundred files into a long minute of nothing. Three at a time is safe.
+  const pending = created.slice();
+  await Promise.all(
+    Array.from({ length: Math.min(UPLOAD_WORKERS, pending.length) }, async () => {
+      for (;;) {
+        const item = pending.shift();
+        if (!item || controller.signal.aborted) return;
+        await uploadOne(item);
+      }
+    }),
+  );
   if (uploadAbort === controller) uploadAbort = null;
   ensureTargets();
 }
@@ -933,6 +973,8 @@ function removeItem(key: string, force = false) {
   if (index < 0) return;
   const [item] = items.value.splice(index, 1);
   delete rowTargets.value[key];
+  visibleThumbs.delete(key);
+  queuedThumbs.delete(key);
   URL.revokeObjectURL(item.url);
   if (item.thumb) URL.revokeObjectURL(item.thumb);
   if (detailKey.value === key) {
@@ -1670,6 +1712,7 @@ watch([action, panelOpen], async () => {
               @toggle="toggleChecked"
               @open="openDetail"
               @reveal="reveal"
+              @thumb="requestThumb"
               @remove="removeItem"
             />
           </div>
