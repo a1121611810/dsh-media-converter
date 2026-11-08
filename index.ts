@@ -813,7 +813,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       () => true,
       () => false,
     );
-    return taken ? path.join(outDir, `${stem}-${Date.now().toString(36)}.${extension}`) : candidate;
+    return taken
+      ? path.join(outDir, `${stem}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.${extension}`)
+      : candidate;
   };
 
   // One finished job tells the estimator how fast this machine really is. Short
@@ -973,60 +975,113 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     return job;
   };
 
-  // Walk a run's items in order. Each item is an ordinary job, so /queue and
-  // /job keep answering for it while the run drives the batch; the run record
-  // only adds the batch-level view a rebuilt page restores from. The loop is
-  // never tied to a request: closing the panel does not stop the batch.
+  // The run drives its items in three lanes: a software video encode saturates
+  // every core (see capacityFor), so only one runs at a time; hardware encodes
+  // ride the Apple media engine, cap 3 — parallel 1080p sessions barely slow
+  // each other, 4K does; everything else (copy/image/audio) is cheap and light.
+  // A lane's workers walk their own queue, so a slow software video never
+  // blocks the other lanes behind it.
   const executeRun = async (run: RunInfo, quality: number, hardware: boolean): Promise<void> => {
-    for (const item of run.items) {
-      if (run.state !== 'running') break;
-      if (item.state !== 'waiting') continue;
-      const upload = uploads.get(item.id);
-      if (!upload) {
-        item.state = 'error';
-        item.error = '文件已失效，请重新选择';
-        continue;
+    const controller = new AbortController();
+    runControllers.set(run.id, controller);
+    const { signal } = controller;
+    try {
+      interface RunEntry {
+        item: RunInfo['items'][number];
+        upload: Upload;
+        plan: ConvertPlan;
       }
-      item.state = 'converting';
-      item.percent = null;
-      try {
-        const plan = planFor(upload, { mode: item.mode, format: item.format, quality, hardware }, 0);
-        const { job, done } = await startJob(upload, plan, null, '');
-        item.jobId = job.id;
-        // A cancel can land between "this item started" and the process
-        // existing; the run is already cancelled then, so stop it right away.
-        if (run.state !== 'running' && job.state === 'running') {
-          job.state = 'cancelling';
-          controllers.get(job.id)?.controller.abort();
+      const softwareVideos: RunEntry[] = [];
+      const hardwareJobs: RunEntry[] = [];
+      const lightJobs: RunEntry[] = [];
+      for (const item of run.items) {
+        if (item.state !== 'waiting') continue;
+        const upload = uploads.get(item.id);
+        if (!upload) {
+          item.state = 'error';
+          item.error = '文件已失效，请重新选择';
+          continue;
         }
-        const tick = setInterval(() => {
-          item.percent = job.percent;
-        }, 250);
-        tick.unref();
         try {
-          await done;
-        } finally {
-          clearInterval(tick);
-        }
-        if (job.state === 'done') {
-          item.state = 'done';
-          item.percent = 100;
-          item.result = { file: job.out, size: job.size, kind: job.kind, copy: job.copy, hardware: job.hardware };
-        } else if (job.state === 'cancelled') {
-          item.state = 'cancelled';
-          item.percent = null;
-        } else {
+          const plan = planFor(upload, { mode: item.mode, format: item.format, quality, hardware }, 0);
+          // Container rewrites (copy, extract-audio, metadata) carry 'copy' in
+          // their encoder args but not the copy flag; only a real re-encode
+          // belongs on the one-at-a-time software video lane.
+          const isRewrite = plan.copy || plan.args.includes('copy');
+          if (!isRewrite && !plan.hardware && upload.kind === 'video') {
+            softwareVideos.push({ item, upload, plan });
+          } else if (plan.hardware) {
+            hardwareJobs.push({ item, upload, plan });
+          } else {
+            lightJobs.push({ item, upload, plan });
+          }
+        } catch (err) {
           item.state = 'error';
           item.percent = null;
-          item.error = job.error || '处理失败';
+          item.error = errorText(err);
         }
-      } catch (err) {
-        item.state = run.state === 'running' ? 'error' : 'cancelled';
-        item.percent = null;
-        if (item.state === 'error') item.error = errorText(err);
       }
+      const processItem = async ({ item, upload, plan }: RunEntry): Promise<void> => {
+        // An item can wait in a lane while the batch is cancelled: never start it.
+        if (run.state !== 'running' || signal.aborted) {
+          if (item.state === 'waiting') item.state = 'cancelled';
+          return;
+        }
+        item.state = 'converting';
+        item.percent = null;
+        try {
+          const { job, done } = await startJob(upload, plan, null, '');
+          item.jobId = job.id;
+          // A cancel can land between "this item started" and the process
+          // existing; the run is already cancelled then, so stop it right away.
+          if (run.state !== 'running' && job.state === 'running') {
+            job.state = 'cancelling';
+            controllers.get(job.id)?.controller.abort();
+          }
+          const tick = setInterval(() => {
+            item.percent = job.percent;
+          }, 250);
+          tick.unref();
+          try {
+            await awaitJob(job, done, signal);
+          } finally {
+            clearInterval(tick);
+          }
+          if (job.state === 'done') {
+            item.state = 'done';
+            item.percent = 100;
+            item.result = { file: job.out, size: job.size, kind: job.kind, copy: job.copy, hardware: job.hardware };
+          } else if (job.state === 'cancelled') {
+            item.state = 'cancelled';
+            item.percent = null;
+          } else {
+            item.state = 'error';
+            item.percent = null;
+            item.error = job.error || '处理失败';
+          }
+        } catch (err) {
+          item.state = run.state === 'running' && !signal.aborted ? 'error' : 'cancelled';
+          item.percent = null;
+          if (item.state === 'error') item.error = errorText(err);
+        }
+      };
+      const runLane = async (entries: RunEntry[], width: number): Promise<void> => {
+        let cursor = 0;
+        const worker = async (): Promise<void> => {
+          while (cursor < entries.length) {
+            const entry = entries[cursor];
+            cursor += 1;
+            await processItem(entry);
+          }
+        };
+        await Promise.all(Array.from({ length: Math.max(1, Math.min(width, Math.max(1, entries.length))) }, worker));
+      };
+      const lightCap = Math.max(1, Math.min(4, cpus));
+      await Promise.all([runLane(softwareVideos, 1), runLane(hardwareJobs, 3), runLane(lightJobs, lightCap)]);
+      if (run.state === 'running') run.state = 'done';
+    } finally {
+      runControllers.delete(run.id);
     }
-    if (run.state === 'running') run.state = 'done';
   };
 
   // PTC batch: the model decides per-file formats once, then the Host runs the
@@ -2246,22 +2301,26 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             if (run.state === 'running') {
               run.state = 'cancelled';
               for (const item of run.items) if (item.state === 'waiting') item.state = 'cancelled';
-              // A PTC run is stopped through its own signal: the sandbox ends
-              // and the ffmpeg jobs inside it are killed by awaitJob.
+              // Both run kinds stop through their own signal: the PTC sandbox
+              // ends, and the plain-run lanes kill the ffmpeg jobs they already
+              // started via awaitJob. The sweep below covers the window where a
+              // job started but its lane has not observed the signal yet.
               runControllers.get(run.id)?.abort();
-              const current = run.items.find((item) => item.state === 'converting' && item.jobId);
-              const job = current ? jobs.get(current.jobId) : undefined;
-              if (job && job.state === 'running') {
-                // The same door as a single cancel: ffmpeg gets SIGTERM first.
-                job.state = 'cancelling';
-                job.error = null;
-                const entry = controllers.get(job.id);
-                if (entry) {
-                  entry.controller.abort();
-                  entry.killTimer = setTimeout(() => {
-                    if (entry.child.exitCode === null && entry.child.signalCode === null) entry.child.kill('SIGKILL');
-                  }, 3000);
-                  entry.killTimer.unref();
+              for (const item of run.items) {
+                if (item.state !== 'converting' || !item.jobId) continue;
+                const job = jobs.get(item.jobId);
+                if (job && job.state === 'running') {
+                  // The same door as a single cancel: ffmpeg gets SIGTERM first.
+                  job.state = 'cancelling';
+                  job.error = null;
+                  const entry = controllers.get(job.id);
+                  if (entry) {
+                    entry.controller.abort();
+                    entry.killTimer = setTimeout(() => {
+                      if (entry.child.exitCode === null && entry.child.signalCode === null) entry.child.kill('SIGKILL');
+                    }, 3000);
+                    entry.killTimer.unref();
+                  }
                 }
               }
             }

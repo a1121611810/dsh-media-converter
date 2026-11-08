@@ -297,7 +297,7 @@ const ZH: Record<string, string> = {
   'queue.defaultTarget': '默认目标',
   'queue.rowTargetFor': '目标 %s',
   'batch.gpu': 'GPU 编码（VideoToolbox）',
-  'batch.gpuHint': '用 Apple 媒体引擎，速度快、CPU 占用低；画质/体积与软件编码不同',
+  'batch.gpuHint': '默认开启：用 Apple 媒体引擎，速度快、CPU 占用低；画质/体积与软件编码不同，可关闭',
   'ptc.model': '模型',
   'ptc.modelDefault': '跟随 DSH 默认',
   'ptc.modelHint': '默认用 DSH 当前主模型；换一个更快的已注册模型可以缩短等待',
@@ -557,7 +557,8 @@ const EN: Record<string, string> = {
   'queue.defaultTarget': 'Default target',
   'queue.rowTargetFor': 'Target for %s',
   'batch.gpu': 'GPU encoding (VideoToolbox)',
-  'batch.gpuHint': 'Uses the Apple media engine: faster, lower CPU. Quality and size differ from software encoding.',
+  'batch.gpuHint':
+    'On by default: uses the Apple media engine — faster, lower CPU. Quality and size differ from software encoding; turn off if unwanted.',
   'ptc.model': 'Model',
   'ptc.modelDefault': 'Follow DSH default',
   'ptc.modelHint': 'Defaults to the DSH model; a faster registered model shortens the wait.',

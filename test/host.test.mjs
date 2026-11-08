@@ -1205,6 +1205,182 @@ const unknownRun = await call('run?id=nope');
 assert.deepEqual(unknownRun.data, { ok: true, run: null }, 'an unknown run is reported as absent');
 const unknownRunCancel = await call('run/cancel', { method: 'POST', body: JSON.stringify({ id: 'nope' }) });
 assert.equal(unknownRunCancel.data.ok, false, 'cancelling an unknown run reports it');
+
+// --- plain-run lanes: light jobs overlap, software videos stay alone ---------
+const slow2 = await call('upload?name=slow2.mp4', { method: 'POST', body: fs.readFileSync(slowClip) });
+assert.equal(slow2.data.ok, true, JSON.stringify(slow2.data));
+// Sixty seconds of audio keeps one re-encode busy for a second or two — long
+// enough for the sampler below to catch lanes overlapping. m4a/aac is built
+// into every ffmpeg build, so it is always offered (aom/vorbis were dropped
+// from Homebrew ffmpeg 9 and must not be assumed).
+const tone60 = path.join(outDir, 'tone60.m4a');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '60',
+  '-i',
+  'sine=frequency=440',
+  '-c:a',
+  'aac',
+  tone60,
+]);
+const audioIds = [];
+for (let i = 0; i < 6; i += 1) {
+  const up = await call(`upload?name=tone${i}.m4a`, { method: 'POST', body: fs.readFileSync(tone60) });
+  assert.equal(up.data.ok, true, JSON.stringify(up.data));
+  audioIds.push(up.data.id);
+}
+
+// Poll a live run; resolve with the final frame and the widest state overlap seen.
+async function sampleRun(runId) {
+  let maxConverting = 0;
+  for (;;) {
+    const res = await call('run?id=' + runId);
+    const run = res.data.run;
+    if (!run || run.state !== 'running') return { run, maxConverting };
+    const converting = run.items.filter((item) => item.state === 'converting').length;
+    if (converting > maxConverting) maxConverting = converting;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+// The light lane runs audios side by side instead of walking them in order.
+const lightRun = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: audioIds.map((id) => ({ id, format: 'm4a' })) }),
+});
+assert.equal(lightRun.data.ok, true, JSON.stringify(lightRun.data));
+const lightSample = await sampleRun(lightRun.data.run.id);
+assert.equal(lightSample.run.state, 'done', 'the light-lane run finishes');
+assert.ok(lightSample.maxConverting >= 2, `light jobs overlap (max ${lightSample.maxConverting} converting)`);
+assert.ok(
+  lightSample.run.items.every((item) => item.state === 'done'),
+  `light items: ${JSON.stringify(lightSample.run.items.map((item) => [item.id, item.state, item.error]))}`,
+);
+
+// Two software video encodes never overlap: each one already saturates the cores.
+const twoVideos = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [
+      { id: slowUpload.data.id, format: 'webm' },
+      { id: slow2.data.id, format: 'webm' },
+    ],
+  }),
+});
+assert.equal(twoVideos.data.ok, true, JSON.stringify(twoVideos.data));
+const twoVideoSample = await sampleRun(twoVideos.data.run.id);
+assert.equal(twoVideoSample.run.state, 'done');
+assert.ok(twoVideoSample.maxConverting <= 1, `software videos never overlap (max ${twoVideoSample.maxConverting})`);
+
+// A slow software video does not block the light lane queued behind it.
+const mixedRun = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [
+      { id: slowUpload.data.id, format: 'webm' },
+      { id: audioIds[0], format: 'm4a' },
+      { id: audioIds[1], format: 'm4a' },
+    ],
+  }),
+});
+assert.equal(mixedRun.data.ok, true, JSON.stringify(mixedRun.data));
+let audioFinishedFirst = false;
+for (;;) {
+  const res = await call('run?id=' + mixedRun.data.run.id);
+  const run = res.data.run;
+  if (!run || run.state !== 'running') break;
+  if (run.items[0].state === 'converting' && (run.items[1].state === 'done' || run.items[2].state === 'done')) {
+    audioFinishedFirst = true;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+assert.ok(audioFinishedFirst, 'light items finish while the software video still runs');
+
+// Cancelling a run kills every in-flight job, not just the first converting row.
+const cancelMix = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [
+      { id: slowUpload.data.id, format: 'webm' },
+      { id: slow2.data.id, format: 'webm' },
+      { id: audioIds[2], format: 'm4a' },
+    ],
+  }),
+});
+assert.equal(cancelMix.data.ok, true, JSON.stringify(cancelMix.data));
+const cancelMixRes = await call('run/cancel', {
+  method: 'POST',
+  body: JSON.stringify({ id: cancelMix.data.run.id }),
+});
+assert.equal(cancelMixRes.data.ok, true, JSON.stringify(cancelMixRes.data));
+const cancelMixState = await waitRun(cancelMix.data.run);
+assert.equal(cancelMixState.state, 'cancelled');
+assert.equal(cancelMixState.items[0].state, 'cancelled', 'the in-flight software video dies with the run');
+assert.equal(cancelMixState.items[1].state, 'cancelled', 'the queued software video is never started');
+// The audio item is a 1-2s job: a slow CI runner can legitimately finish it
+// just before the cancel lands, so 'done' is accepted there and only there.
+assert.ok(
+  ['done', 'cancelled'].includes(cancelMixState.items[2].state),
+  `the audio item ends done or cancelled (${cancelMixState.items[2].state})`,
+);
+assert.ok(
+  cancelMixState.items.every((item) => !item.result || !fs.existsSync(item.result.file)),
+  'cancelled jobs leave no output',
+);
+
+// Extract-audio is a container rewrite ('-c:a copy' with no copy flag): it must
+// ride the light lane in parallel, not queue on the one-at-a-time video lane.
+const song = path.join(outDir, 'song.mp4');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-i',
+  'testsrc=size=640x360:rate=30',
+  '-f',
+  'lavfi',
+  '-i',
+  'sine=frequency=440',
+  '-t',
+  '60',
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  '-c:a',
+  'aac',
+  song,
+]);
+const songIds = [];
+for (let i = 0; i < 8; i += 1) {
+  const up = await call(`upload?name=song${i}.mp4`, { method: 'POST', body: fs.readFileSync(song) });
+  assert.equal(up.data.ok, true, JSON.stringify(up.data));
+  songIds.push(up.data.id);
+}
+const extractRun = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: songIds.map((id) => ({ id, mode: 'extract-audio' })) }),
+});
+assert.equal(extractRun.data.ok, true, JSON.stringify(extractRun.data));
+const extractSample = await sampleRun(extractRun.data.run.id);
+assert.equal(extractSample.run.state, 'done', 'the extract run finishes');
+assert.ok(
+  extractSample.maxConverting >= 2,
+  `extract-audio rewrites overlap on the light lane (max ${extractSample.maxConverting})`,
+);
+assert.ok(extractSample.run.items.every((item) => item.state === 'done'));
+assert.ok(
+  extractSample.run.items.every((item) => path.extname(item.result.file) === '.m4a'),
+  'extracted audio lands in an audio container',
+);
+
 const emptyRun = await call('run', { method: 'POST', body: JSON.stringify({ items: [] }) });
 assert.equal(emptyRun.data.ok, false, 'an empty batch is refused');
 const staleRunItem = await call('run', {

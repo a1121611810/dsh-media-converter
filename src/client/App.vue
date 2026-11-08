@@ -79,7 +79,14 @@ const targets = ref<Record<ConvertibleKind, string>>(defaultTargets({}));
 const rowTargets = ref<Record<string, string>>({});
 const batchQuality = ref(90);
 const usePtc = ref(false);
+// On by default whenever the batch can use the media engine (see showGpu);
+// the user can still turn it off, after which the auto-default never overrides.
 const useGpu = ref(false);
+let gpuTouched = false;
+const onGpuToggle = (value: boolean) => {
+  gpuTouched = true;
+  useGpu.value = value;
+};
 const GPU_FORMATS = new Set(['mp4', 'mov', 'mkv', 'flv', 'ts']);
 const ptcModels = ref<PtcModelOption[]>([]);
 const ptcDefaultModel = ref<ModelsResponse['default']>(null);
@@ -1569,6 +1576,7 @@ watch(
 );
 watch(showGpu, (on) => {
   if (!on) useGpu.value = false;
+  else if (!gpuTouched) useGpu.value = true;
 });
 watch(usePtc, (on) => {
   if (on && !ptcModels.value.length && !modelsLoading.value) void loadModels();
@@ -1711,7 +1719,7 @@ watch([action, panelOpen], async () => {
             :disabled="busy"
             :t="t"
             @ptc="usePtc = $event"
-            @gpu="useGpu = $event"
+            @gpu="onGpuToggle"
             @update:model-key="ptcModelKey = $event"
             @run="startBatch"
             @cancel="cancelBatch"
