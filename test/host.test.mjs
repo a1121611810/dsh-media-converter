@@ -216,6 +216,9 @@ assert.equal(typeof status.data.version, 'string', 'the plugin version is report
 assert.ok(status.data.version.length > 0, 'a version is present');
 assert.deepEqual(status.data.groups, ['convert', 'edit', 'view'], 'the built-in group order is reported');
 assert.deepEqual(status.data.formats.image, ['png', 'jpg', 'webp', 'gif', 'bmp', 'tiff', 'avif']);
+// The status names the active metadata route; which one depends on whether
+// this machine ships ffprobe next to ffmpeg (CI's apt ffmpeg does).
+assert.ok(['ffprobe', 'ffmpeg'].includes(status.data.probeMode), 'probeMode names the active probing route');
 if (!status.data.ffmpegPath) {
   // A silent skip is a green run that tested nothing; CI installs ffmpeg, so
   // missing it here is a broken environment, not a reason to pass.
@@ -681,6 +684,74 @@ assert.match(metaProbe, /title\s*:\s*片头测试/);
 assert.match(metaProbe, /artist\s*:\s*小火山/);
 const rewritten = await call('upload?name=tagged.mp4', { method: 'POST', body: fs.readFileSync(doneMeta.out) });
 assert.equal(rewritten.data.meta.tags.title, '片头测试');
+
+// --- probing edge cases (real ffmpeg output) -------------------------------
+// A 5.1 layout keeps its channel label instead of shifting the sample format
+// into the channels slot.
+const surroundSrc = path.join(outDir, 'surround.ac3');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-i',
+  'anullsrc=channel_layout=5.1:sample_rate=48000',
+  '-t',
+  '1',
+  '-c:a',
+  'ac3',
+  surroundSrc,
+]);
+const surroundUp = await call('upload?name=surround.ac3', { method: 'POST', body: fs.readFileSync(surroundSrc) });
+assert.equal(surroundUp.data.kind, 'audio');
+assert.equal(surroundUp.data.meta.audio.channels, '5.1(side)', JSON.stringify(surroundUp.data.meta.audio));
+
+// Cover art of an audio file is artwork, not its picture track.
+const coverPng = path.join(outDir, 'cover.png');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-i',
+  'testsrc=duration=1:size=300x300:rate=1',
+  '-frames:v',
+  '1',
+  coverPng,
+]);
+const coverM4a = path.join(outDir, 'cover.m4a');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-i',
+  'sine=frequency=330',
+  '-t',
+  '1',
+  '-i',
+  coverPng,
+  '-map',
+  '0:a',
+  '-map',
+  '1',
+  '-c:a',
+  'aac',
+  '-c:v',
+  'mjpeg',
+  '-frames:v',
+  '1',
+  '-disposition:v:0',
+  'attached_pic',
+  coverM4a,
+]);
+const coverUp = await call('upload?name=cover.m4a', { method: 'POST', body: fs.readFileSync(coverM4a) });
+assert.equal(coverUp.data.kind, 'audio');
+assert.equal(coverUp.data.meta.video, null, 'cover art must not become the picture track');
+assert.equal(coverUp.data.meta.audio.codec, 'aac');
 
 // --- every advertised format must actually convert -----------------------
 const audioSrc = path.join(outDir, 'tone.m4a');

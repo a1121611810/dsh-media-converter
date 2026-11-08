@@ -98,7 +98,7 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
   - Windows：`PATH` 里找 `ffmpeg.exe`（装在 `C:\ffmpeg\bin` 也认），imageio 静态包在 `%LOCALAPPDATA%\imageio_ffmpeg\binaries` 或 `%APPDATA%\Python\Python*\site-packages\...`。
   - macOS GPU 编码需要 ffmpeg 带 `h264_videotoolbox`（本机 imageio 7.1 自带）；插件探测后显示开关，没有就隐藏。
   - 手动指定路径时，Windows 下写不写 `.exe` 都行。
-- 没有 ffprobe 也能用：元数据从 `ffmpeg -i` 的输出解析。
+- **ffprobe（可选增强）**：找到 ffprobe 时元数据改用它输出结构化 JSON 解析（封面图、5.1 这类带数字的声道布局、负 start 时间等边界情况更可靠）。探测顺序是 ffmpeg 同目录（完整安装两者成对出现）→ `PATH` → 常见安装目录；找不到（imageio-ffmpeg 只带 ffmpeg 单个二进制）自动回退到解析 `ffmpeg -i` 的 stderr，功能不受影响。设置页「当前生效」列表会显示当前解析模式，兼容模式下给出安装指引——装好完整版 ffmpeg 后回本页点「保存」即切换，无需重启。
 
 ## 配置
 
@@ -190,7 +190,7 @@ src/client/lib.ts         纯函数（格式化/时间码/裁剪窗口）+ fetch
 vite.config.ts            构建：IIFE + __ModuleLoader__ 握手 + React 走宿主模块表
 client.js                 构建产物（提交进仓库，勿手改）
 index.ts                  宿主：/api/media-convert/* 路由、ffmpeg 任务、PTC 模型目录/计划/进度、自适应队列、GPU 探测、预览与 Base64、Agent 工具 media_toolbox
-lib/plan.ts               格式表、参数生成（含 copy/GPU/线程）、元数据解析、裁剪（也定义面板要用的媒体类型）
+lib/plan.ts               格式表、参数生成（含 copy/GPU/线程）、元数据解析（ffmpeg stderr 与 ffprobe JSON 两路，同一 MediaMeta）、裁剪（也定义面板要用的媒体类型）
 lib/schedule.ts           自适应容量、任务权重、每任务线程数（纯函数）
 lib/base64.ts             Base64 嗅探与还原
 lib/platform.ts           ffmpeg 查找、文件管理器、文件名规则（纯函数，跨平台分支可测）

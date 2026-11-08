@@ -43,10 +43,12 @@ import {
   normalizeStderr,
   normalizeTrim,
   parseDuration,
+  parseFfprobeJson,
   parseMeta,
   parseStreams,
   percentOf,
   progressSeconds,
+  streamInfoOf,
   subtitlePlan,
   threadArgs,
   trimArgs,
@@ -68,6 +70,7 @@ import {
   hardwarePathAllowed,
   imageioPatterns,
   isInsideDir,
+  probeCandidates,
   revealCommand,
   safeBaseName,
 } from './lib/platform.js';
@@ -422,6 +425,7 @@ const statusPayload = (
   groups: string[],
   persistState: boolean,
   hardware: HardwareInfo,
+  probeMode: 'ffprobe' | 'ffmpeg',
 ) => ({
   ok: true as const,
   ffmpegPath,
@@ -432,6 +436,7 @@ const statusPayload = (
   groups,
   persistState,
   hardware,
+  probeMode,
   formats: FORMATS,
 });
 export type StatusResponse = ReturnType<typeof statusPayload>;
@@ -561,6 +566,66 @@ function probe(ffmpeg: string, file: string): Promise<string> {
   });
 }
 
+function findFfprobe(ffmpegPath: string): string | null {
+  const candidates = probeCandidates(ffmpegPath, {
+    platform: process.platform,
+    configured: null,
+    env: process.env,
+    home: os.homedir(),
+  });
+  return candidates.find((c) => c && isExecutable(c)) || null;
+}
+
+function execFileText(command: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { timeout: 20000, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout);
+    });
+  });
+}
+
+interface ProbedFile {
+  kind: MediaKind;
+  duration: number;
+  streams: StreamInfo;
+  meta: MediaMeta;
+}
+
+// What one file is, plus everything the panel shows about it. Prefers
+// ffprobe's JSON when the binary exists; otherwise parses `ffmpeg -i`
+// stderr. Returns null when neither route recognises the file as media.
+async function probeFile(file: string, ffmpeg: string, ffprobe: string | null): Promise<ProbedFile | null> {
+  const name = path.basename(file);
+  if (ffprobe) {
+    try {
+      const stdout = await execFileText(ffprobe, [
+        '-v',
+        'error',
+        '-print_format',
+        'json',
+        '-show_format',
+        '-show_streams',
+        '-show_chapters',
+        file,
+      ]);
+      const meta = parseFfprobeJson(stdout);
+      if (meta) {
+        // Same precedence as kindOf(): the extension wins, then the streams.
+        const byExt = kindByExt(extOf(name));
+        const kind: MediaKind | null = byExt !== 'file' ? byExt : meta.video ? 'video' : meta.audio ? 'audio' : null;
+        if (kind) return { kind, duration: meta.duration, streams: streamInfoOf(meta), meta };
+      }
+    } catch {
+      // ffprobe hiccuped (non-zero exit, timeout): the stderr route decides.
+    }
+  }
+  const stderr = await probe(ffmpeg, file);
+  const kind = kindOf(name, stderr);
+  if (!kind) return null;
+  return { kind, duration: parseDuration(stderr), streams: parseStreams(stderr), meta: parseMeta(stderr) };
+}
+
 async function readJson(req: IncomingMessage): Promise<JsonBody> {
   let body = '';
   for await (const chunk of req) {
@@ -624,6 +689,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // captures a stale copy.
   let outDir = '';
   let ffmpeg: string | null = null;
+  // The structured prober, when a full install ships it next to ffmpeg;
+  // imageio-ffmpeg's single static binary does not, and that is fine.
+  let ffprobe: string | null = null;
   let maxUploadBytes = MAX_UPLOAD_MB * 1048576;
   let uploadLimit = `${MAX_UPLOAD_MB} MB`;
   let composerButton = true;
@@ -637,6 +705,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     outDir = path.resolve(configured || path.join(os.homedir(), 'Downloads', 'media-toolbox'));
     const cfgFfmpeg = unwrap(raw.ffmpegPath);
     ffmpeg = findFfmpeg(cfgFfmpeg ? String(cfgFfmpeg) : undefined);
+    // A full install ships ffprobe next to ffmpeg; imageio's single static
+    // binary does not, and the stderr parser below carries that case.
+    ffprobe = ffmpeg ? findFfprobe(ffmpeg) : null;
+    if (ffprobe) console.log(`[dsh-media-converter] ffprobe found: ${ffprobe} (structured metadata probing)`);
     // An upload bigger than this is refused instead of filling the disk.
     const cfgMaxMb = unwrap(raw.maxUploadMb);
     maxUploadBytes = Math.max(1, Math.round((cfgMaxMb === undefined ? MAX_UPLOAD_MB : Number(cfgMaxMb)) * 1048576));
@@ -1453,10 +1525,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     if (!file) throw new Error('缺少 path：需要本机文件的绝对路径');
     const stat = await fsp.stat(file).catch(() => null);
     if (!stat || !stat.isFile()) throw new Error(`文件不存在或不是普通文件：${file}`);
-    const stderr = await probe(ffmpeg, file);
+    const probed = await probeFile(file, ffmpeg, ffprobe);
     const name = path.basename(file);
-    const kind = kindOf(name, stderr);
-    if (!kind) throw new Error(`无法识别的媒体文件：${file}`);
+    if (!probed) throw new Error(`无法识别的媒体文件：${file}`);
     // The tool's own view of the file. It is deliberately not put in `uploads`:
     // that map is wiped on unload, and this path is the user's own file.
     const upload: Upload = {
@@ -1464,20 +1535,20 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       name,
       path: file,
       owned: false,
-      kind,
-      duration: parseDuration(stderr),
+      kind: probed.kind,
+      duration: probed.duration,
       size: stat.size,
-      streams: parseStreams(stderr),
-      meta: parseMeta(stderr),
+      streams: probed.streams,
+      meta: probed.meta,
       at: Date.now(),
     };
     const action = String(a.action || 'convert');
     if (action === 'probe') {
-      return { file, kind, duration: upload.duration, sizeBytes: stat.size, meta: parseMeta(stderr) };
+      return { file, kind: probed.kind, duration: probed.duration, sizeBytes: stat.size, meta: probed.meta };
     }
     const body: JsonBody = {
       mode: action === 'rewrite-tags' ? 'meta' : action,
-      format: String(a.format || defaultFormat(kind)),
+      format: String(a.format || defaultFormat(probed.kind)),
       quality: Number(a.quality || 90),
       stream: Number(a.stream || 0),
       tags: (a.tags || {}) as Record<string, string>,
@@ -1678,6 +1749,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               groups,
               persistState,
               hardware,
+              ffprobe ? 'ffprobe' : 'ffmpeg',
             ),
           );
         },
@@ -1769,9 +1841,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               console.error(`[dsh-media-converter] upload truncated: ${name} got ${written} of ${expected} bytes`);
               return json(res, 200, errorPayload(`上传不完整：收到 ${written} 字节，应为 ${expected} 字节`));
             }
-            const stderr = await probe(ffmpeg, file);
-            const kind = kindOf(name, stderr);
-            if (!kind) {
+            const probed = await probeFile(file, ffmpeg, ffprobe);
+            if (!probed) {
               await fsp.rm(file, { force: true }).catch(() => {});
               console.error(`[dsh-media-converter] unrecognised media: ${name} (${written} bytes)`);
               return json(
@@ -1785,18 +1856,18 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               name,
               path: file,
               owned: true,
-              kind,
-              duration: parseDuration(stderr),
+              kind: probed.kind,
+              duration: probed.duration,
               size: written,
-              streams: parseStreams(stderr),
-              meta: parseMeta(stderr),
+              streams: probed.streams,
+              meta: probed.meta,
               at: Date.now(),
             };
             uploads.set(id, upload);
             json(
               res,
               200,
-              uploadPayload(id, name, upload.kind, upload.duration, upload.size, upload.streams, parseMeta(stderr)),
+              uploadPayload(id, name, upload.kind, upload.duration, upload.size, upload.streams, upload.meta),
             );
           } catch (err) {
             // A cancelled or broken upload must not leave its copy behind.
@@ -1860,6 +1931,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
           if (rejectUnauthenticated(req, res)) return;
           if (!ffmpeg) return json(res, 200, noFfmpeg);
+          // The workers below are closures; a const is what carries the
+          // narrowing of `ffmpeg` into them.
           const bin = ffmpeg;
           try {
             const body = await readJson(req);
@@ -1932,9 +2005,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                   });
                   continue;
                 }
-                const stderr = await probe(bin, file);
-                const probed = kindOf(name, stderr);
-                if (!probed) {
+                const result = await probeFile(file, bin, ffprobe);
+                if (!result) {
                   skipped.push({ path: file, reason: '无法识别的媒体文件' });
                   continue;
                 }
@@ -1943,11 +2015,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                   name,
                   path: file,
                   owned: false,
-                  kind: probed,
-                  duration: parseDuration(stderr),
+                  kind: result.kind,
+                  duration: result.duration,
                   size: stat.size,
-                  streams: parseStreams(stderr),
-                  meta: parseMeta(stderr),
+                  streams: result.streams,
+                  meta: result.meta,
                   at: Date.now(),
                 };
                 uploads.set(upload.id, upload);

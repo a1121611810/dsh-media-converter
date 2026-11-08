@@ -22,17 +22,21 @@ export function pathFor(platform: string): path.PlatformPath {
   return platform === 'win32' ? path.win32 : path.posix;
 }
 
-// Windows resolves `ffmpeg` only as `ffmpeg.exe`, so a PATH scan must look
+// Windows resolves a binary only as `<name>.exe`, so a PATH scan must look
 // for the suffix; an explicitly configured path may name the binary itself.
-export function binaryNames(platform: string): string[] {
-  return platform === 'win32' ? ['ffmpeg.exe'] : ['ffmpeg'];
+export function binaryNames(platform: string, binary = 'ffmpeg'): string[] {
+  return platform === 'win32' ? [binary + '.exe'] : [binary];
 }
 
-// Every place ffmpeg may sit, best first: explicit config, environment,
-// PATH, then the usual install locations.
-export function ffmpegCandidates({ platform, configured, env = {}, home: _home = '' }: FfmpegOptions): string[] {
+// Every place ffmpeg (or ffprobe, asked for by `binary`) may sit, best
+// first: explicit config, environment, PATH, then the usual install locations.
+// FFMPEG_PATH names ffmpeg only, so it is skipped for other binaries.
+export function ffmpegCandidates(
+  { platform, configured, env = {}, home: _home = '' }: FfmpegOptions,
+  binary = 'ffmpeg',
+): string[] {
   const p = pathFor(platform);
-  const names = binaryNames(platform);
+  const names = binaryNames(platform, binary);
   const out: string[] = [];
   const push = (value: string | undefined) => {
     if (!value) return;
@@ -41,13 +45,25 @@ export function ffmpegCandidates({ platform, configured, env = {}, home: _home =
     if (platform === 'win32' && !path.win32.extname(value)) out.push(value + '.exe');
   };
   push(configured ?? undefined);
-  push(env.FFMPEG_PATH);
+  if (binary === 'ffmpeg') push(env.FFMPEG_PATH);
   for (const dir of String(env.PATH || '').split(platform === 'win32' ? ';' : ':')) {
     if (!dir) continue;
     for (const name of names) out.push(p.join(dir, name));
   }
-  if (platform === 'win32') out.push('C:\\ffmpeg\\bin\\ffmpeg.exe');
-  else out.push('/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg');
+  if (platform === 'win32') out.push(`C:\\ffmpeg\\bin\\${binary}.exe`);
+  else out.push(`/opt/homebrew/bin/${binary}`, `/usr/local/bin/${binary}`);
+  return out;
+}
+
+// Where ffprobe may sit: full installs ship the two as a pair, so the
+// directory that yielded ffmpeg comes first; then the same scan ffmpeg gets.
+export function probeCandidates(ffmpegPath: string, opts: FfmpegOptions): string[] {
+  const p = pathFor(opts.platform);
+  const out: string[] = [];
+  if (ffmpegPath) {
+    for (const name of binaryNames(opts.platform, 'ffprobe')) out.push(p.join(p.dirname(ffmpegPath), name));
+  }
+  out.push(...ffmpegCandidates(opts, 'ffprobe'));
   return out;
 }
 

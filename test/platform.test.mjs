@@ -8,6 +8,7 @@ import {
   hardwarePathAllowed,
   imageioPatterns,
   isInsideDir,
+  probeCandidates,
   revealCommand,
   safeBaseName,
 } from '../dist/lib/platform.js';
@@ -33,6 +34,31 @@ assert.ok(mac.includes('/usr/bin/ffmpeg'));
 assert.ok(mac.includes('/opt/homebrew/bin/ffmpeg'));
 assert.ok(mac.includes('/usr/local/bin/ffmpeg'));
 assert.ok(!mac.some((candidate) => candidate.endsWith('.exe')), 'no exe suffix off Windows');
+
+// --- ffprobe discovery -----------------------------------------------------
+// Full installs ship ffprobe next to ffmpeg, so that sibling wins and then
+// the same scan ffmpeg gets; FFMPEG_PATH names ffmpeg and is not consulted.
+assert.deepEqual(binaryNames('win32', 'ffprobe'), ['ffprobe.exe']);
+assert.deepEqual(binaryNames('darwin', 'ffprobe'), ['ffprobe']);
+
+const macProbe = probeCandidates('/opt/homebrew/bin/ffmpeg', {
+  platform: 'darwin',
+  configured: null,
+  env: { PATH: '/usr/bin', FFMPEG_PATH: '/weird/ffmpeg' },
+  home: '/Users/me',
+});
+assert.equal(macProbe[0], '/opt/homebrew/bin/ffprobe', 'the sibling of the resolved ffmpeg wins');
+assert.ok(macProbe.includes('/usr/bin/ffprobe'), 'PATH is scanned');
+assert.ok(macProbe.includes('/usr/local/bin/ffprobe'), 'the usual install dirs are scanned');
+assert.ok(!macProbe.some((candidate) => candidate.includes('weird')), 'FFMPEG_PATH is ffmpeg-only');
+
+const winProbe = probeCandidates('C:\\tools\\ffmpeg.exe', {
+  platform: 'win32',
+  configured: null,
+  env: { PATH: 'C:\\Windows' },
+  home: 'C:\\Users\\me',
+});
+assert.equal(winProbe[0], 'C:\\tools\\ffprobe.exe', 'Windows siblings keep the exe name');
 
 // --- imageio-ffmpeg layouts ------------------------------------------------
 assert.deepEqual(imageioPatterns('darwin', {}, '/Users/me')[0], [

@@ -412,6 +412,8 @@ const STREAM_FLAGS =
   /\((default|forced|dub|original|comment|attached_pic|hearing_impaired|visual_impaired|clean_effects|timed_thumbnails)\)/g;
 
 function parseStreamLine(index: string, language: string, type: string, descriptor: string): StreamDetail {
+  // ffmpeg 7 spells the cover-art flag with a space: "(attached pic)".
+  descriptor = descriptor.replace(/attached pic/g, 'attached_pic');
   const chunks = descriptor.split(/,\s*/);
   const first = chunks[0] || '';
   const parens = [...first.matchAll(/\(([^()]+)\)/g)].map((m) => m[1]);
@@ -446,10 +448,17 @@ function parseStreamLine(index: string, language: string, type: string, descript
   } else if (stream.type === 'audio') {
     const rate = /(\d+)\s*Hz/.exec(descriptor);
     if (rate) stream.sampleRate = Number(rate[1]);
-    // "stereo", then "fltp"; a layout with digits (5.1(side)) is skipped.
     const words = chunks.slice(1).filter((chunk) => /^[a-z][a-z0-9_.()]*$/i.test(chunk) && !/\d/.test(chunk));
-    if (words[0]) stream.channels = words[0];
-    if (words[1]) stream.sampleFmt = words[1];
+    // The channel layout carries digits (5.1(side)) and never survives the
+    // word filter, so match it explicitly before falling back to the words.
+    const layout = /(\d\.\d(?:\([^)]*\))?|stereo|mono|quad)/.exec(descriptor);
+    if (layout) {
+      stream.channels = layout[1];
+      stream.sampleFmt = words.find((word) => word !== layout[1]) || undefined;
+    } else {
+      if (words[0]) stream.channels = words[0];
+      if (words[1]) stream.sampleFmt = words[1];
+    }
   }
   return stream;
 }
@@ -471,11 +480,15 @@ export function parseMeta(stderr: string): MediaMeta {
 
   const input = /^Input #0,\s*(.+?),\s*from\s/m.exec(text);
   if (input) meta.format = input[1].trim();
-  const header = /Duration:\s*(\d+):(\d+):([\d.]+),\s*start:\s*([\d.]+),\s*bitrate:\s*(\d+)\s*kb\/s/.exec(text);
+  // start may be negative (mp3 encoder delay) and bitrate may read N/A
+  // (flac/opus); either used to fail the whole line and zero every field.
+  const header = /Duration:\s*(\d+):(\d+):([\d.]+),\s*start:\s*(-?[\d.]+),\s*bitrate:\s*(?:(\d+)\s*kb\/s|N\/A)/.exec(
+    text,
+  );
   if (header) {
     meta.duration = Number(header[1]) * 3600 + Number(header[2]) * 60 + Number(header[3]);
     meta.start = Number(header[4]);
-    meta.bitrate = Number(header[5]);
+    meta.bitrate = Number(header[5] || 0);
   } else {
     meta.duration = parseDuration(text);
   }
@@ -527,7 +540,15 @@ export function parseMeta(stderr: string): MediaMeta {
     }
   }
 
-  meta.video = meta.streams.find((item) => item.type === 'video') || null;
+  return finishMeta(meta);
+}
+
+// The tail every metadata source runs through: pick the picture and audio
+// tracks and collect the subtitle tracks. A cover image rides an attached_pic
+// video stream; it is artwork, not the picture track, so every "the video of
+// this file" lookup skips it.
+function finishMeta(meta: MediaMeta): MediaMeta {
+  meta.video = meta.streams.find((item) => item.type === 'video' && !item.flags.includes('attached_pic')) || null;
   meta.audio = meta.streams.find((item) => item.type === 'audio') || null;
   meta.subtitles = meta.streams
     .filter((item) => item.type === 'subtitle')
@@ -536,7 +557,12 @@ export function parseMeta(stderr: string): MediaMeta {
 }
 
 export function parseStreams(stderr: string) {
-  const meta = parseMeta(stderr);
+  return streamInfoOf(parseMeta(stderr));
+}
+
+// The parseStreams() shape built straight from a parsed meta, so the ffprobe
+// route can produce the identical structure without re-parsing stderr.
+export function streamInfoOf(meta: MediaMeta) {
   return {
     video: Boolean(meta.video),
     audio: Boolean(meta.audio),
@@ -544,6 +570,126 @@ export function parseStreams(stderr: string) {
     audioCodec: meta.audio ? meta.audio.codec : '',
     subtitles: meta.subtitles,
   };
+}
+
+// --- ffprobe JSON ------------------------------------------------------------
+// When an ffprobe binary sits next to ffmpeg the host prefers it: its JSON is
+// structured instead of banner text, so nothing here can be defeated by a
+// format tweak. The result is the SAME MediaMeta the stderr parser produces;
+// anything unusable returns null and the caller falls back to stderr.
+
+function numOr(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function lowerTags(tags: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (tags && typeof tags === 'object') {
+    for (const [key, value] of Object.entries(tags as Record<string, unknown>)) {
+      out[key.toLowerCase()] = String(value);
+    }
+  }
+  return out;
+}
+
+const DISPOSITION_FLAGS = [
+  'default',
+  'forced',
+  'dub',
+  'original',
+  'comment',
+  'attached_pic',
+  'hearing_impaired',
+  'visual_impaired',
+  'clean_effects',
+  'timed_thumbnails',
+];
+
+// "30/1" -> 30, "30000/1001" -> 29.97, "0/0" (images) -> 0.
+function fpsOf(rate: unknown): number {
+  const [num, den] = String(rate || '').split('/');
+  const n = Number(num);
+  const d = Number(den);
+  if (!Number.isFinite(n) || !Number.isFinite(d) || d <= 0) return 0;
+  return Math.round((n / d) * 1000) / 1000;
+}
+
+function ffprobeStream(raw: unknown, position: number): StreamDetail {
+  const s = (raw || {}) as Record<string, unknown>;
+  const tags = lowerTags(s.tags);
+  const disposition = (s.disposition || {}) as Record<string, unknown>;
+  const stream: StreamDetail = {
+    index: Number.isFinite(Number(s.index)) ? Number(s.index) : position,
+    type: String(s.codec_type || '').toLowerCase(),
+    codec: String(s.codec_name || ''),
+    profile: String(s.profile || ''),
+    tag: String(s.codec_tag_string || ''),
+    language: tags.language || '',
+    flags: DISPOSITION_FLAGS.filter((flag) => Boolean(Number(disposition[flag]))),
+    tags,
+  };
+  if (s.bit_rate !== undefined) {
+    const kbps = Math.round(numOr(s.bit_rate) / 1000);
+    if (kbps > 0) stream.bitrate = kbps;
+  }
+  if (stream.type === 'video') {
+    if (s.width) stream.width = numOr(s.width);
+    if (s.height) stream.height = numOr(s.height);
+    if (s.sample_aspect_ratio && !/^(?:0:0|N\/A)$/.test(String(s.sample_aspect_ratio)))
+      stream.aspect = String(s.sample_aspect_ratio);
+    if (s.display_aspect_ratio && !/^(?:0:0|N\/A)$/.test(String(s.display_aspect_ratio)))
+      stream.displayAspect = String(s.display_aspect_ratio);
+    const fps = fpsOf(s.avg_frame_rate) || fpsOf(s.r_frame_rate);
+    if (fps > 0) stream.fps = fps;
+    if (s.pix_fmt) stream.pixFmt = String(s.pix_fmt);
+  } else if (stream.type === 'audio') {
+    if (s.sample_rate) stream.sampleRate = numOr(s.sample_rate);
+    // channel_layout already reads like the stderr labels ("5.1(side)").
+    if (s.channel_layout) stream.channels = String(s.channel_layout);
+    else if (s.channels) stream.channels = String(s.channels);
+    if (s.sample_fmt) stream.sampleFmt = String(s.sample_fmt);
+  }
+  return stream;
+}
+
+export function parseFfprobeJson(text: string): MediaMeta | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== 'object') return null;
+  const doc = raw as Record<string, unknown>;
+  const fmt = (doc.format || {}) as Record<string, unknown>;
+  const rawStreams = Array.isArray(doc.streams) ? doc.streams : [];
+  if (!doc.format && rawStreams.length === 0) return null;
+
+  const meta: MediaMeta = {
+    format: String(fmt.format_name || ''),
+    duration: numOr(fmt.duration),
+    start: numOr(fmt.start_time),
+    bitrate: Math.round(numOr(fmt.bit_rate) / 1000),
+    streams: rawStreams.map((stream, position) => ffprobeStream(stream, position)),
+    chapters: [],
+    tags: lowerTags(fmt.tags),
+    video: null,
+    audio: null,
+    subtitles: [],
+  };
+  if (Array.isArray(doc.chapters)) {
+    meta.chapters = doc.chapters.map((rawChapter, position) => {
+      const chapter = (rawChapter || {}) as Record<string, unknown>;
+      return {
+        index: Number.isFinite(Number(chapter.id)) ? Number(chapter.id) : position,
+        start: numOr(chapter.start_time),
+        end: numOr(chapter.end_time),
+        tags: lowerTags(chapter.tags),
+      };
+    });
+  }
+  return finishMeta(meta);
 }
 
 const AUDIO_CONTAINER: Record<string, string> = {

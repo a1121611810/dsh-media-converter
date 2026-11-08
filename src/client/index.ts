@@ -202,6 +202,11 @@ const ZH: Record<string, string> = {
   'settings.field.ffmpeg': 'ffmpeg 路径',
   'settings.field.ffmpeg.hint': '留空则自动查找',
   'settings.field.maxUpload': '上传上限（MB）',
+  'settings.probe': '元数据解析',
+  'settings.probe.ffprobe': '结构化解析（ffprobe）',
+  'settings.probe.ffmpeg': '兼容模式（解析 ffmpeg -i 输出）',
+  'settings.probe.fix':
+    '未检测到 ffprobe，元数据走兼容模式解析 ffmpeg -i 文本输出，封面图、多声道布局等边界情况可能识别不准。安装完整版 ffmpeg（macOS：brew install ffmpeg）后回到本页点「保存」即可切换，无需重启。',
   'settings.save': '保存',
   'settings.saving': '保存中…',
   'settings.saved': '已保存并立即生效',
@@ -454,6 +459,11 @@ const EN: Record<string, string> = {
   'settings.field.ffmpeg': 'ffmpeg path',
   'settings.field.ffmpeg.hint': 'Empty finds it automatically',
   'settings.field.maxUpload': 'Upload limit (MB)',
+  'settings.probe': 'Metadata probing',
+  'settings.probe.ffprobe': 'Structured (ffprobe)',
+  'settings.probe.ffmpeg': 'Compatibility mode (parses ffmpeg -i output)',
+  'settings.probe.fix':
+    'ffprobe not found, so metadata is parsed from ffmpeg -i text output and edge cases like cover art or multi-channel layouts may misparse. Install a full ffmpeg build (macOS: brew install ffmpeg), then press Save on this page to switch — no restart needed.',
   'settings.save': 'Save',
   'settings.saving': 'Saving…',
   'settings.saved': 'Saved and applied immediately',
@@ -738,6 +748,8 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
     });
   const toggle = (index: number) =>
     setRows((current) => current.map((row, i) => (i === index ? { ...row, on: !row.on } : row)));
+  // An older host predates probeMode; only a known value earns a verdict.
+  const probeKnown = status.probeMode === 'ffprobe' || status.probeMode === 'ffmpeg';
   return h(
     'div',
     { className: 'mc-settings' },
@@ -767,6 +779,23 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
       h('dd', null, status.outputDir),
       h('dt', null, `${t('settings.field.ffmpeg')}（${t('settings.current')}）`),
       h('dd', null, status.ffmpegPath || '—'),
+      h('dt', null, `${t('settings.probe')}（${t('settings.current')}）`),
+      h(
+        'dd',
+        null,
+        h(
+          'span',
+          {
+            className: !probeKnown
+              ? ''
+              : status.probeMode === 'ffprobe'
+                ? 'mc-settings-note ok'
+                : 'mc-settings-note err',
+          },
+          !probeKnown ? '—' : status.probeMode === 'ffprobe' ? t('settings.probe.ffprobe') : t('settings.probe.ffmpeg'),
+        ),
+        status.probeMode === 'ffmpeg' ? h('div', { className: 'mc-settings-note err' }, t('settings.probe.fix')) : null,
+      ),
       h('dt', null, `${t('settings.field.maxUpload')}（${t('settings.current')}）`),
       h('dd', null, String(status.maxUploadMb)),
     ),

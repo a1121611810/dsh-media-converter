@@ -12,6 +12,7 @@ import {
   normalizeStderr,
   normalizeTrim,
   parseDuration,
+  parseFfprobeJson,
   parseMeta,
   parseStreams,
   percentOf,
@@ -177,6 +178,134 @@ assert.deepEqual(metaArgs({ title: '标题', artist: '  ', album: '专辑' }), [
 ]);
 assert.deepEqual(metaArgs({}), ['-map', '0', '-c', 'copy']);
 assert.deepEqual(metaArgs(null), ['-map', '0', '-c', 'copy']);
+
+// --- stderr metadata edge cases (verified against real ffmpeg 7.1 output) --
+// mp3 encoder delay makes start negative; flac/opus report bitrate N/A.
+// Either used to fail the whole Duration line and zero start and bitrate.
+const negativeStart = parseMeta('  Duration: 00:00:01.02, start: -0.023220, bitrate: 128 kb/s\n');
+assert.equal(negativeStart.duration, 1.02);
+assert.equal(negativeStart.start, -0.02322);
+assert.equal(negativeStart.bitrate, 128);
+const naBitrate = parseMeta('  Duration: 00:00:01.02, start: 0.500000, bitrate: N/A\n');
+assert.equal(naBitrate.start, 0.5);
+assert.equal(naBitrate.bitrate, 0);
+
+// A channel layout with digits (5.1(side)) never survived the word filter
+// and shifted the sample format into the channels slot.
+const surround = parseMeta('  Stream #0:0: Audio: ac3, 48000 Hz, 5.1(side), fltp, 448 kb/s\n');
+assert.equal(surround.audio.channels, '5.1(side)');
+assert.equal(surround.audio.sampleFmt, 'fltp');
+assert.equal(surround.audio.bitrate, 448);
+
+// Cover art rides a video stream flagged "attached pic" (a space on ffmpeg 7);
+// it is artwork, not the picture track.
+const coverStderr = [
+  '  Duration: 00:00:01.00, start: 0.000000, bitrate: 6575 kb/s',
+  '  Stream #0:0: Audio: aac (LC), 44100 Hz, mono, fltp, 81 kb/s (default)',
+  '  Stream #0:1: Video: mjpeg (Baseline), yuvj444p(pc), 300x300, 90k tbr (attached pic)',
+].join('\n');
+const coverOnly = parseMeta(coverStderr);
+assert.equal(coverOnly.video, null, 'cover art is not the picture track');
+assert.equal(coverOnly.audio.index, 0);
+assert.deepEqual(coverOnly.streams[1].flags, ['attached_pic']);
+assert.deepEqual(parseStreams(coverStderr), {
+  video: false,
+  audio: true,
+  videoCodec: '',
+  audioCodec: 'aac',
+  subtitles: [],
+});
+assert.equal(
+  kindOf(
+    'blob',
+    '  Stream #0:0: Video: mjpeg (Baseline), 300x300 (attached pic)\n  Stream #0:1: Audio: mp3 (mp3float), 44100 Hz, stereo, fltp',
+  ),
+  'audio',
+);
+// A real video next to cover art still wins.
+const withVideo = parseMeta(
+  '  Stream #0:0: Video: mjpeg (Baseline), 300x300 (attached pic)\n  Stream #0:1: Video: h264 (High), yuv420p, 1920x1080\n',
+);
+assert.equal(withVideo.video.codec, 'h264');
+
+// --- ffprobe JSON: the same MediaMeta from the structured route ------------
+const fromJson = parseFfprobeJson(
+  JSON.stringify({
+    streams: [
+      {
+        index: 0,
+        codec_name: 'h264',
+        profile: 'High',
+        codec_type: 'video',
+        codec_tag_string: 'avc1',
+        width: 1920,
+        height: 1080,
+        pix_fmt: 'yuv420p',
+        sample_aspect_ratio: '1:1',
+        display_aspect_ratio: '16:9',
+        avg_frame_rate: '30000/1001',
+        bit_rate: '2500000',
+        disposition: { default: 1, attached_pic: 0 },
+        tags: { language: 'eng' },
+      },
+      {
+        index: 1,
+        codec_name: 'ac3',
+        codec_type: 'audio',
+        sample_rate: '48000',
+        channel_layout: '5.1(side)',
+        sample_fmt: 'fltp',
+        bit_rate: '448000',
+        disposition: { default: 0 },
+        tags: { language: 'chi' },
+      },
+    ],
+    chapters: [{ id: 0, start_time: '0.000000', end_time: '60.000000', tags: { title: '第一段' } }],
+    format: {
+      format_name: 'matroska,webm',
+      duration: '311.200000',
+      start_time: '-0.023220',
+      bit_rate: '320000',
+      tags: { TITLE: '合唱', ENCODER: 'Lavf60.16.100' },
+    },
+  }),
+);
+assert.equal(fromJson.format, 'matroska,webm');
+assert.equal(fromJson.duration, 311.2);
+assert.equal(fromJson.start, -0.02322);
+assert.equal(fromJson.bitrate, 320);
+assert.deepEqual(fromJson.tags, { title: '合唱', encoder: 'Lavf60.16.100' });
+assert.equal(fromJson.video.codec, 'h264');
+assert.equal(fromJson.video.bitrate, 2500, 'stream bit_rate is bps, MediaMeta is kb/s');
+assert.equal(fromJson.video.fps, 29.97);
+assert.equal(fromJson.video.aspect, '1:1');
+assert.equal(fromJson.video.displayAspect, '16:9');
+assert.equal(fromJson.video.language, 'eng');
+assert.deepEqual(fromJson.video.flags, ['default']);
+assert.equal(fromJson.audio.channels, '5.1(side)');
+assert.equal(fromJson.audio.bitrate, 448);
+assert.equal(fromJson.audio.sampleRate, 48000);
+assert.deepEqual(fromJson.chapters, [{ index: 0, start: 0, end: 60, tags: { title: '第一段' } }]);
+
+// The cover-art stream keeps its flag and stays out of the video slot.
+const coverJson = parseFfprobeJson(
+  JSON.stringify({
+    streams: [
+      { index: 0, codec_name: 'aac', codec_type: 'audio', sample_rate: '44100', disposition: { default: 1 } },
+      { index: 1, codec_name: 'mjpeg', codec_type: 'video', width: 300, disposition: { attached_pic: 1 } },
+    ],
+    format: { format_name: 'mov,mp4,m4a,3gp,3g2,mj2', duration: '60.000000' },
+  }),
+);
+assert.equal(coverJson.video, null);
+assert.equal(coverJson.audio.codec, 'aac');
+assert.deepEqual(coverJson.streams[1].flags, ['attached_pic']);
+
+// Nothing usable -> null, so the host falls back to the stderr parser.
+assert.equal(parseFfprobeJson(''), null);
+assert.equal(parseFfprobeJson('not json'), null);
+assert.equal(parseFfprobeJson('{}'), null);
+assert.equal(parseFfprobeJson('{"streams":[]}'), null);
 
 assert.equal(progressSeconds('out_time_us=500000'), 0.5);
 assert.equal(progressSeconds('out_time_ms=500000'), 0.5);
