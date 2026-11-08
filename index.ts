@@ -18,6 +18,7 @@
 // every job carries an AbortSignal so the page can cancel it.
 
 import { execFile, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -172,6 +173,8 @@ export interface Config {
   composerButton: boolean;
   groups: string;
   persistState: boolean;
+  uploadTtlMinutes: number;
+  queueLimit: number;
 }
 
 export const Config = Schema.object({
@@ -181,6 +184,8 @@ export const Config = Schema.object({
   composerButton: Schema.boolean().default(true).volatile(),
   groups: Schema.string().default('convert,edit,view').volatile(),
   persistState: Schema.boolean().default(false).volatile(),
+  uploadTtlMinutes: Schema.number().default(120).volatile(),
+  queueLimit: Schema.number().default(2000).volatile(),
 });
 
 // The action panel's module keys, in their built-in order. A configured
@@ -280,6 +285,27 @@ export interface JobInfo {
   hardware: boolean;
 }
 
+// One settled conversion, appended to a JSONL ledger on disk so it survives a
+// DSH restart. `out` is the output file name only; the panel greys a row whose
+// file no longer exists. `state` is the final job state — done, error, or
+// cancelled all land here.
+export interface HistoryEntry {
+  name: string;
+  out: string;
+  size: number;
+  state: JobState;
+  error: string | null;
+  at: number;
+}
+export interface HistoryItem extends HistoryEntry {
+  deleted: boolean;
+}
+export interface HistoryResponse {
+  ok: true;
+  items: HistoryItem[];
+  total: number;
+}
+
 // One checked batch is a server-side "run": the Host walks its items in order,
 // starting one normal Job per file. The run is what a page restores from when
 // it is closed, reloaded, or switched away mid-batch — the browser is not the
@@ -316,7 +342,7 @@ export interface RunInfo {
 }
 
 // An uploaded file the Host keeps on disk until the job is done.
-interface Upload {
+export interface Upload {
   id: string;
   name: string;
   path: string;
@@ -350,6 +376,8 @@ interface JsonBody {
   composerButton?: unknown;
   groups?: unknown;
   persistState?: unknown;
+  uploadTtlMinutes?: unknown;
+  queueLimit?: unknown;
   ids?: unknown;
   items?: unknown;
   model?: unknown;
@@ -434,6 +462,9 @@ const statusPayload = (
   composerButton: boolean,
   groups: string[],
   persistState: boolean,
+  uploadTtlMinutes: number,
+  queueLimit: number,
+  instanceId: string,
   hardware: HardwareInfo,
   probeMode: 'ffprobe' | 'ffmpeg',
   formats: FormatTable,
@@ -446,6 +477,9 @@ const statusPayload = (
   composerButton,
   groups,
   persistState,
+  uploadTtlMinutes,
+  queueLimit,
+  instanceId,
   hardware,
   probeMode,
   formats,
@@ -500,12 +534,35 @@ const PREFIX = '/api/media-convert';
 const MAX_BASE64_BYTES = 24 * 1024 * 1024;
 // Uploaded copies live in a temp directory. Big videos are big, so anything
 // older than this is dropped instead of filling the disk over a long session.
-const UPLOAD_TTL_MS = 2 * 60 * 60 * 1000;
+// The built-in defaults for the two runtime-tunable caps below; both are
+// user-configurable (Config.uploadTtlMinutes / Config.queueLimit).
+const DEFAULT_UPLOAD_TTL_MINUTES = 120;
 // A rebuilt page rebuilds its whole queue from /queue, so the cap has to cover
 // what /register allows to be added at once; a smaller cap silently drops rows.
-const QUEUE_LIMIT = 2000;
+const DEFAULT_QUEUE_LIMIT = 2000;
 // A finished job only has to outlive the poll that reads it.
 const JOB_TTL_MS = 30 * 60 * 1000;
+
+// Drop uploads whose TTL has passed, except any a running job still reads
+// (deleting the source under ffmpeg breaks the job and the queue row).
+// Pure over the maps so the host tests can drive it without the 10-minute
+// timer. Returns the pruned ids.
+export const pruneUploads = (
+  uploads: Map<string, Upload>,
+  jobs: Map<string, Job>,
+  ttlMs: number,
+  now: number,
+): string[] => {
+  const pruned: string[] = [];
+  for (const [id, upload] of uploads) {
+    if (now - upload.at <= ttlMs) continue;
+    if ([...jobs.values()].some((job) => job.uploadId === id && job.state === 'running')) continue;
+    uploads.delete(id);
+    if (upload.owned) fs.rm(upload.path, { force: true }, () => {});
+    pruned.push(id);
+  }
+  return pruned;
+};
 // An upload bigger than this is refused instead of filling the disk.
 const MAX_UPLOAD_MB = 2048;
 
@@ -708,6 +765,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   let composerButton = true;
   let groups: string[] = [...GROUP_KEYS];
   let persistState = false;
+  let uploadTtlMs = DEFAULT_UPLOAD_TTL_MINUTES * 60 * 1000;
+  let queueLimitN = DEFAULT_QUEUE_LIMIT;
   const resolveConfig = (raw: Partial<Config>) => {
     // A configured '~/Movies/x' means the home directory, not a folder literally
     // named '~' under the working directory.
@@ -727,6 +786,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     composerButton = unwrap(raw.composerButton) !== false;
     groups = resolveGroups(unwrap(raw.groups));
     persistState = unwrap(raw.persistState) === true;
+    const cfgTtl = unwrap(raw.uploadTtlMinutes);
+    // Floor of 5 minutes: a smaller TTL deletes sources under running jobs.
+    uploadTtlMs =
+      Math.max(5, Math.round(cfgTtl === undefined ? DEFAULT_UPLOAD_TTL_MINUTES : Number(cfgTtl))) * 60 * 1000;
+    const cfgQueueLimit = unwrap(raw.queueLimit);
+    // Floor of 10: a /queue cap near zero would restore an empty page.
+    queueLimitN = Math.max(10, Math.round(cfgQueueLimit === undefined ? DEFAULT_QUEUE_LIMIT : Number(cfgQueueLimit)));
   };
   resolveConfig(cfg);
   const tmpDir = path.join(os.tmpdir(), 'dsh-media-toolbox');
@@ -734,6 +800,17 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
 
   const uploads = new Map<string, Upload>();
   const jobs = new Map<string, Job>();
+  // Survives no restart: the client remembers the last one and compares on
+  // every status fetch, so a fresh id is how it learns DSH was restarted.
+  const instanceId = randomUUID();
+  // The append-only ledger of settled jobs. Env override exists for tests and
+  // for hosts that keep dotfiles elsewhere; the default sits next to the other
+  // media-toolbox state in the home directory. Writes are fire-and-forget: a
+  // lost history row never blocks or fails a conversion.
+  const historyFile = process.env.MEDIA_TOOLBOX_HISTORY || path.join(os.homedir(), '.media-toolbox-history.json');
+  const appendHistory = (entry: HistoryEntry) => {
+    fs.appendFile(historyFile, `${JSON.stringify(entry)}\n`, () => {});
+  };
   const runs = new Map<string, RunInfo>();
   const runControllers = new Map<string, AbortController>();
   // Measured encode throughput (media seconds per wall second) per path. The
@@ -866,6 +943,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     };
     jobs.set(job.id, job);
     const span = trim ? trim.end - trim.start : upload.duration;
+    // The ledger row every final state writes. The name is captured now: the
+    // upload map entry may be swept before the job settles.
+    const record = (state: JobState, size: number, error: string | null) =>
+      appendHistory({ name: upload.name, out, size, state, error, at: Date.now() });
     // Resolves when the job reaches its final state, so a caller that has to
     // wait (the agent tool) does not have to poll.
     let settle!: () => void;
@@ -919,6 +1000,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       if (job.state !== 'running') return;
       job.state = 'error';
       job.error = String((err && err.message) || err);
+      record('error', 0, job.error);
     });
     child.on('close', async (code) => {
       try {
@@ -930,6 +1012,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           // ffmpeg can have written half an output before the kill landed.
           await fsp.rm(out, { force: true }).catch(() => {});
           job.state = 'cancelled';
+          record('cancelled', 0, null);
           return;
         }
         if (job.state !== 'running') return;
@@ -939,11 +1022,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           job.state = 'done';
           job.percent = 100;
           recordPtcRate(job, span, Date.now() - job.at);
+          record('done', job.size, null);
         } catch (err) {
           // ffmpeg can create the output before failing; never report that as done.
           await fsp.rm(out, { force: true }).catch(() => {});
           job.state = 'error';
           job.error = tail.trim().split('\n').slice(-3).join(' ') || errorText(err);
+          record('error', 0, job.error);
         }
       } finally {
         // The job has its final state now: whoever waits for it can go on.
@@ -1775,12 +1860,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     const pruneTimer = setInterval(
       () => {
         const now = Date.now();
-        for (const [id, upload] of uploads) {
-          if (now - upload.at > UPLOAD_TTL_MS) {
-            uploads.delete(id);
-            if (upload.owned) fs.rm(upload.path, { force: true }, () => {});
-          }
-        }
+        pruneUploads(uploads, jobs, uploadTtlMs, now);
         // Finished jobs are only kept so the poll that reads them still works.
         for (const [id, job] of jobs) {
           if (job.state !== 'running' && now - job.at > JOB_TTL_MS) jobs.delete(id);
@@ -1814,6 +1894,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               composerButton,
               groups,
               persistState,
+              Math.round(uploadTtlMs / 60000),
+              queueLimitN,
+              instanceId,
               probe?.info ?? noHardware,
               ffprobe ? 'ffprobe' : 'ffmpeg',
               probe ? supportedFormats(probe.encoders) : FORMATS,
@@ -1856,6 +1939,16 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             if (body.persistState !== undefined) {
               if (typeof body.persistState !== 'boolean') throw new Error('persistState 必须是布尔值');
               patch.persistState = body.persistState;
+            }
+            if (body.uploadTtlMinutes !== undefined) {
+              const minutes = Number(body.uploadTtlMinutes);
+              if (!Number.isFinite(minutes) || minutes < 5) throw new Error('uploadTtlMinutes 必须是 ≥ 5 的数字');
+              patch.uploadTtlMinutes = minutes;
+            }
+            if (body.queueLimit !== undefined) {
+              const limit = Number(body.queueLimit);
+              if (!Number.isFinite(limit) || limit < 10) throw new Error('queueLimit 必须是 ≥ 10 的数字');
+              patch.queueLimit = limit;
             }
             if (Object.keys(patch).length === 0) return json(res, 200, errorPayload('没有要保存的字段'));
             // No expectedRevision: last write wins; the service validates the
@@ -2376,7 +2469,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           }
           // shortcut: only the newest rows come back after a page rebuild;
           // the working set is small, and uploads expire after the TTL anyway.
-          json(res, 200, { ok: true, items: items.slice(-QUEUE_LIMIT) });
+          json(res, 200, { ok: true, items: items.slice(-queueLimitN) });
         },
       }),
       webServer.register({
@@ -2413,6 +2506,53 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           const file = requestUrl(req).searchParams.get('file');
           if (!insideOutput(file)) return json(res, 403, errorPayload('只能预览输出目录里的文件'));
           await serveFile(req, res, file);
+        },
+      }),
+      // The settled-jobs ledger: newest first, paged. Existence of each
+      // returned file is checked here and only here, so a page of 50 costs at
+      // most 50 stats no matter how long the ledger grows. A missing file is
+      // data (the row greys out), not an error.
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/history`,
+        handler: async (req, res) => {
+          if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
+          if (rejectUnauthenticated(req, res)) return;
+          try {
+            const params = requestUrl(req).searchParams;
+            const offset = Math.max(0, Number(params.get('offset')) || 0);
+            const limit = Math.min(200, Math.max(1, Number(params.get('limit')) || 50));
+            let text = '';
+            try {
+              text = await fsp.readFile(historyFile, 'utf8');
+            } catch {
+              // No ledger yet: an empty first page, not an error.
+            }
+            const entries: HistoryEntry[] = [];
+            for (const line of text.split('\n')) {
+              if (!line.trim()) continue;
+              try {
+                entries.push(JSON.parse(line) as HistoryEntry);
+              } catch {
+                // A torn or hand-edited line never takes the whole ledger down.
+              }
+            }
+            entries.reverse(); // the file is append-only oldest-first
+            const items: HistoryItem[] = await Promise.all(
+              entries.slice(offset, offset + limit).map(async (entry) => {
+                let deleted = false;
+                try {
+                  await fsp.stat(path.join(outDir, entry.out));
+                } catch {
+                  deleted = true;
+                }
+                return { ...entry, deleted };
+              }),
+            );
+            json(res, 200, { ok: true, items, total: entries.length } satisfies HistoryResponse);
+          } catch (err) {
+            json(res, 200, errorPayload(errorText(err)));
+          }
         },
       }),
       // The uploaded original, so a page restored after close can play and trim

@@ -79,6 +79,7 @@
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "test": "npm run lint && npm run format:check && npm run typecheck && npm run build && node test/client-bundle.test.mjs && node test/client-lib.test.mjs && node test/platform.test.mjs && node test/plan.test.mjs && node test/base64.test.mjs && node test/host.test.mjs",
+    "test:mutation": "node scripts/mutation-check.mjs",
     "check:build": "npm run build:client && git diff --exit-code -- client.js client.js.map",
     "release": "bash scripts/release.sh",
     "prepublishOnly": "node -e \"if (!process.env.CI) { console.error('本仓库只通过 CI 发布：npm run release -- <version>；应急可在 CI=1 下直接发布'); process.exit(1); }\""

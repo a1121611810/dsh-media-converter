@@ -98,6 +98,17 @@ const ZH: Record<string, string> = {
   'result.size': '大小',
   'error.title': '出错了',
   'error.noffmpeg': '未找到 ffmpeg。先运行 brew install ffmpeg，或用 FFMPEG_PATH 指定路径。',
+  'restart.banner': 'DSH 已重启，此前的转换队列已清空。',
+  'restart.dismiss': '知道了',
+  'history.open': '历史记录',
+  'history.back': '返回',
+  'history.title': '历史记录',
+  'history.subtitle': '已完成和已中断的转换，重启 DSH 后仍可查看。',
+  'history.empty': '暂无记录',
+  'history.deleted': '文件已删除',
+  'history.preview': '预览',
+  'history.reveal': '打开所在位置',
+  'history.loadMore': '加载更多',
   'error.network': '无法连接到本地服务，请确认插件已启用。',
   'error.service': '本地服务拒绝了请求：%s。请重启 DSH 后再试。',
   'footer.out': '输出目录',
@@ -202,9 +213,15 @@ const ZH: Record<string, string> = {
   'settings.field.ffmpeg': 'ffmpeg 路径',
   'settings.field.ffmpeg.hint': '留空则自动查找',
   'settings.field.maxUpload': '上传上限（MB）',
+  'settings.field.uploadTtl': '上传保留时长（分钟）',
+  'settings.field.uploadTtl.hint': '源文件转换完成后保留的时长，超时清理',
+  'settings.field.queueLimit': '队列恢复行数上限',
+  'settings.field.queueLimit.hint': '页面重建时最多恢复的文件行数',
   'settings.section.env': '运行环境',
   'settings.section.general': '路径与上限',
+  'settings.section.queue': '队列与保留',
   'settings.section.ui': '界面与动作',
+  'settings.restart.note': '转换在本地运行：关闭或重启 DSH 会中断进行中的任务，已完成的结果不受影响。',
   'settings.probe': '元数据解析',
   'settings.probe.ffprobe': '结构化解析（ffprobe）',
   'settings.probe.ffmpeg': '兼容模式（解析 ffmpeg -i 输出）',
@@ -358,6 +375,17 @@ const EN: Record<string, string> = {
   'result.size': 'Size',
   'error.title': 'Something went wrong',
   'error.noffmpeg': 'ffmpeg not found. Run `brew install ffmpeg`, or point FFMPEG_PATH at it.',
+  'restart.banner': 'DSH restarted; the previous conversion queue was cleared.',
+  'restart.dismiss': 'Got it',
+  'history.open': 'History',
+  'history.back': 'Back',
+  'history.title': 'History',
+  'history.subtitle': 'Finished and interrupted conversions, still here after a DSH restart.',
+  'history.empty': 'No entries yet',
+  'history.deleted': 'File deleted',
+  'history.preview': 'Preview',
+  'history.reveal': 'Show in folder',
+  'history.loadMore': 'Load more',
   'error.network': 'Cannot reach the local service; check that the plugin is enabled.',
   'error.service': 'The local service refused the request: %s. Restart DSH and try again.',
   'footer.out': 'Output folder',
@@ -462,9 +490,16 @@ const EN: Record<string, string> = {
   'settings.field.ffmpeg': 'ffmpeg path',
   'settings.field.ffmpeg.hint': 'Empty finds it automatically',
   'settings.field.maxUpload': 'Upload limit (MB)',
+  'settings.field.uploadTtl': 'Upload retention (minutes)',
+  'settings.field.uploadTtl.hint': 'how long a finished source stays before cleanup',
+  'settings.field.queueLimit': 'Queue restore row limit',
+  'settings.field.queueLimit.hint': 'max file rows restored when the page rebuilds',
   'settings.section.env': 'Runtime',
   'settings.section.general': 'Paths & limits',
+  'settings.section.queue': 'Queue & retention',
   'settings.section.ui': 'UI & actions',
+  'settings.restart.note':
+    'Conversions run on this machine: closing or restarting DSH interrupts in-progress tasks; finished results are unaffected.',
   'settings.probe': 'Metadata probing',
   'settings.probe.ffprobe': 'Structured (ffprobe)',
   'settings.probe.ffmpeg': 'Compatibility mode (parses ffmpeg -i output)',
@@ -667,6 +702,8 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
     outputDir: '',
     ffmpegPath: '',
     maxUploadMb: '2048',
+    uploadTtlMinutes: '120',
+    queueLimit: '2000',
     composerButton: true,
     persistState: false,
   });
@@ -688,6 +725,8 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
             outputDir: '',
             ffmpegPath: '',
             maxUploadMb: String(next.maxUploadMb),
+            uploadTtlMinutes: String(next.uploadTtlMinutes),
+            queueLimit: String(next.queueLimit),
             composerButton: next.composerButton !== false,
             persistState: next.persistState === true,
           });
@@ -712,6 +751,8 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
         outputDir: form.outputDir,
         ffmpegPath: form.ffmpegPath,
         maxUploadMb: Number(form.maxUploadMb),
+        uploadTtlMinutes: Number(form.uploadTtlMinutes),
+        queueLimit: Number(form.queueLimit),
         composerButton: form.composerButton,
         persistState: form.persistState,
         groups: rows
@@ -737,9 +778,16 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
   if (!status) {
     return h('div', { className: 'mc-settings' }, h('p', { className: 'mc-settings-hint' }, t('error.network')));
   }
-  const set = (key: 'outputDir' | 'ffmpegPath' | 'maxUploadMb') => (event: { target: { value: string } }) =>
-    setForm((current) => ({ ...current, [key]: event.target.value }));
-  const field = (label: string, hint: string, key: 'outputDir' | 'ffmpegPath' | 'maxUploadMb', placeholder: string) =>
+  const set =
+    (key: 'outputDir' | 'ffmpegPath' | 'maxUploadMb' | 'uploadTtlMinutes' | 'queueLimit') =>
+    (event: { target: { value: string } }) =>
+      setForm((current) => ({ ...current, [key]: event.target.value }));
+  const field = (
+    label: string,
+    hint: string,
+    key: 'outputDir' | 'ffmpegPath' | 'maxUploadMb' | 'uploadTtlMinutes' | 'queueLimit',
+    placeholder: string,
+  ) =>
     h(
       'label',
       { className: 'mc-settings-field' },
@@ -856,6 +904,42 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
         phase === 'error' ? h('p', { className: 'mc-settings-note err' }, t('settings.error')) : null,
       ),
     ),
+    // How long sources survive and how many rows a rebuilt page restores.
+    // Conversions run on this machine, so a DSH restart is called out here.
+    h(
+      'section',
+      { className: 'mc-settings-section' },
+      h('h4', null, t('settings.section.queue')),
+      h(
+        'div',
+        { className: 'mc-settings-form' },
+        h(
+          'label',
+          { className: 'mc-settings-check' },
+          h('input', {
+            type: 'checkbox',
+            checked: form.persistState,
+            onChange: (event: { target: { checked: boolean } }) =>
+              setForm((current) => ({ ...current, persistState: event.target.checked })),
+          }),
+          t('settings.persistState'),
+        ),
+        h('small', { className: 'mc-settings-hint' }, t('settings.persistState.hint')),
+        field(
+          t('settings.field.uploadTtl'),
+          `${t('settings.current')}: ${status.uploadTtlMinutes} · ${t('settings.field.uploadTtl.hint')}`,
+          'uploadTtlMinutes',
+          String(status.uploadTtlMinutes),
+        ),
+        field(
+          t('settings.field.queueLimit'),
+          `${t('settings.current')}: ${status.queueLimit} · ${t('settings.field.queueLimit.hint')}`,
+          'queueLimit',
+          String(status.queueLimit),
+        ),
+        h('p', { className: 'mc-settings-hint' }, t('settings.restart.note')),
+      ),
+    ),
     // Presentation switches and panel-module order: cosmetic, but saved by
     // the same button as the fields above.
     h(
@@ -876,18 +960,6 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
           }),
           t('settings.composerButton'),
         ),
-        h(
-          'label',
-          { className: 'mc-settings-check' },
-          h('input', {
-            type: 'checkbox',
-            checked: form.persistState,
-            onChange: (event: { target: { checked: boolean } }) =>
-              setForm((current) => ({ ...current, persistState: event.target.checked })),
-          }),
-          t('settings.persistState'),
-        ),
-        h('small', { className: 'mc-settings-hint' }, t('settings.persistState.hint')),
       ),
       h(
         'div',
@@ -1032,6 +1104,15 @@ const CSS = `
       @keyframes mc-slide { 0% { margin-left: -38%; } 100% { margin-left: 100%; } }
       .mc-error { color: var(--dsw-alias-state-error-primary, #d5483f); word-break: break-word; line-height: 1.6; }
       .mc-warn { color: var(--dsw-alias-state-warn-primary, #d5763f); line-height: 1.6; }
+      .mc-warn-dismiss { margin-left: 8px; background: none; border: none; padding: 0; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+      .mc-history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+      .mc-history-row { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.3)); border-radius: 8px; }
+      .mc-history-gone { opacity: 0.5; }
+      .mc-history-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+      .mc-history-name { font-weight: 500; overflow-wrap: anywhere; }
+      .mc-history-meta { font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); overflow-wrap: anywhere; }
+      .mc-history-actions { display: flex; align-items: center; gap: 10px; flex: none; }
+      .mc-history-more { margin-top: 10px; }
       .mc-ok { font-weight: 600; color: var(--dsw-alias-state-success-primary, #2ba471); }
       .mc-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; word-break: break-all; padding: 8px 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); }
       .mc-foot { display: flex; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); word-break: break-all; }

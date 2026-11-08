@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
-import { apply, inject, resolveGroups } from '../dist/index.js';
+import { apply, inject, pruneUploads, resolveGroups } from '../dist/index.js';
 import { formatEncoders, parseDuration } from '../dist/lib/plan.js';
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-out-'));
@@ -1621,6 +1621,229 @@ assert.deepEqual(
   'unknown tokens and duplicates are dropped',
 );
 assert.deepEqual(resolveGroups(''), ['convert', 'edit', 'view'], 'an empty config keeps the built-in order');
+
+// --- runtime-tunable caps (uploadTtlMinutes / queueLimit) -------------------
+// The two caps default to 120 minutes / 2000 rows, accept a valid save, and
+// reject out-of-range values before they reach the running state. These run
+// against the main instance: the section sits after every other test, so the
+// config it leaves behind affects nothing below.
+const capStatus0 = await call('status');
+assert.match(capStatus0.data.instanceId, /^[0-9a-f-]{36}$/, 'status carries an instance id');
+assert.equal(capStatus0.data.uploadTtlMinutes, 120, 'default upload TTL is 120 minutes');
+assert.equal(capStatus0.data.queueLimit, 2000, 'default queue limit is 2000');
+const capSaved = await call('config', {
+  method: 'POST',
+  body: JSON.stringify({ uploadTtlMinutes: 60, queueLimit: 100 }),
+});
+assert.equal(capSaved.data.ok, true, JSON.stringify(capSaved.data));
+const capStatus1 = await call('status');
+assert.equal(capStatus1.data.uploadTtlMinutes, 60, 'a valid save is live at once');
+assert.equal(capStatus1.data.queueLimit, 100, 'a valid queue limit save is live at once');
+for (const bad of [
+  { uploadTtlMinutes: 2, match: /uploadTtlMinutes/ },
+  { uploadTtlMinutes: 'abc', match: /uploadTtlMinutes/ },
+  { queueLimit: 5, match: /queueLimit/ },
+  { queueLimit: 'xyz', match: /queueLimit/ },
+]) {
+  const refused = await call('config', { method: 'POST', body: JSON.stringify(bad) });
+  assert.equal(refused.data.ok, false, JSON.stringify(bad));
+  assert.match(refused.data.error, bad.match, `rejects ${JSON.stringify(bad)}`);
+}
+const capStatus2 = await call('status');
+assert.equal(capStatus2.data.uploadTtlMinutes, 60, 'a refused save leaves the live value alone');
+
+// A load-time value below the floor is clamped, not honored: the floor exists
+// so a tiny TTL cannot delete sources under running jobs.
+const floorRoutes = new Map();
+const floorCleanups = [];
+apply(
+  {
+    get: (key) =>
+      key === 'webServer'
+        ? {
+            getOrigin: () => 'http://127.0.0.1:65533',
+            register: (route) => {
+              floorRoutes.set(route.path, route.handler);
+              return () => floorRoutes.delete(route.path);
+            },
+          }
+        : key === 'connection'
+          ? connection
+          : undefined,
+    tools: { register: () => () => {} },
+    settings: { configure: () => () => {}, update: async () => {} },
+    effect: (fn) => floorCleanups.push(fn()),
+  },
+  { outputDir: outDir, uploadTtlMinutes: 1, queueLimit: 3 },
+);
+const floorRes = makeRes();
+await floorRoutes.get('/api/media-convert/status')(fakeReq({ url: '/api/media-convert/status' }), floorRes);
+await floorRes.done;
+const floorData = JSON.parse(Buffer.concat(floorRes.chunks).toString('utf8'));
+assert.equal(floorData.uploadTtlMinutes, 5, 'load-time TTL below the floor clamps to 5');
+assert.equal(floorData.queueLimit, 10, 'load-time queue limit below the floor clamps to 10');
+floorCleanups.forEach((dispose) => dispose());
+
+// --- pruneUploads: the TTL sweep, driven directly ---------------------------
+// The 10-minute timer only calls this pure function; testing it through the
+// timer would need fake timers next to real ffmpeg I/O.
+const pruneDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-prune-'));
+const fakeUpload = (id, at, owned, file) => ({
+  id,
+  name: id,
+  path: file,
+  owned,
+  kind: 'video',
+  duration: 1,
+  size: 1,
+  streams: [],
+  meta: {},
+  at,
+});
+const expiredOwnedFile = path.join(pruneDir, 'expired-owned.mp4');
+fs.writeFileSync(expiredOwnedFile, 'x');
+const expiredRegisteredFile = path.join(pruneDir, 'expired-registered.mp4');
+fs.writeFileSync(expiredRegisteredFile, 'x');
+const keptRunningFile = path.join(pruneDir, 'kept-running.mp4');
+fs.writeFileSync(keptRunningFile, 'x');
+const prunedOwnedFile = path.join(pruneDir, 'pruned-owned.mp4');
+fs.writeFileSync(prunedOwnedFile, 'x');
+const NOW = Date.now();
+const pruneJobs = new Map([
+  ['j1', { id: 'j1', uploadId: 'u-running', state: 'running' }],
+  ['j2', { id: 'j2', uploadId: 'u-done-job', state: 'done' }],
+]);
+const pruneUploadsMap = new Map([
+  ['u-expired-owned', fakeUpload('u-expired-owned', NOW - 3 * 3600_000, true, expiredOwnedFile)],
+  ['u-expired-registered', fakeUpload('u-expired-registered', NOW - 3 * 3600_000, false, expiredRegisteredFile)],
+  ['u-running', fakeUpload('u-running', NOW - 3 * 3600_000, true, keptRunningFile)],
+  ['u-done-job', fakeUpload('u-done-job', NOW - 3 * 3600_000, true, prunedOwnedFile)],
+  ['u-fresh', fakeUpload('u-fresh', NOW - 60_000, true, path.join(pruneDir, 'fresh.mp4'))],
+]);
+const pruned = pruneUploads(pruneUploadsMap, pruneJobs, 2 * 3600_000, NOW);
+assert.deepEqual(
+  [...pruned].sort(),
+  ['u-done-job', 'u-expired-owned', 'u-expired-registered'],
+  'expired uploads prune; a running job and a fresh upload stay',
+);
+assert.ok(!pruneUploadsMap.has('u-expired-owned') && !pruneUploadsMap.has('u-expired-registered'));
+assert.ok(pruneUploadsMap.has('u-running'), 'an expired upload a running job reads survives');
+assert.ok(pruneUploadsMap.has('u-fresh'), 'a fresh upload survives');
+for (let attempt = 0; attempt < 50 && fs.existsSync(expiredOwnedFile); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+assert.ok(!fs.existsSync(expiredOwnedFile), 'an owned copy is deleted from disk');
+assert.ok(fs.existsSync(expiredRegisteredFile), "a file registered by path is the user's own and survives");
+assert.ok(fs.existsSync(keptRunningFile), 'the running job keeps its source on disk');
+fs.rmSync(pruneDir, { recursive: true, force: true });
+
+// --- history ledger ----------------------------------------------------------
+// The ledger is an append-only JSONL file of settled jobs. MEDIA_TOOLBOX_HISTORY
+// overrides the path so tests never touch a real home directory. A fresh
+// instance is applied because the path is captured at apply time.
+const histDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-history-'));
+const historyFile = path.join(histDir, 'ledger.json');
+process.env.MEDIA_TOOLBOX_HISTORY = historyFile;
+const histRoutes = new Map();
+const histCleanups = [];
+apply(
+  {
+    get: (key) =>
+      key === 'webServer'
+        ? {
+            getOrigin: () => 'http://127.0.0.1:65533',
+            register: (route) => {
+              histRoutes.set(route.path, route.handler);
+              return () => histRoutes.delete(route.path);
+            },
+          }
+        : key === 'connection'
+          ? connection
+          : undefined,
+    tools: { register: () => () => {} },
+    settings: { configure: () => () => {}, update: async () => {} },
+    effect: (fn) => histCleanups.push(fn()),
+  },
+  { outputDir: outDir },
+);
+const histCall = async (route, options = {}) => {
+  const handler = histRoutes.get('/api/media-convert/' + route.split('?')[0]);
+  assert.ok(handler, `route ${route} registered`);
+  const res = makeRes();
+  await handler(fakeReq({ url: '/api/media-convert/' + route, ...options }), res);
+  await res.done;
+  return { status: res.status, data: JSON.parse(Buffer.concat(res.chunks).toString('utf8')) };
+};
+
+// Seed a ledger: three good lines — one output still on disk, two gone — and
+// one torn line, which must be skipped instead of taking the route down.
+const keptOutput = path.join(outDir, 'kept.mp4');
+fs.writeFileSync(keptOutput, 'x');
+fs.writeFileSync(
+  historyFile,
+  [
+    JSON.stringify({ name: 'a.mp4', out: 'kept.mp4', size: 10, state: 'done', error: null, at: 1000 }),
+    JSON.stringify({ name: 'gone.mp4', out: 'gone.mp4', size: 20, state: 'done', error: null, at: 2000 }),
+    '{"torn":',
+    JSON.stringify({ name: 'err.mp4', out: 'err.mp4', size: 0, state: 'error', error: 'boom', at: 3000 }),
+  ].join('\n') + '\n',
+);
+const histPage = await histCall('history');
+assert.equal(histPage.data.ok, true);
+assert.equal(histPage.data.total, 3, 'the torn line is skipped, not fatal');
+assert.deepEqual(
+  histPage.data.items.map((item) => item.out),
+  ['err.mp4', 'gone.mp4', 'kept.mp4'],
+  'the ledger reads newest first',
+);
+assert.equal(histPage.data.items[0].deleted, true, 'a missing output reports deleted, not an error');
+assert.equal(histPage.data.items[0].error, 'boom', 'an error row keeps its message');
+assert.equal(histPage.data.items[2].deleted, false, 'an existing output is not deleted');
+const histPage2 = await histCall('history?offset=2&limit=1');
+assert.equal(histPage2.data.items.length, 1, 'offset and limit page the ledger');
+assert.equal(histPage2.data.items[0].out, 'kept.mp4');
+assert.equal(histPage2.data.total, 3, 'total is the ledger size, not the page size');
+const emptyHistory = await histCall('history?offset=100');
+assert.equal(emptyHistory.data.items.length, 0, 'an offset past the end yields an empty page');
+assert.equal(emptyHistory.data.total, 3, 'total still reports the ledger size');
+
+// A real conversion appends exactly one done row carrying the output name.
+const histUpload = await histCall('upload?name=' + encodeURIComponent('hist ledger.png'), {
+  method: 'POST',
+  body: fs.readFileSync(sample),
+});
+assert.equal(histUpload.data.ok, true, JSON.stringify(histUpload.data));
+const histConv = await histCall('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: histUpload.data.id, format: 'jpg' }),
+});
+assert.equal(histConv.data.ok, true, JSON.stringify(histConv.data));
+{
+  let current = histConv.data.job;
+  for (let attempt = 0; attempt < 150 && current.state === 'running'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    current = (await histCall('job?id=' + current.id)).data;
+  }
+  assert.equal(current.state, 'done', current.error);
+}
+// The append is fire-and-forget next to the job settle, so poll briefly.
+let ledgerLines = [];
+for (let attempt = 0; attempt < 50; attempt += 1) {
+  ledgerLines = fs.readFileSync(historyFile, 'utf8').trim().split('\n');
+  if (ledgerLines.length >= 5) break;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+assert.equal(ledgerLines.length, 5, 'the conversion appended one row');
+const appended = JSON.parse(ledgerLines[4]);
+assert.equal(appended.state, 'done');
+assert.equal(appended.name, 'hist ledger.png');
+assert.ok(appended.out.endsWith('.jpg'), 'the row carries the output file name');
+assert.ok(appended.size > 0, 'a done row carries the real output size');
+assert.equal(typeof appended.at, 'number');
+
+histCleanups.forEach((dispose) => dispose());
+delete process.env.MEDIA_TOOLBOX_HISTORY;
+fs.rmSync(histDir, { recursive: true, force: true });
 
 cleanups.forEach((dispose) => dispose());
 // The disposer removes the temp copies it owns; a file registered by path is

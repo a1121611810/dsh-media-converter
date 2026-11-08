@@ -30,6 +30,8 @@ import type { MediaKind, StreamMeta } from '../../lib/plan.js';
 import type {
   Base64Response,
   ErrorResponse,
+  HistoryItem,
+  HistoryResponse,
   Job,
   ModelsResponse,
   PtcModelOption,
@@ -49,7 +51,7 @@ const props = defineProps({
 });
 const t = (key: string): string => (props.t ? props.t(key) : key);
 
-type View = 'queue' | 'detail';
+type View = 'queue' | 'detail' | 'history';
 type Operation = 'convert' | 'audio' | 'video';
 type ItemState = 'uploading' | 'ready' | 'converting' | 'cancelling' | 'cancelled' | 'done' | 'error' | 'skipped';
 type Phase = 'idle' | 'uploading' | 'converting' | 'ready' | 'done';
@@ -110,6 +112,55 @@ const ptcModel = computed<{ provider: string; model: string } | null>(() => {
 const batchError = ref('');
 const detailError = ref('');
 const networkError = ref('');
+const restartNotice = ref(false);
+const INSTANCE_KEY = 'media-toolbox-instance';
+
+// The status payload carries a fresh id per DSH start. The first fetch only
+// remembers it; a later fetch seeing a different id means DSH restarted and
+// the in-memory queue is gone, so say so until the user acknowledges.
+function checkRestart(data: StatusResponse): void {
+  const seen = sessionStorage.getItem(INSTANCE_KEY);
+  if (seen === null) {
+    sessionStorage.setItem(INSTANCE_KEY, data.instanceId);
+  } else if (seen !== data.instanceId) {
+    restartNotice.value = true;
+  }
+}
+
+function dismissRestartNotice(): void {
+  sessionStorage.setItem(INSTANCE_KEY, status.value?.instanceId ?? '');
+  restartNotice.value = false;
+}
+
+// The settled-jobs ledger, newest first, paged in place. Fetched on entry and
+// extended from the tail; a grey row means the output file is gone.
+const historyItems = ref<HistoryItem[]>([]);
+const historyTotal = ref(0);
+const historyLoading = ref(false);
+const HISTORY_PAGE = 50;
+
+async function loadHistory(reset: boolean): Promise<void> {
+  if (historyLoading.value) return;
+  historyLoading.value = true;
+  try {
+    const offset = reset ? 0 : historyItems.value.length;
+    const data = await readJson<HistoryResponse | ErrorResponse>(
+      await fetch(`/api/media-convert/history?offset=${offset}&limit=${HISTORY_PAGE}`),
+    );
+    if (!data.ok) throw new Error(data.error || t('error.title'));
+    historyItems.value = reset ? data.items : [...historyItems.value, ...data.items];
+    historyTotal.value = data.total;
+  } catch {
+    // A failed page keeps the rows already loaded; the next tap retries.
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+function openHistory(): void {
+  view.value = 'history';
+  void loadHistory(true);
+}
 const query = ref('');
 const format = ref('');
 const outputName = ref('');
@@ -761,6 +812,7 @@ async function fetchStatus(): Promise<StatusResponse | null> {
     statusError = '';
     status.value = data;
     networkError.value = '';
+    checkRestart(data);
     return data;
   } catch {
     statusError = '';
@@ -1636,11 +1688,20 @@ watch([action, panelOpen], async () => {
   <div ref="pageEl" class="mc-page">
     <div v-if="networkError" class="mc-warn">{{ networkError }}</div>
     <div v-if="status && !status.ffmpegPath" class="mc-warn">{{ t('error.noffmpeg') }}</div>
+    <div v-if="restartNotice" class="mc-warn">
+      {{ t('restart.banner') }}
+      <button type="button" class="mc-warn-dismiss" @click="dismissRestartNotice">
+        {{ t('restart.dismiss') }}
+      </button>
+    </div>
 
     <template v-if="view === 'queue'">
       <div class="mc-head">
         <h2 class="mc-title">{{ t('page.title') }}</h2>
         <p class="mc-sub">{{ t('page.subtitle') }}</p>
+        <div class="mc-tools">
+          <button type="button" class="mc-btn mc-btn-ghost" @click="openHistory">{{ t('history.open') }}</button>
+        </div>
       </div>
 
       <div class="mc-queue" @dragover.prevent="onDragOver" @dragleave="onDragLeave" @drop.prevent="onDrop">
@@ -1769,6 +1830,50 @@ watch([action, panelOpen], async () => {
           <div v-if="dragging" class="mc-drop-overlay">{{ t('queue.dropNow') }}</div>
         </template>
       </div>
+    </template>
+
+    <template v-else-if="view === 'history'">
+      <div class="mc-head">
+        <div class="mc-tools">
+          <button type="button" class="mc-btn mc-btn-ghost" @click="view = 'queue'">{{ t('history.back') }}</button>
+          <h2 class="mc-title">{{ t('history.title') }}</h2>
+        </div>
+        <p class="mc-sub">{{ t('history.subtitle') }}</p>
+      </div>
+
+      <p v-if="!historyItems.length && !historyLoading" class="mc-sub">{{ t('history.empty') }}</p>
+      <ul class="mc-history">
+        <li
+          v-for="item in historyItems"
+          :key="`${item.at}:${item.out}`"
+          class="mc-history-row"
+          :class="{ 'mc-history-gone': item.deleted }"
+        >
+          <div class="mc-history-main">
+            <span class="mc-history-name">{{ item.name }}</span>
+            <span class="mc-history-meta">
+              {{ item.out }} · {{ formatSize(item.size) }} · {{ new Date(item.at).toLocaleString() }}
+            </span>
+            <span v-if="item.deleted" class="mc-error">{{ t('history.deleted') }}</span>
+            <span v-else-if="item.error" class="mc-error">{{ item.error }}</span>
+          </div>
+          <div v-if="!item.deleted" class="mc-history-actions">
+            <a :href="previewUrl(item.out)" target="_blank" rel="noopener">{{ t('history.preview') }}</a>
+            <button type="button" class="mc-btn mc-btn-ghost" @click="reveal(item.out)">
+              {{ t('history.reveal') }}
+            </button>
+          </div>
+        </li>
+      </ul>
+      <button
+        v-if="historyItems.length < historyTotal"
+        type="button"
+        class="mc-btn mc-btn-ghost mc-history-more"
+        :disabled="historyLoading"
+        @click="loadHistory(false)"
+      >
+        {{ t('history.loadMore') }}
+      </button>
     </template>
 
     <template v-else-if="detailItem">
