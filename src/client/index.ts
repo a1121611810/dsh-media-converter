@@ -106,6 +106,9 @@ const ZH: Record<string, string> = {
   'history.subtitle': '已完成和已中断的转换，重启 DSH 后仍可查看。',
   'history.empty': '暂无记录',
   'history.deleted': '文件已删除',
+  'history.state.done': '已完成',
+  'history.state.error': '失败',
+  'history.state.cancelled': '已取消',
   'history.preview': '预览',
   'history.reveal': '打开所在位置',
   'history.loadMore': '加载更多',
@@ -383,6 +386,9 @@ const EN: Record<string, string> = {
   'history.subtitle': 'Finished and interrupted conversions, still here after a DSH restart.',
   'history.empty': 'No entries yet',
   'history.deleted': 'File deleted',
+  'history.state.done': 'Done',
+  'history.state.error': 'Failed',
+  'history.state.cancelled': 'Cancelled',
   'history.preview': 'Preview',
   'history.reveal': 'Show in folder',
   'history.loadMore': 'Load more',
@@ -1105,13 +1111,32 @@ const CSS = `
       .mc-error { color: var(--dsw-alias-state-error-primary, #d5483f); word-break: break-word; line-height: 1.6; }
       .mc-warn { color: var(--dsw-alias-state-warn-primary, #d5763f); line-height: 1.6; }
       .mc-warn-dismiss { margin-left: 8px; background: none; border: none; padding: 0; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
-      .mc-history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-      .mc-history-row { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.3)); border-radius: 8px; }
-      .mc-history-gone { opacity: 0.5; }
-      .mc-history-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
-      .mc-history-name { font-weight: 500; overflow-wrap: anywhere; }
-      .mc-history-meta { font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); overflow-wrap: anywhere; }
-      .mc-history-actions { display: flex; align-items: center; gap: 10px; flex: none; }
+      .mc-history { list-style: none; margin: 0; padding: 0; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.3)); border-radius: 10px; overflow: hidden; }
+      .mc-history-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px; }
+      .mc-history-row + .mc-history-row { border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.3)); }
+      .mc-history-row:hover { background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); }
+      .mc-history-row.is-gone { opacity: 0.5; }
+      .mc-history-dot { flex: none; width: 8px; height: 8px; margin-top: 7px; border-radius: 50%; background: var(--dsw-alias-label-tertiary, rgba(128,128,128,0.6)); }
+      .mc-history-dot.is-done { background: var(--dsw-alias-state-success-primary, #2ba471); }
+      .mc-history-dot.is-error { background: var(--dsw-alias-state-error-primary, #d5483f); }
+      .mc-history-dot.is-cancelled { background: var(--dsw-alias-state-warn-primary, #d5763f); }
+      .mc-history-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+      .mc-history-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+      .mc-history-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+      .mc-history-chip { flex: none; padding: 0 7px; border-radius: 999px; font-size: 11px; line-height: 18px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.5)); color: var(--dsw-alias-label-secondary, inherit); }
+      .mc-history-chip.is-done { color: var(--dsw-alias-state-success-primary, #2ba471); border-color: var(--dsw-alias-state-success-primary, #2ba471); }
+      .mc-history-chip.is-error { color: var(--dsw-alias-state-error-primary, #d5483f); border-color: var(--dsw-alias-state-error-primary, #d5483f); }
+      .mc-history-chip.is-cancelled { color: var(--dsw-alias-state-warn-primary, #d5763f); border-color: var(--dsw-alias-state-warn-primary, #d5763f); }
+      .mc-history-chip.is-gone { color: var(--dsw-alias-state-error-primary, #d5483f); border-color: var(--dsw-alias-state-error-primary, #d5483f); }
+      .mc-history-meta { display: flex; align-items: baseline; gap: 5px; font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); min-width: 0; overflow: hidden; white-space: nowrap; }
+      .mc-history-meta > span:not(.mc-history-out) { flex: none; }
+      .mc-history-out { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+      .mc-history-err { font-size: 12px; color: var(--dsw-alias-state-error-primary, #d5483f); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .mc-history-actions { flex: none; display: flex; align-items: center; gap: 10px; padding-top: 1px; }
+      .mc-history-actions > a, .mc-history-actions > button { background: none; border: 0; padding: 2px 0; font: inherit; font-size: 12.5px; color: var(--dsw-static-deepseek-400, #6b8afd); cursor: pointer; text-decoration: none; white-space: nowrap; }
+      .mc-history-actions > a:hover, .mc-history-actions > button:hover { color: var(--dsw-static-deepseek-500, #4d6bfe); text-decoration: underline; }
+      .mc-history-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 200px; border: 1.5px dashed var(--dsw-alias-border-l2, rgba(128,128,128,0.5)); border-radius: 16px; }
+      .mc-history-empty svg { width: 34px; height: 34px; color: var(--dsw-alias-label-tertiary, inherit); }
       .mc-history-more { margin-top: 10px; }
       .mc-ok { font-weight: 600; color: var(--dsw-alias-state-success-primary, #2ba471); }
       .mc-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; word-break: break-all; padding: 8px 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); }

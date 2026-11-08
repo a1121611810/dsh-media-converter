@@ -161,6 +161,17 @@ function openHistory(): void {
   view.value = 'history';
   void loadHistory(true);
 }
+
+// Row affordances: the dot and the chip share one state class so a settled
+// job reads the same in both places. Deleted files grey the whole row out.
+function historyStateClass(item: HistoryItem): string {
+  if (item.deleted) return 'is-gone';
+  return item.state === 'done' ? 'is-done' : item.state === 'error' ? 'is-error' : 'is-cancelled';
+}
+
+function historyStateLabel(item: HistoryItem): string {
+  return t(item.deleted ? 'history.deleted' : `history.state.${item.state}`);
+}
 const query = ref('');
 const format = ref('');
 const outputName = ref('');
@@ -1841,27 +1852,45 @@ watch([action, panelOpen], async () => {
         <p class="mc-sub">{{ t('history.subtitle') }}</p>
       </div>
 
-      <p v-if="!historyItems.length && !historyLoading" class="mc-sub">{{ t('history.empty') }}</p>
-      <ul class="mc-history">
-        <li
-          v-for="item in historyItems"
-          :key="`${item.at}:${item.out}`"
-          class="mc-history-row"
-          :class="{ 'mc-history-gone': item.deleted }"
+      <div v-if="!historyItems.length && !historyLoading" class="mc-history-empty">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
         >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 3" />
+        </svg>
+        <p class="mc-sub">{{ t('history.empty') }}</p>
+      </div>
+
+      <ul v-else class="mc-history">
+        <li v-for="item in historyItems" :key="`${item.at}:${item.out}`" class="mc-history-row">
+          <span class="mc-history-dot" :class="historyStateClass(item)" aria-hidden="true"></span>
           <div class="mc-history-main">
-            <span class="mc-history-name">{{ item.name }}</span>
-            <span class="mc-history-meta">
-              {{ item.out }} · {{ formatSize(item.size) }} · {{ new Date(item.at).toLocaleString() }}
-            </span>
-            <span v-if="item.deleted" class="mc-error">{{ t('history.deleted') }}</span>
-            <span v-else-if="item.error" class="mc-error">{{ item.error }}</span>
+            <div class="mc-history-top">
+              <span class="mc-history-name" :title="item.name">{{ item.name }}</span>
+              <span class="mc-history-chip" :class="historyStateClass(item)">{{ historyStateLabel(item) }}</span>
+            </div>
+            <div class="mc-history-meta">
+              <span class="mc-history-out" :title="item.out">{{ item.out }}</span>
+              <span>{{ formatSize(item.size) }}</span>
+              <span aria-hidden="true">·</span>
+              <span>{{ new Date(item.at).toLocaleString() }}</span>
+            </div>
+            <div v-if="!item.deleted && item.error" class="mc-history-err" :title="item.error">
+              {{ item.error }}
+            </div>
           </div>
-          <div v-if="!item.deleted" class="mc-history-actions">
-            <a :href="previewUrl(item.out)" target="_blank" rel="noopener">{{ t('history.preview') }}</a>
-            <button type="button" class="mc-btn mc-btn-ghost" @click="reveal(item.out)">
-              {{ t('history.reveal') }}
-            </button>
+          <div class="mc-history-actions">
+            <template v-if="!item.deleted">
+              <a :href="previewUrl(item.out)" target="_blank" rel="noopener">{{ t('history.preview') }}</a>
+              <button type="button" @click="reveal(item.out)">{{ t('history.reveal') }}</button>
+            </template>
           </div>
         </li>
       </ul>
