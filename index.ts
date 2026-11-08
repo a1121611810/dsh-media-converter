@@ -946,7 +946,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     // The ledger row every final state writes. The name is captured now: the
     // upload map entry may be swept before the job settles.
     const record = (state: JobState, size: number, error: string | null) =>
-      appendHistory({ name: upload.name, out, size, state, error, at: Date.now() });
+      appendHistory({ name: upload.name, out: path.basename(out), size, state, error, at: Date.now() });
     // Resolves when the job reaches its final state, so a caller that has to
     // wait (the agent tool) does not have to poll.
     let settle!: () => void;

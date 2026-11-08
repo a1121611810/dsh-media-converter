@@ -12,6 +12,13 @@ import { apply, inject, pruneUploads, resolveGroups } from '../dist/index.js';
 import { formatEncoders, parseDuration } from '../dist/lib/plan.js';
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-out-'));
+// Every apply() below captures the ledger path at apply time, so the override
+// must exist before the FIRST apply — otherwise the main instance appends
+// settled jobs to the real ~/.media-toolbox-history.json. (Caught on a real
+// DSH run: the ledger grew thousands of test rows in the user's home.)
+const ledgerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-ledger-'));
+const LEDGER_FILE = path.join(ledgerDir, 'ledger.json');
+process.env.MEDIA_TOOLBOX_HISTORY = LEDGER_FILE;
 
 // --- fake ffprobe ------------------------------------------------------------
 // The dev box ships no ffprobe, so the JSON probing route would only ever run
@@ -1738,12 +1745,10 @@ assert.ok(fs.existsSync(keptRunningFile), 'the running job keeps its source on d
 fs.rmSync(pruneDir, { recursive: true, force: true });
 
 // --- history ledger ----------------------------------------------------------
-// The ledger is an append-only JSONL file of settled jobs. MEDIA_TOOLBOX_HISTORY
-// overrides the path so tests never touch a real home directory. A fresh
-// instance is applied because the path is captured at apply time.
-const histDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-history-'));
-const historyFile = path.join(histDir, 'ledger.json');
-process.env.MEDIA_TOOLBOX_HISTORY = historyFile;
+// The ledger is an append-only JSONL file of settled jobs. The path override
+// is global (see the top of the file), so this fresh apply reads the same
+// isolated ledger as every other instance above.
+const historyFile = LEDGER_FILE;
 const histRoutes = new Map();
 const histCleanups = [];
 apply(
@@ -1838,12 +1843,11 @@ const appended = JSON.parse(ledgerLines[4]);
 assert.equal(appended.state, 'done');
 assert.equal(appended.name, 'hist ledger.png');
 assert.ok(appended.out.endsWith('.jpg'), 'the row carries the output file name');
+assert.ok(!appended.out.includes('/'), 'the row stores the file NAME, not an absolute path');
 assert.ok(appended.size > 0, 'a done row carries the real output size');
 assert.equal(typeof appended.at, 'number');
 
 histCleanups.forEach((dispose) => dispose());
-delete process.env.MEDIA_TOOLBOX_HISTORY;
-fs.rmSync(histDir, { recursive: true, force: true });
 
 cleanups.forEach((dispose) => dispose());
 // The disposer removes the temp copies it owns; a file registered by path is
@@ -1851,5 +1855,6 @@ cleanups.forEach((dispose) => dispose());
 assert.ok(fs.existsSync(browseFile), 'a registered file is never deleted by the plugin');
 assert.ok(fs.existsSync(nestedFile), 'a nested registered file is never deleted');
 fs.rmSync(browseDir, { recursive: true, force: true });
+fs.rmSync(ledgerDir, { recursive: true, force: true });
 fs.rmSync(outDir, { recursive: true, force: true });
 console.log('host.test.mjs: ok');
