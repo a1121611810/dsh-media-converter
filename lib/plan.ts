@@ -361,6 +361,28 @@ export function buildArgs(kind: MediaKind, format: string, quality = 90): string
   return args;
 }
 
+// The encoders one output format's recipe needs, read from the recipe itself
+// (buildArgs is the source of truth). Built-in codec names (aac, flac, pcm_*,
+// png...) appear in every ffmpeg build, so filtering by them is a no-op.
+export function formatEncoders(kind: ConvertKind, format: string): string[] {
+  const args = buildArgs(kind, format);
+  const wanted: string[] = [];
+  for (let i = 0; i < args.length - 1; i += 1) {
+    if (args[i] === '-c:v' || args[i] === '-c:a') wanted.push(args[i + 1]);
+  }
+  return wanted;
+}
+
+// The output formats this ffmpeg build can actually encode: a format is
+// offered only when every encoder its recipe needs is present. Homebrew's
+// ffmpeg 9 drops libtheora/libvorbis/libaom/libwebp, so a static table lies.
+export function supportedFormats(encoders: Iterable<string>): FormatTable {
+  const have = new Set(encoders);
+  const pick = (kind: ConvertKind): string[] =>
+    FORMATS[kind].filter((format) => formatEncoders(kind, format).every((name) => have.has(name)));
+  return { video: pick('video'), audio: pick('audio'), image: pick('image') };
+}
+
 // Trim window in seconds, or null when the request is not a trim. An invalid
 // or no-op window degrades to "no trim" instead of cutting a surprise range.
 export function normalizeTrim(

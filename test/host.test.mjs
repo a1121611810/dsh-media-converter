@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { apply, inject, resolveGroups } from '../dist/index.js';
-import { parseDuration } from '../dist/lib/plan.js';
+import { formatEncoders, parseDuration } from '../dist/lib/plan.js';
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-out-'));
 
@@ -414,7 +414,6 @@ assert.equal(status.data.persistState, false, 'page-state persistence defaults o
 assert.equal(typeof status.data.version, 'string', 'the plugin version is reported');
 assert.ok(status.data.version.length > 0, 'a version is present');
 assert.deepEqual(status.data.groups, ['convert', 'edit', 'view'], 'the built-in group order is reported');
-assert.deepEqual(status.data.formats.image, ['png', 'jpg', 'webp', 'gif', 'bmp', 'tiff', 'avif']);
 // The fake ffprobe (or CI's real one) must be detected: the status names the
 // structured route, exactly. A detection regression and a hardcoded fallback
 // value both fail here.
@@ -430,6 +429,27 @@ const ffmpeg = status.data.ffmpegPath;
 // box); CI's apt install puts one there and the real binary answers instead,
 // so the fake-log assertions below are scoped by this flag.
 const fakeProbing = !fs.existsSync(path.join(path.dirname(ffmpeg), 'ffprobe'));
+// The advertised formats must be encodable by this exact ffmpeg: homebrew 9
+// drops libtheora and a lying table breaks conversions at runtime.
+const encoderText = spawnSync(ffmpeg, ['-hide_banner', '-encoders'], { encoding: 'utf8' }).stdout;
+for (const [kind, list] of Object.entries(status.data.formats)) {
+  for (const format of list) {
+    for (const encoder of formatEncoders(kind, format)) {
+      assert.ok(encoderText.includes(' ' + encoder + ' '), `${kind}/${format} needs encoder ${encoder}`);
+    }
+  }
+}
+// Formats are filtered by this ffmpeg's encoders (homebrew 9 lacks
+// libwebp/libaom), so pin the always-built-ins, not the full table.
+assert.deepEqual(status.data.formats.image, [
+  'png',
+  'jpg',
+  ...(encoderText.includes('libwebp') ? ['webp'] : []),
+  'gif',
+  'bmp',
+  'tiff',
+  ...(encoderText.includes('libaom-av1') ? ['avif'] : []),
+]);
 
 // --- image: upload, convert, preview -------------------------------------
 const sample = path.join(outDir, 'sample.png');

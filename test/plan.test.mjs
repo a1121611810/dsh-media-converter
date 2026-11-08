@@ -5,6 +5,7 @@ import {
   buildArgs,
   copyArgs,
   defaultFormat,
+  formatEncoders,
   hardwareFor,
   extractPlan,
   kindOf,
@@ -18,6 +19,7 @@ import {
   percentOf,
   progressSeconds,
   subtitlePlan,
+  supportedFormats,
   supportsQuality,
   trimArgs,
 } from '../dist/lib/plan.js';
@@ -52,6 +54,59 @@ assert.deepEqual(buildArgs('image', 'jpg', 100), ['-frames:v', '1', '-q:v', '2']
 assert.equal(buildArgs('image', 'jpg', 50).at(-1), '17'); // 31 - 50*0.29 = 16.5 -> 17
 assert.equal(buildArgs('image', 'jpg', 10).at(-1), '28');
 assert.deepEqual(buildArgs('image', 'jpg', 500), ['-frames:v', '1', '-q:v', '2']); // clamped
+
+// Format support follows the encoders the recipe needs; homebrew ffmpeg 9
+// drops libtheora/libvorbis/libaom/libwebp, so the advertised table must be
+// filterable per build. Recipes are the source of truth (formatEncoders
+// reads buildArgs), so the two can never drift.
+assert.deepEqual(formatEncoders('video', 'ogv'), ['libtheora', 'libvorbis']);
+assert.deepEqual(formatEncoders('audio', 'ogg'), ['libvorbis']);
+assert.deepEqual(formatEncoders('image', 'avif'), ['libaom-av1']);
+assert.deepEqual(formatEncoders('video', 'mp4'), ['libx264', 'aac']);
+assert.deepEqual(formatEncoders('video', 'gif'), []); // built-in filters only
+const ALL_RECIPE_ENCODERS = [
+  'libx264',
+  'aac',
+  'libmp3lame',
+  'libvpx-vp9',
+  'libopus',
+  'mpeg4',
+  'wmv2',
+  'wmav2',
+  'libtheora',
+  'libvorbis',
+  'flac',
+  'pcm_s16le',
+  'pcm_s16be',
+  'png',
+  'libwebp',
+  'bmp',
+  'tiff',
+  'libaom-av1',
+];
+assert.deepEqual(supportedFormats(ALL_RECIPE_ENCODERS), FORMATS, 'full encoder set advertises everything');
+const brew9 = supportedFormats([
+  'libx264',
+  'aac',
+  'libmp3lame',
+  'libopus',
+  'libvpx-vp9',
+  'wmv2',
+  'wmav2',
+  'mpeg4',
+  'flac',
+  'vorbis',
+  'opus',
+]);
+assert.ok(!brew9.video.includes('ogv'), 'ogv needs libtheora');
+assert.ok(!brew9.audio.includes('ogg'), 'ogg needs libvorbis');
+assert.ok(!brew9.image.includes('webp') && !brew9.image.includes('avif'));
+assert.ok(
+  brew9.video.includes('webm') &&
+    brew9.video.includes('mp4') &&
+    brew9.audio.includes('mp3') &&
+    brew9.image.includes('jpg'),
+);
 
 assert.equal(parseDuration('  Duration: 00:01:02.50, start: 0.000000, bitrate: 900 kb/s'), 62.5);
 assert.equal(parseDuration('  Duration: N/A, bitrate: N/A'), 0);

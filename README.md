@@ -8,7 +8,7 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 
 | 动作 | 说明 |
 | --- | --- |
-| 转成 X | 视频 12 种（mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif/mp3/m4a）、音频 8 种（mp3/m4a/aac/wav/flac/ogg/opus/aiff）、图片 7 种（png/jpg/webp/gif/bmp/tiff/avif） |
+| 转成 X | 视频 12 种（mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif/mp3/m4a）、音频 8 种（mp3/m4a/aac/wav/flac/ogg/opus/aiff）、图片 7 种（png/jpg/webp/gif/bmp/tiff/avif）；按本机 ffmpeg 实际具备的编码器过滤——如 homebrew ffmpeg 9 缺 libtheora/libvorbis/libaom/libwebp，则不显示 ogv/ogg/avif/webp |
 | 裁一段 | 从播放器取起点/终点，或手填 `分:秒`；裁剪与转换一次完成 |
 | 提取音频 / 提取画面 | 直接拷贝轨道，不重编码 |
 | 提取字幕 | 内嵌字幕轨导出 `.srt`，文件名带语言码（如 `clip.chi.srt`） |

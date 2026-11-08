@@ -50,10 +50,11 @@ import {
   progressSeconds,
   streamInfoOf,
   subtitlePlan,
+  supportedFormats,
   threadArgs,
   trimArgs,
 } from './lib/plan.js';
-import type { ConvertPlan, MediaKind, MediaMeta, StreamInfo, TrimWindow } from './lib/plan.js';
+import type { ConvertPlan, FormatTable, MediaKind, MediaMeta, StreamInfo, TrimWindow } from './lib/plan.js';
 import {
   PTC_DEFAULT_RATES,
   WEIGHTS,
@@ -367,23 +368,32 @@ export interface HardwareInfo {
   hwaccel: boolean;
 }
 const noHardware: HardwareInfo = { h264: false, hevc: false, hwaccel: false };
-const hardwareCache = new Map<string, Promise<HardwareInfo>>();
-function detectHardware(ffmpeg: string): Promise<HardwareInfo> {
-  let pending = hardwareCache.get(ffmpeg);
+interface FfmpegProbe {
+  info: HardwareInfo;
+  // Encoder names from `-encoders`, e.g. "libtheora"; drives supportedFormats.
+  encoders: string[];
+}
+const probeCache = new Map<string, Promise<FfmpegProbe>>();
+function detectHardware(ffmpeg: string): Promise<FfmpegProbe> {
+  let pending = probeCache.get(ffmpeg);
   if (!pending) {
     pending = new Promise((resolve) => {
       execFile(ffmpeg, ['-hide_banner', '-encoders'], { timeout: 15000 }, (_e1, enc) => {
         execFile(ffmpeg, ['-hide_banner', '-hwaccels'], { timeout: 15000 }, (_e2, accel) => {
           const text = String(enc || '');
           resolve({
-            h264: /h264_videotoolbox/.test(text),
-            hevc: /hevc_videotoolbox/.test(text),
-            hwaccel: /videotoolbox/.test(String(accel || '')),
+            info: {
+              h264: /h264_videotoolbox/.test(text),
+              hevc: /hevc_videotoolbox/.test(text),
+              hwaccel: /videotoolbox/.test(String(accel || '')),
+            },
+            // Some lines carry a leading space in the flags column (" VF...D").
+            encoders: [...text.matchAll(/^\s*[A-Z.]{6}\s+(\S+)/gm)].map((match) => match[1]),
           });
         });
       });
     });
-    hardwareCache.set(ffmpeg, pending);
+    probeCache.set(ffmpeg, pending);
   }
   return pending;
 }
@@ -426,6 +436,7 @@ const statusPayload = (
   persistState: boolean,
   hardware: HardwareInfo,
   probeMode: 'ffprobe' | 'ffmpeg',
+  formats: FormatTable,
 ) => ({
   ok: true as const,
   ffmpegPath,
@@ -437,7 +448,7 @@ const statusPayload = (
   persistState,
   hardware,
   probeMode,
-  formats: FORMATS,
+  formats,
 });
 export type StatusResponse = ReturnType<typeof statusPayload>;
 
@@ -1736,7 +1747,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         handler: async (req, res) => {
           if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
           if (rejectUnauthenticated(req, res)) return;
-          const hardware = ffmpeg ? await detectHardware(ffmpeg) : noHardware;
+          const probe = ffmpeg ? await detectHardware(ffmpeg) : null;
           json(
             res,
             200,
@@ -1748,8 +1759,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               composerButton,
               groups,
               persistState,
-              hardware,
+              probe?.info ?? noHardware,
               ffprobe ? 'ffprobe' : 'ffmpeg',
+              probe ? supportedFormats(probe.encoders) : FORMATS,
             ),
           );
         },
