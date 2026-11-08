@@ -202,6 +202,9 @@ const ZH: Record<string, string> = {
   'settings.field.ffmpeg': 'ffmpeg 路径',
   'settings.field.ffmpeg.hint': '留空则自动查找',
   'settings.field.maxUpload': '上传上限（MB）',
+  'settings.section.env': '运行环境',
+  'settings.section.general': '路径与上限',
+  'settings.section.ui': '界面与动作',
   'settings.probe': '元数据解析',
   'settings.probe.ffprobe': '结构化解析（ffprobe）',
   'settings.probe.ffmpeg': '兼容模式（解析 ffmpeg -i 输出）',
@@ -459,6 +462,9 @@ const EN: Record<string, string> = {
   'settings.field.ffmpeg': 'ffmpeg path',
   'settings.field.ffmpeg.hint': 'Empty finds it automatically',
   'settings.field.maxUpload': 'Upload limit (MB)',
+  'settings.section.env': 'Runtime',
+  'settings.section.general': 'Paths & limits',
+  'settings.section.ui': 'UI & actions',
   'settings.probe': 'Metadata probing',
   'settings.probe.ffprobe': 'Structured (ffprobe)',
   'settings.probe.ffmpeg': 'Compatibility mode (parses ffmpeg -i output)',
@@ -624,6 +630,8 @@ const COMPOSER_CSS = `
 .mc-settings-list { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
 .mc-settings-list dt { color: var(--dsw-alias-label-secondary, inherit); }
 .mc-settings-list dd { margin: 0; word-break: break-all; }
+.mc-settings-section { display: flex; flex-direction: column; gap: 10px; padding-top: 12px; border-top: 0.5px solid var(--dsw-alias-border-l2, transparent); }
+.mc-settings-section > h4 { margin: 0; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-secondary, inherit); }
 .mc-settings-form { display: flex; flex-direction: column; gap: 12px; }
 .mc-settings-field { display: flex; flex-direction: column; gap: 4px; }
 .mc-settings-field > span { color: var(--dsw-alias-label-secondary, inherit); }
@@ -772,119 +780,159 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
         t('settings.refresh'),
       ),
     ),
+    // Read-only facts about the box the plugin runs on. The probe verdict and
+    // its fix guidance live here, out of the editable form below.
     h(
-      'dl',
-      { className: 'mc-settings-list' },
-      h('dt', null, `${t('settings.field.outputDir')}（${t('settings.current')}）`),
-      h('dd', null, status.outputDir),
-      h('dt', null, `${t('settings.field.ffmpeg')}（${t('settings.current')}）`),
-      h('dd', null, status.ffmpegPath || '—'),
-      h('dt', null, `${t('settings.probe')}（${t('settings.current')}）`),
+      'section',
+      { className: 'mc-settings-section' },
+      h('h4', null, t('settings.section.env')),
       h(
-        'dd',
-        null,
+        'dl',
+        { className: 'mc-settings-list' },
+        h('dt', null, t('settings.field.ffmpeg')),
+        h('dd', null, status.ffmpegPath || '—'),
+        h('dt', null, t('settings.probe')),
         h(
-          'span',
-          {
-            className: !probeKnown
-              ? ''
-              : status.probeMode === 'ffprobe'
-                ? 'mc-settings-note ok'
-                : 'mc-settings-note err',
-          },
-          !probeKnown ? '—' : status.probeMode === 'ffprobe' ? t('settings.probe.ffprobe') : t('settings.probe.ffmpeg'),
-        ),
-        status.probeMode === 'ffmpeg' ? h('div', { className: 'mc-settings-note err' }, t('settings.probe.fix')) : null,
-      ),
-      h('dt', null, `${t('settings.field.maxUpload')}（${t('settings.current')}）`),
-      h('dd', null, String(status.maxUploadMb)),
-    ),
-    h(
-      'div',
-      { className: 'mc-settings-form' },
-      field(t('settings.field.outputDir'), t('settings.field.outputDir.hint'), 'outputDir', status.outputDir),
-      field(t('settings.field.ffmpeg'), t('settings.field.ffmpeg.hint'), 'ffmpegPath', status.ffmpegPath || ''),
-      field(t('settings.field.maxUpload'), '', 'maxUploadMb', String(status.maxUploadMb)),
-      h(
-        'label',
-        { className: 'mc-settings-check' },
-        h('input', {
-          type: 'checkbox',
-          checked: form.composerButton,
-          onChange: (event: { target: { checked: boolean } }) =>
-            setForm((current) => ({ ...current, composerButton: event.target.checked })),
-        }),
-        t('settings.composerButton'),
-      ),
-      h(
-        'label',
-        { className: 'mc-settings-check' },
-        h('input', {
-          type: 'checkbox',
-          checked: form.persistState,
-          onChange: (event: { target: { checked: boolean } }) =>
-            setForm((current) => ({ ...current, persistState: event.target.checked })),
-        }),
-        t('settings.persistState'),
-      ),
-      h('small', { className: 'mc-settings-hint' }, t('settings.persistState.hint')),
-    ),
-    h(
-      'div',
-      { className: 'mc-settings-field' },
-      h('span', null, t('settings.groups')),
-      rows.map((row, index) =>
-        h(
-          'div',
-          { className: 'mc-settings-grouprow', key: row.key },
-          h(
-            'label',
-            { className: 'mc-settings-check' },
-            h('input', { type: 'checkbox', checked: row.on, onChange: () => toggle(index) }),
-            t(`group.${row.key}`),
-          ),
+          'dd',
+          null,
           h(
             'span',
-            { className: 'mc-settings-rowtail' },
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'mc-settings-mini',
-                disabled: index === 0,
-                title: t('settings.groups.up'),
-                onClick: () => move(index, -1),
-              },
-              '↑',
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'mc-settings-mini',
-                disabled: index === rows.length - 1,
-                title: t('settings.groups.down'),
-                onClick: () => move(index, 1),
-              },
-              '↓',
-            ),
+            {
+              className: !probeKnown
+                ? ''
+                : status.probeMode === 'ffprobe'
+                  ? 'mc-settings-note ok'
+                  : 'mc-settings-note err',
+            },
+            !probeKnown
+              ? '—'
+              : status.probeMode === 'ffprobe'
+                ? t('settings.probe.ffprobe')
+                : t('settings.probe.ffmpeg'),
           ),
         ),
       ),
-      h('small', null, t('settings.groups.hint')),
+      status.probeMode === 'ffmpeg' ? h('p', { className: 'mc-settings-note err' }, t('settings.probe.fix')) : null,
     ),
+    // The one place to edit: every field names its live value in the hint, so
+    // there is no separate "current" list to cross-check while typing.
     h(
-      'button',
-      {
-        type: 'button',
-        className: 'mc-settings-save',
-        disabled: phase === 'saving',
-        onClick: save,
-      },
-      t(phase === 'saving' ? 'settings.saving' : 'settings.save'),
+      'section',
+      { className: 'mc-settings-section' },
+      h('h4', null, t('settings.section.general')),
+      h(
+        'div',
+        { className: 'mc-settings-form' },
+        field(
+          t('settings.field.outputDir'),
+          `${t('settings.current')}: ${status.outputDir} · ${t('settings.field.outputDir.hint')}`,
+          'outputDir',
+          status.outputDir,
+        ),
+        field(
+          t('settings.field.ffmpeg'),
+          `${t('settings.current')}: ${status.ffmpegPath || '—'} · ${t('settings.field.ffmpeg.hint')}`,
+          'ffmpegPath',
+          status.ffmpegPath || '',
+        ),
+        field(
+          t('settings.field.maxUpload'),
+          `${t('settings.current')}: ${status.maxUploadMb}`,
+          'maxUploadMb',
+          String(status.maxUploadMb),
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'mc-settings-save',
+            disabled: phase === 'saving',
+            onClick: save,
+          },
+          t(phase === 'saving' ? 'settings.saving' : 'settings.save'),
+        ),
+        phase === 'saved' ? h('p', { className: 'mc-settings-note ok' }, t('settings.saved')) : null,
+        phase === 'error' ? h('p', { className: 'mc-settings-note err' }, t('settings.error')) : null,
+      ),
     ),
-    phase === 'saved' ? h('p', { className: 'mc-settings-note ok' }, t('settings.saved')) : null,
-    phase === 'error' ? h('p', { className: 'mc-settings-note err' }, t('settings.error')) : null,
+    // Presentation switches and panel-module order: cosmetic, but saved by
+    // the same button as the fields above.
+    h(
+      'section',
+      { className: 'mc-settings-section' },
+      h('h4', null, t('settings.section.ui')),
+      h(
+        'div',
+        { className: 'mc-settings-form' },
+        h(
+          'label',
+          { className: 'mc-settings-check' },
+          h('input', {
+            type: 'checkbox',
+            checked: form.composerButton,
+            onChange: (event: { target: { checked: boolean } }) =>
+              setForm((current) => ({ ...current, composerButton: event.target.checked })),
+          }),
+          t('settings.composerButton'),
+        ),
+        h(
+          'label',
+          { className: 'mc-settings-check' },
+          h('input', {
+            type: 'checkbox',
+            checked: form.persistState,
+            onChange: (event: { target: { checked: boolean } }) =>
+              setForm((current) => ({ ...current, persistState: event.target.checked })),
+          }),
+          t('settings.persistState'),
+        ),
+        h('small', { className: 'mc-settings-hint' }, t('settings.persistState.hint')),
+      ),
+      h(
+        'div',
+        { className: 'mc-settings-field' },
+        h('span', null, t('settings.groups')),
+        rows.map((row, index) =>
+          h(
+            'div',
+            { className: 'mc-settings-grouprow', key: row.key },
+            h(
+              'label',
+              { className: 'mc-settings-check' },
+              h('input', { type: 'checkbox', checked: row.on, onChange: () => toggle(index) }),
+              t(`group.${row.key}`),
+            ),
+            h(
+              'span',
+              { className: 'mc-settings-rowtail' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'mc-settings-mini',
+                  disabled: index === 0,
+                  title: t('settings.groups.up'),
+                  onClick: () => move(index, -1),
+                },
+                '↑',
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'mc-settings-mini',
+                  disabled: index === rows.length - 1,
+                  title: t('settings.groups.down'),
+                  onClick: () => move(index, 1),
+                },
+                '↓',
+              ),
+            ),
+          ),
+        ),
+        h('small', null, t('settings.groups.hint')),
+      ),
+    ),
     h('p', { className: 'mc-settings-hint' }, t('settings.hint')),
   );
 }
