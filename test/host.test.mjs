@@ -12,6 +12,205 @@ import { apply, inject, resolveGroups } from '../dist/index.js';
 import { parseDuration } from '../dist/lib/plan.js';
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-out-'));
+
+// --- fake ffprobe ------------------------------------------------------------
+// The dev box ships no ffprobe, so the JSON probing route would only ever run
+// on CI. A fake that answers per extension forces every upload below through
+// that route. On CI the real ffprobe sitting next to apt's ffmpeg wins the
+// candidate order (sibling first), so the same assertions then run against
+// real ffprobe output; the log assertion below adapts via fakeProbing.
+const fakeProbeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-fake-probe-'));
+const fakeProbeLog = path.join(fakeProbeDir, 'calls.log');
+const fakeProbeSentinel = path.join(fakeProbeDir, 'broken');
+// Shaped like real `ffprobe -show_format -show_streams -show_chapters
+// -print_format json` output; parseFfprobeJson's unit tests use the same
+// shapes. .mp4 carries the rewritten title so the read-back assertion below
+// exercises the format.tags mapping (the write itself is verified against
+// real ffmpeg on disk, unaffected by the fake).
+const FAKE_PROBE_ANSWERS = {
+  '.mp4': {
+    streams: [
+      {
+        index: 0,
+        codec_name: 'h264',
+        profile: 'High',
+        codec_type: 'video',
+        width: 320,
+        height: 240,
+        pix_fmt: 'yuv420p',
+        avg_frame_rate: '30/1',
+        bit_rate: '500000',
+        disposition: { default: 1 },
+        tags: {},
+      },
+      {
+        index: 1,
+        codec_name: 'aac',
+        codec_type: 'audio',
+        sample_rate: '44100',
+        channel_layout: 'stereo',
+        sample_fmt: 'fltp',
+        bit_rate: '128000',
+        disposition: { default: 0 },
+        tags: {},
+      },
+    ],
+    chapters: [],
+    format: {
+      format_name: 'mov,mp4,m4a,3gp,3g2,mj2',
+      duration: '2.000000',
+      start_time: '0.000000',
+      bit_rate: '628000',
+      tags: { title: '片头测试' },
+    },
+  },
+  '.m4a': {
+    streams: [
+      {
+        index: 0,
+        codec_name: 'aac',
+        codec_type: 'audio',
+        sample_rate: '44100',
+        channel_layout: 'mono',
+        sample_fmt: 'fltp',
+        bit_rate: '81000',
+        disposition: { default: 1 },
+        tags: {},
+      },
+      {
+        index: 1,
+        codec_name: 'mjpeg',
+        codec_type: 'video',
+        width: 300,
+        height: 300,
+        pix_fmt: 'yuvj444p',
+        disposition: { attached_pic: 1 },
+        tags: {},
+      },
+    ],
+    chapters: [],
+    format: {
+      format_name: 'mov,mp4,m4a,3gp,3g2,mj2',
+      duration: '1.000000',
+      start_time: '0.000000',
+      bit_rate: '6575000',
+      tags: {},
+    },
+  },
+  '.ac3': {
+    streams: [
+      {
+        index: 0,
+        codec_name: 'ac3',
+        codec_type: 'audio',
+        sample_rate: '48000',
+        channel_layout: '5.1(side)',
+        sample_fmt: 'fltp',
+        bit_rate: '448000',
+        disposition: { default: 1 },
+        tags: {},
+      },
+    ],
+    chapters: [],
+    format: { format_name: 'ac3', duration: '1.020000', start_time: '0.000000', bit_rate: '448000', tags: {} },
+  },
+  '.mkv': {
+    streams: [
+      {
+        index: 0,
+        codec_name: 'h264',
+        profile: 'High',
+        codec_type: 'video',
+        width: 640,
+        height: 360,
+        pix_fmt: 'yuv420p',
+        avg_frame_rate: '30/1',
+        disposition: { default: 1 },
+        tags: {},
+      },
+      {
+        index: 1,
+        codec_name: 'aac',
+        codec_type: 'audio',
+        sample_rate: '44100',
+        channel_layout: 'stereo',
+        disposition: { default: 0 },
+        tags: {},
+      },
+      {
+        index: 2,
+        codec_name: 'subrip',
+        codec_type: 'subtitle',
+        disposition: { default: 0 },
+        tags: { language: 'chi', title: '中文字幕' },
+      },
+    ],
+    chapters: [],
+    format: {
+      format_name: 'matroska,webm',
+      duration: '2.000000',
+      start_time: '0.000000',
+      bit_rate: '700000',
+      tags: {},
+    },
+  },
+  '.png': {
+    streams: [
+      {
+        index: 0,
+        codec_name: 'png',
+        codec_type: 'video',
+        width: 64,
+        height: 64,
+        pix_fmt: 'rgb24',
+        disposition: { default: 1 },
+        tags: {},
+      },
+    ],
+    chapters: [],
+    format: { format_name: 'png_pipe', duration: '0.000000', start_time: '0.000000', tags: {} },
+  },
+  '.wav': {
+    streams: [
+      {
+        index: 0,
+        codec_name: 'pcm_s16le',
+        codec_type: 'audio',
+        sample_rate: '48000',
+        channel_layout: 'stereo',
+        sample_fmt: 's16',
+        bit_rate: '1536000',
+        disposition: { default: 1 },
+        tags: {},
+      },
+    ],
+    chapters: [],
+    format: { format_name: 'wav', duration: '1.000000', start_time: '0.000000', bit_rate: '1536000', tags: {} },
+  },
+};
+// `*${ext}`: the case word is the full probe target path, not the bare ext.
+// Every branch assigns `out`; the log records its byte length so the test can
+// tell "the fake answered with metadata" from "the fake fell through to {}" —
+// uploads alone cannot, because their assertions were written for the stderr
+// route and pass silently when the mapping route is starved.
+const fakeProbeCases = Object.entries(FAKE_PROBE_ANSWERS)
+  .map(([ext, answer]) => `  *${ext}) out='${JSON.stringify(answer)}' ;;`)
+  .join('\n');
+fs.writeFileSync(
+  path.join(fakeProbeDir, 'ffprobe'),
+  `#!/bin/sh
+[ -e '${fakeProbeSentinel}' ] && exit 1
+for last do :; done
+case "$last" in
+${fakeProbeCases}
+  *) out='{}' ;;
+esac
+printf '%s %s\\n' "$last" "\${#out}" >> '${fakeProbeLog}'
+printf '%s' "$out"
+`,
+);
+fs.chmodSync(path.join(fakeProbeDir, 'ffprobe'), 0o755);
+process.env.PATH = fakeProbeDir + path.delimiter + process.env.PATH;
 const routes = new Map();
 const tools = new Map();
 const settingsCalls = [];
@@ -216,9 +415,10 @@ assert.equal(typeof status.data.version, 'string', 'the plugin version is report
 assert.ok(status.data.version.length > 0, 'a version is present');
 assert.deepEqual(status.data.groups, ['convert', 'edit', 'view'], 'the built-in group order is reported');
 assert.deepEqual(status.data.formats.image, ['png', 'jpg', 'webp', 'gif', 'bmp', 'tiff', 'avif']);
-// The status names the active metadata route; which one depends on whether
-// this machine ships ffprobe next to ffmpeg (CI's apt ffmpeg does).
-assert.ok(['ffprobe', 'ffmpeg'].includes(status.data.probeMode), 'probeMode names the active probing route');
+// The fake ffprobe (or CI's real one) must be detected: the status names the
+// structured route, exactly. A detection regression and a hardcoded fallback
+// value both fail here.
+assert.equal(status.data.probeMode, 'ffprobe', 'the structured probing route is reported');
 if (!status.data.ffmpegPath) {
   // A silent skip is a green run that tested nothing; CI installs ffmpeg, so
   // missing it here is a broken environment, not a reason to pass.
@@ -226,6 +426,10 @@ if (!status.data.ffmpegPath) {
   process.exit(1);
 }
 const ffmpeg = status.data.ffmpegPath;
+// The fake only wins where no real ffprobe sits next to ffmpeg (this dev
+// box); CI's apt install puts one there and the real binary answers instead,
+// so the fake-log assertions below are scoped by this flag.
+const fakeProbing = !fs.existsSync(path.join(path.dirname(ffmpeg), 'ffprobe'));
 
 // --- image: upload, convert, preview -------------------------------------
 const sample = path.join(outDir, 'sample.png');
@@ -752,6 +956,29 @@ const coverUp = await call('upload?name=cover.m4a', { method: 'POST', body: fs.r
 assert.equal(coverUp.data.kind, 'audio');
 assert.equal(coverUp.data.meta.video, null, 'cover art must not become the picture track');
 assert.equal(coverUp.data.meta.audio.codec, 'aac');
+
+// Fake-green guards: the ffprobe route really carried this suite (the log is
+// empty when probing silently skipped it), and a broken ffprobe must fall
+// back to stderr parsing without the caller noticing. On CI the real ffprobe
+// shadows the fake, so the log part is dev-only; the fallback upload still
+// asserts correct behaviour either way.
+if (fakeProbing) {
+  const fakeCalls = fs.readFileSync(fakeProbeLog, 'utf8').trim().split('\n');
+  assert.ok(fakeCalls.length > 0, 'uploads were probed through the fake ffprobe');
+  // Upload assertions alone cannot prove the mapping route carried them (they
+  // pass on the stderr route too, silently); an answer bigger than '{}' does.
+  assert.ok(
+    fakeCalls.some((line) => Number(line.split(' ').pop()) > 100),
+    'the fake ffprobe answered with metadata, not {}',
+  );
+}
+fs.writeFileSync(fakeProbeSentinel, 'x');
+const fallbackSrc = path.join(outDir, 'fallback.wav');
+execFileSync(ffmpeg, ['-y', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=520', '-t', '1', fallbackSrc]);
+const fallbackUp = await call('upload?name=fallback.wav', { method: 'POST', body: fs.readFileSync(fallbackSrc) });
+assert.equal(fallbackUp.data.kind, 'audio', 'a broken ffprobe falls back to the stderr route');
+assert.ok(Math.abs(fallbackUp.data.duration - 1) < 0.3, `fallback duration ${fallbackUp.data.duration}`);
+fs.rmSync(fakeProbeSentinel);
 
 // --- every advertised format must actually convert -----------------------
 const audioSrc = path.join(outDir, 'tone.m4a');
