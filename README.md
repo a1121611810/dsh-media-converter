@@ -1,5 +1,7 @@
 # dsh-media-converter
 
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/a1121611810/dsh-media-converter)
+
 DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音轨/画面、字幕导出、图片压缩、元数据查看与改写、Base64 编解码。支持一次处理多个文件，全部在本机用 ffmpeg 完成，文件不出本机。
 
 ![icon](icon.svg)
