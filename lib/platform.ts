@@ -6,6 +6,9 @@
 
 import path from 'node:path';
 
+import { HW_BACKENDS } from './plan.js';
+import type { HwBackend, HwBackendId } from './plan.js';
+
 // Windows refuses these names even with an extension (CON.txt is still CON).
 const WIN_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
@@ -139,8 +142,36 @@ export function safeBaseName(raw: string, platform = process.platform): string {
   return stem;
 }
 
-// The hardware transcode path speaks videotoolbox, which only exists on
-// Apple platforms; everywhere else the caller gets the software plan.
-export function hardwarePathAllowed(platform: string): boolean {
-  return platform === 'darwin';
+// The hardware backends a platform may use, best first. The probe then
+// checks whether this machine can really run one of them; a platform without
+// a list — or a machine without a matching GPU — falls back to the software
+// plan.
+export function hardwareBackendsFor(platform: string): HwBackendId[] {
+  if (platform === 'darwin') return ['videotoolbox'];
+  if (platform === 'win32') return ['nvenc', 'amf', 'qsv'];
+  return [];
+}
+
+// The backend this machine can really run: the first candidate whose encoder
+// the binary carries, whose hardware decoder is there, and whose device
+// answers a test encode. The device check is injected, so the decision can be
+// checked on any host — with or without a graphics card.
+export async function pickBackend(
+  platform: string,
+  encoders: Iterable<string>,
+  hwaccels: Iterable<string>,
+  deviceReady: (backend: HwBackend) => Promise<boolean>,
+): Promise<HwBackend | null> {
+  const encoderNames = new Set(encoders);
+  const hwaccelNames = new Set(hwaccels);
+  const candidates = hardwareBackendsFor(platform)
+    .map((id) => HW_BACKENDS[id])
+    .filter((backend) => encoderNames.has(backend.encoder) && hwaccelNames.has(backend.hwaccel));
+  if (!candidates.length) return null;
+  // Every candidate is checked at once: a driver that hangs costs one wait,
+  // not one per candidate. The priority is unchanged — the first candidate
+  // in order that works wins.
+  const ready = await Promise.all(candidates.map((backend) => deviceReady(backend).catch(() => false)));
+  const index = ready.findIndex((ok) => ok);
+  return index === -1 ? null : candidates[index];
 }

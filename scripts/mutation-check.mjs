@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 假绿防线：对源码逐一注入已知的「回归性突变」，断言 host 测试一定转红。
+// 假绿防线：对源码逐一注入已知的「回归性突变」，断言对应测试一定转红。
 // 任一突变后测试仍绿 = 测试是摆设（false green），本脚本以非零退出。
 //
 // 纪律（来自 gotchas/attack-script-hardcoded-path-false-green 的本仓适配）：
@@ -15,6 +15,10 @@
 //   使用行）都会触发 TS6133 构建失败，测试根本没跑——那不是红。要换成
 //   保活读取的等价语义突变：字段用 `queueLimit && 0`（A2），删除型整行改用
 //   反转条件（A3 的 `===` → `!==`），调用点静态化时连 import 一起处理（A7）。
+//
+// 第三个坑（本次新增）：硬件编码的新逻辑一半在 lib/ 里，lib 的测试是纯函数
+// 测试，不需要 ffmpeg。所以每个突变可以点名自己的源文件、测试和产物文件，
+// 默认仍是 index.ts + host.test.mjs + dist/index.js。
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -22,17 +26,42 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const HOST_SOURCE = path.join(ROOT, 'index.ts');
-const DIST_HOST = path.join(ROOT, 'dist', 'index.js');
-const HOST_TEST = path.join(ROOT, 'test', 'host.test.mjs');
+// A mutant may point at another source file, another test and another built
+// file. The defaults keep the original behaviour.
+const DEFAULTS = { source: 'index.ts', test: 'test/host.test.mjs', dist: 'dist/index.js' };
 
-const original = fs.readFileSync(HOST_SOURCE, 'utf8');
+/** @param {object} mutant @param {'source'|'test'|'dist'} key */
+const pathOf = (mutant, key) => path.join(ROOT, mutant[key] || DEFAULTS[key]);
+
+// The pristine text of every file a mutant touches, so each round starts from
+// the same tree and the repository is left as it was found.
+const originals = new Map();
+function originalOf(file) {
+  if (!originals.has(file)) originals.set(file, fs.readFileSync(file, 'utf8'));
+  return originals.get(file);
+}
 
 /** @param {string} s @param {string} oldText @param {string} newText */
 function replaceOnce(s, oldText, newText) {
   if (!s.includes(oldText)) throw new Error(`源码锚点缺失：${oldText.slice(0, 60)}…`);
   if (s.indexOf(oldText) !== s.lastIndexOf(oldText)) throw new Error(`源码锚点不唯一：${oldText.slice(0, 60)}…`);
   return s.replace(oldText, newText);
+}
+
+// Windows scanners can hold a source file open for a moment, and a
+// transient lock must not abort the gate or leave the tree mutated. Retrying
+// the write is enough; the tree is only rewritten with the same bytes.
+function writeFileRobust(file, text) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.writeFileSync(file, text);
+      return;
+    } catch (err) {
+      if (attempt >= 4) throw err;
+      // 100ms, 200ms, 400ms, 800ms
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100 * 2 ** attempt);
+    }
+  }
 }
 
 /** @param {string} s @param {string} line 整行去掉（行首空白任意） */
@@ -124,16 +153,170 @@ const MUTANTS = [
     expect: '指向输出目录外的账本行绝不能 unlink 其文件，突变后 escape.txt 被删 → 测试红',
     delete: true,
   },
+  {
+    id: 'A9',
+    name: '硬件后端不再经过真机验证（设备检查形同虚设）',
+    // deviceCheck 仍在调用（不能让它变成只声明不使用，否则 TS6133 构建失败
+    // = 假红），只是它的结果不再决定选哪个后端。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        '      await run(deviceArgs(backend), DEVICE_TIMEOUT_MS);\n      return true;\n    } catch {\n      return false;\n    }',
+        '      await run(deviceArgs(backend), DEVICE_TIMEOUT_MS);\n      return true;\n    } catch {\n      return backend.encoder.length > 0;\n    }',
+      ),
+    distAnchor: 'backend.encoder.length > 0',
+    expect: '显卡不能编码时不得给用户 GPU 开关，突变后坏设备也报 nvenc → 测试红',
+  },
+  {
+    id: 'A10',
+    name: 'Windows 候选后端被清空（Windows 永远没有硬件路径）',
+    source: 'lib/platform.ts',
+    test: 'test/platform.test.mjs',
+    dist: 'dist/lib/platform.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "if (platform === 'win32') return ['nvenc', 'amf', 'qsv'];",
+        "if (platform === 'win32') return [];",
+      ),
+    distAnchor: '        return [];',
+    expect: 'win32 必须给出 nvenc/amf/qsv 三个候选，突变后为空 → 测试红',
+  },
+  {
+    id: 'A11',
+    name: 'NVENC 编码器名写错（真实转码会立刻失败）',
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) => replaceOnce(s, "encoder: 'h264_nvenc',", "encoder: 'h264_nvencc',"),
+    distAnchor: 'h264_nvencc',
+    expect: 'nvenc 后端必须用 h264_nvenc，突变后拼出 ffmpeg 不认识的编码器 → 测试红',
+  },
+  {
+    id: 'A12',
+    name: '设备检查又用回长超时（驱动挂住就拖住面板）',
+    // 设备检查会启动显卡驱动，必须有自己的短时钟：挂住的驱动只该等一次。
+    // Math.max 而不是直接换成 FFMPEG_TIMEOUT_MS：那样 DEVICE_TIMEOUT_MS
+    // 就没人用了，TS6133 让构建炸掉——那是假红，不是测试红。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'await run(deviceArgs(backend), DEVICE_TIMEOUT_MS);',
+        'await run(deviceArgs(backend), Math.max(DEVICE_TIMEOUT_MS, FFMPEG_TIMEOUT_MS));',
+      ),
+    distAnchor: 'Math.max(DEVICE_TIMEOUT_MS',
+    expect: '设备检查必须用比编码器列表更短的时钟，突变后驱动挂住会拖住面板 → 测试红',
+  },
+  {
+    id: 'A13',
+    name: '探测失败时格式表不再回退（面板一个格式都不能转）',
+    // 回退表被掏空，而不是换成 supportedFormats([])：那样 FORMATS 没人用了，
+    // TS6133 让构建炸掉——那是假红，不是测试红。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'build?.encoders.length ? supportedFormats(build.encoders) : FORMATS',
+        'build?.encoders.length ? supportedFormats(build.encoders) : { ...FORMATS, video: [] }',
+      ),
+    distAnchor: 'video: []',
+    expect: '列不出编码器的 ffmpeg 必须回退到内置格式表，突变后面板是空的 → 测试红',
+  },
+  {
+    id: 'A15',
+    name: '缓存命中时不落地判定（插件重载后永远「检测中」）',
+    // 判定必须写进实例：缓存按 ffmpeg 路径活得更久，插件重载后的新实例只能
+    // 接管已缓存的判定。把落地逻辑放回「缓存未命中」分支，命中缓存时就没人
+    // 写实例状态了——面板会永远停在「显卡驱动检测中」。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        `    let pending = deviceCache.get(bin);
+    if (!pending) {
+      pending = probeFfmpegDevice(process.platform, build, execRunner(bin)).catch(() => null);
+      deviceCache.set(bin, pending);
+    }
+    // The cache outlives the instance: whoever asks adopts the verdict, so a
+    // reloaded plugin does not wait for a probe that already ran.
+    return pending.then((backend) => {
+      hwBackend = backend;
+      deviceSettled = true;
+      return backend;
+    });`,
+        `    let pending = deviceCache.get(bin);
+    if (!pending) {
+      pending = probeFfmpegDevice(process.platform, build, execRunner(bin))
+        .catch(() => null)
+        .then((backend) => {
+          hwBackend = backend;
+          deviceSettled = true;
+          return backend;
+        });
+      deviceCache.set(bin, pending);
+    }
+    return pending;`,
+      ),
+    distAnchor: 'pending.then((backend)',
+    delete: true,
+    expect: '插件重载后的新实例必须接管已缓存的判定，突变后 GPU 开关永远不出现 → 测试红',
+  },
+  {
+    id: 'A14',
+    name: 'detecting 说反了（面板以为检测完了）',
+    apply: (s) => replaceOnce(s, 'detecting: !deviceSettled,', 'detecting: deviceSettled,'),
+    distAnchor: 'detecting: deviceSettled,',
+    expect: '设备检查没跑完时 detecting 必须为真，突变后面板不再等判定 → 测试红',
+  },
 ];
 
 function build() {
   execFileSync('npm', ['run', 'build:host'], { cwd: ROOT, stdio: 'pipe' });
 }
 
-/** @returns {{ code: number, out: string }} */
-function runHostTest() {
+// A killed run (Ctrl+C, a CI timeout, a crash) never reaches the finally
+// block, so the repository would keep the mutant and the next run's baseline
+// would go red for the wrong reason. The pristine sources are therefore
+// copied to a scratch directory before the first mutation, and a later run
+// restores them before it looks at anything else.
+const BACKUP = path.join(ROOT, '.mutation-backup');
+
+/** @param {string} dir @param {string} prefix @returns {string[]} relative paths of every file below dir */
+function listFiles(dir, prefix = '') {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? prefix + '/' + entry.name : entry.name;
+    if (entry.isDirectory()) out.push(...listFiles(path.join(dir, entry.name), rel));
+    else out.push(rel);
+  }
+  return out;
+}
+
+/** Restore a stale backup, then copy the pristine sources aside. @returns {boolean} true when a stale backup was restored */
+function prepareSources() {
+  let restored = false;
+  if (fs.existsSync(BACKUP)) {
+    for (const rel of listFiles(BACKUP)) {
+      writeFileRobust(path.join(ROOT, rel), fs.readFileSync(path.join(BACKUP, rel), 'utf8'));
+    }
+    restored = true;
+  }
+  fs.rmSync(BACKUP, { recursive: true, force: true });
+  for (const m of MUTANTS) {
+    const source = pathOf(m, 'source');
+    const dest = path.join(BACKUP, path.relative(ROOT, source));
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, fs.readFileSync(source));
+  }
+  return restored;
+}
+
+function clearBackup() {
+  fs.rmSync(BACKUP, { recursive: true, force: true });
+}
+
+/** @param {string} testFile @returns {{ code: number, out: string }} */
+function runTest(testFile) {
   try {
-    execFileSync('node', [HOST_TEST], { cwd: ROOT, stdio: 'pipe' });
+    execFileSync('node', [testFile], { cwd: ROOT, stdio: 'pipe' });
     return { code: 0, out: '' };
   } catch (err) {
     return {
@@ -149,17 +332,26 @@ function firstAssertion(out) {
   return match ? match[0].replace(/\s+/g, ' ').slice(0, 140) : out.split('\n').filter(Boolean).slice(-2).join(' ');
 }
 
+// The baseline runs every test the mutants rely on, so a test that is already
+// red is reported as a broken baseline instead of a mutant that did its job.
+const baselineTests = [...new Set([DEFAULTS.test, ...MUTANTS.map((m) => m.test || DEFAULTS.test)])];
+
 let failures = 0;
 try {
-  console.log('[mutation] 基线：构建 + host 测试必须全绿…');
-  build();
-  const baseline = runHostTest();
-  if (baseline.code !== 0) {
-    console.error(`[mutation] 基线即红，先修基线：\n${firstAssertion(baseline.out)}`);
-    process.exit(2);
+  if (prepareSources()) {
+    console.log('[mutation] 上一次运行被中断，已从备份恢复源码');
   }
-  const baselineDist = fs.readFileSync(DIST_HOST, 'utf8');
+  console.log('[mutation] 基线：构建 + 测试必须全绿…');
+  build();
+  for (const test of baselineTests) {
+    const baseline = runTest(path.join(ROOT, test));
+    if (baseline.code !== 0) {
+      console.error(`[mutation] 基线即红（${test}），先修基线：\n${firstAssertion(baseline.out)}`);
+      process.exit(2);
+    }
+  }
   for (const m of MUTANTS.filter((x) => x.delete)) {
+    const baselineDist = fs.readFileSync(pathOf(m, 'dist'), 'utf8');
     if (!baselineDist.includes(m.distAnchor)) {
       console.error(`[mutation] 突变 ${m.id} 的 dist 锚点本就不在产物里，攻击无效`);
       process.exit(2);
@@ -168,6 +360,10 @@ try {
   console.log('[mutation] 基线绿。开始逐突变注入…\n');
 
   for (const m of MUTANTS) {
+    const source = pathOf(m, 'source');
+    const test = pathOf(m, 'test');
+    const dist = pathOf(m, 'dist');
+    const original = originalOf(source);
     let mutated;
     try {
       mutated = m.apply(original);
@@ -176,7 +372,7 @@ try {
       failures += 1;
       continue;
     }
-    fs.writeFileSync(HOST_SOURCE, mutated);
+    writeFileRobust(source, mutated);
     try {
       build();
     } catch {
@@ -184,14 +380,17 @@ try {
       failures += 1;
       continue;
     }
-    const dist = fs.readFileSync(DIST_HOST, 'utf8');
-    const present = dist.includes(m.distAnchor);
+    const built = fs.readFileSync(dist, 'utf8');
+    const present = built.includes(m.distAnchor);
     if (m.delete ? present : !present) {
       console.error(`[mutation] ${m.id} dist 层断言失败：产物${present ? '仍含' : '不含'}锚点，测试读的不是这份构建`);
       failures += 1;
       continue;
     }
-    const result = runHostTest();
+    // test is already absolute (pathOf); joining ROOT again would hand node a
+    // path that does not exist, and the child would die with MODULE_NOT_FOUND
+    // instead of turning the assertion red.
+    const result = runTest(test);
     if (result.code !== 0 && /AssertionError/.test(result.out)) {
       console.log(`[mutation] ${m.id} 转红 ✓  ${m.name}`);
       console.log(`         预期：${m.expect}`);
@@ -205,19 +404,22 @@ try {
       console.error(`         突变后测试仍全绿——该用例没有守护住行为！\n`);
       failures += 1;
     }
-    fs.writeFileSync(HOST_SOURCE, original);
+    writeFileRobust(source, original);
   }
 
   console.log('[mutation] 恢复源码并做最终基线…');
-  fs.writeFileSync(HOST_SOURCE, original);
+  for (const [file, text] of originals) writeFileRobust(file, text);
   build();
-  const finalRun = runHostTest();
-  if (finalRun.code !== 0) {
-    console.error(`[mutation] 恢复后基线不绿！${firstAssertion(finalRun.out)}`);
-    failures += 1;
+  for (const test of baselineTests) {
+    const finalRun = runTest(path.join(ROOT, test));
+    if (finalRun.code !== 0) {
+      console.error(`[mutation] 恢复后基线不绿（${test}）！${firstAssertion(finalRun.out)}`);
+      failures += 1;
+    }
   }
 } finally {
-  if (fs.readFileSync(HOST_SOURCE, 'utf8') !== original) fs.writeFileSync(HOST_SOURCE, original);
+  for (const [file, text] of originals) writeFileRobust(file, text);
+  clearBackup();
 }
 
 if (failures > 0) {

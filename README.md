@@ -17,7 +17,7 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | Base64 | 当前文件 → `data:` URL；或粘贴 Base64 还原成文件 / 文本 |
 | 批量处理 | 按类型分组：视频/音频/图片各自一个目标；文本单独一段、不参与转换；读取中/未识别单独一段；逐组全选/质量、逐行进度/结果/取消 |
 | PTC 调度 | 批量转换可选：在 DSH 已注册模型里选一个（默认跟随主模型），模型只返回每文件 JSON 计划，宿主校验后交给 PTC 沙箱执行；整批按组多次求值，可超过单次 10 分钟上限；批次由宿主持有，切会话/关页面后继续；低推理档、分阶段进度；默认关，耗 token |
-| GPU / 直接拷贝 | macOS VideoToolbox 的 H.264 可勾选 GPU 编码（mp4/mov/mkv/flv/ts）；兼容编码/容器直接 `-c copy`，不重编码 |
+| GPU / 直接拷贝 | 显卡硬编的 H.264 可勾选 GPU 编码（mp4/mov/mkv/flv/ts）：macOS 走 VideoToolbox，Windows 走 NVENC / Intel Quick Sync / AMD AMF（自动探测后选一个）；兼容编码/容器直接 `-c copy`，不重编码 |
 | 取消 | 批量中途取消停当前 ffmpeg 并不再排队；单文件任务可随时取消；上传中也能中断传输 |
 
 界面分两层：**队列**是首页，负责一次处理多个文件；点某一行进入**文件详情**，那里是单个文件的操作页。
@@ -31,7 +31,7 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 - **分组与目标**：视频、音频、图片各自一段，组标题有“默认目标”；每一行还有自己的目标格式下拉，改单行只影响该行。图片段还有质量滑杆。文本单独一段、勾选禁用，详情只保留 Base64；读取中/上传失败单独一段，没有目标、不可批量。
 - **固定规则 vs PTC**：固定规则批量逐行串行（可预测、取消简单），靠 copy 和 GPU 提速；PTC 批量才走自适应 CPU 队列。
 - **自适应 CPU 调度**：[lib/schedule.ts](lib/schedule.ts) 每秒用 `os.cpus()` 的差值采样，EMA 平滑；平滑使用率 >60% 只跑 1 个，35–60% 2 个，<35% 最多 4 个。任务权重：视频 1、音频/图片 0.5、copy 0.25、GPU 0.5；GPU 另限 2 路。容量 >1 时给每个软件编码 ffmpeg 分 `-threads/-filter_threads`；运行中的任务不抢占。
-- **GPU（VideoToolbox）**：macOS 上安装的 ffmpeg 若带 `h264_videotoolbox`，批量卡出现“GPU 编码（VideoToolbox）”。对 mp4/mov/mkv/flv/ts 的 H.264 用硬件编码 + `-hwaccel videotoolbox`；按源码率估 `-b:v/-maxrate/-bufsize`，带 `-allow_sw 1`。WebM/VP9/AV1、图片、音频没有对应硬件编码，仍走 CPU；探测不到就隐藏开关。
+- **GPU（显卡硬编）**：批量卡出现“GPU 编码（后端名）”——macOS 是 VideoToolbox，Windows 是 NVIDIA NVENC / Intel Quick Sync / AMD AMF，按这个优先级自动选一个。探测分三步：`--encoders` 看二进制里有没有该编码器、`--hwaccels` 看硬解在不在、最后真编一帧确认这台机器的显卡和驱动真的能用；三步都过才显示开关，所以“ffmpeg 里有 nvenc 但机器没 N 卡”不会给出一个必然失败的开关。面板打开即在后台跑第三步，不阻塞界面；检测没结束时批量卡显示“显卡驱动检测中…”，点“开始转换”会等结果，不会悄悄退回软编（服务端也会等，最长 8 秒）。对 mp4/mov/mkv/flv/ts 的 H.264 走硬解+硬编的零拷贝路径（NVENC `-hwaccel cuda`、QSV `-hwaccel qsv`、AMF `-hwaccel d3d11va`）；按源码率估 `-b:v/-maxrate/-bufsize`。显卡解不了这个文件时（例如老核显上的 VP9）自动退回 CPU 解码 + 显卡编码重跑一次，编码器不变，结果仍标“GPU 编码”。WebM/VP9/AV1、图片、音频没有对应硬件编码，仍走 CPU。
 - **直接拷贝**：h264/hevc + aac/mp3 等兼容组合直接 `-c copy`（mp4/mov/mkv/webm/ts 与同编码音频容器），有裁剪或编码不兼容才重编码；行上显示“直接拷贝”。
 - **PTC 可选模型**：默认跟随 DSH 当前主模型；下拉列出已注册模型；显式模型不在目录里会报错，不回退默认。对选中模型取最低推理档，`maxTokens` 6000；模型只返回 `{"files":[{"id","format","quality"}...]}`，宿主校验 id/格式/质量后拼程序交给 PTC 执行。分组和时限都按实际情况动态算：每个文件的耗时由本机实测吞吐（copy / 硬件编码 / 视频 / 音频各自维护，跑过的任务会持续校准）估算，按「整组估算 ≤ 运行时上限」装组；组内文件数上限随 CPU（约 4×核心数，夹在 4–64），并发波宽随当前 CPU 负载（4–16 个 binding 调用）。每组一次沙箱求值、各自限时，整批可以超过单次 10 分钟；面板会显示基于同一估算的剩余时间。
 - **实测**（10 秒 1080p30 合成样本，机器负载约 4.6；不是你的真实文件）：
@@ -96,7 +96,7 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 - **ffmpeg**：插件按顺序查找 `config.ffmpegPath` → `FFMPEG_PATH` → `PATH` → 常见安装目录 → imageio-ffmpeg 自带的静态包。找不到时页面顶部会提示安装方式。
   - macOS/Linux：`/opt/homebrew/bin`、`/usr/local/bin`；imageio 静态包在 `~/Library/Python/*/lib/python/site-packages/imageio_ffmpeg/binaries` 或 `~/.local/lib/python*/site-packages/...`。
   - Windows：`PATH` 里找 `ffmpeg.exe`（装在 `C:\ffmpeg\bin` 也认），imageio 静态包在 `%LOCALAPPDATA%\imageio_ffmpeg\binaries` 或 `%APPDATA%\Python\Python*\site-packages\...`。
-  - macOS GPU 编码需要 ffmpeg 带 `h264_videotoolbox`（本机 imageio 7.1 自带）；插件探测后显示开关，没有就隐藏。
+  - GPU 编码需要 ffmpeg 带对应编码器：macOS `h264_videotoolbox`（本机 imageio 7.1 自带），Windows `h264_nvenc` / `h264_qsv` / `h264_amf`（gyan.dev、BtbN 的 Windows 构建都带）；插件探测后显示开关，没有就隐藏。
   - 手动指定路径时，Windows 下写不写 `.exe` 都行。
 - **ffprobe（可选增强）**：找到 ffprobe 时元数据改用它输出结构化 JSON 解析（封面图、5.1 这类带数字的声道布局、负 start 时间等边界情况更可靠）。探测顺序是 ffmpeg 同目录（完整安装两者成对出现）→ `PATH` → 常见安装目录；找不到（imageio-ffmpeg 只带 ffmpeg 单个二进制）自动回退到解析 `ffmpeg -i` 的 stderr，功能不受影响。设置页「当前生效」列表会显示当前解析模式，兼容模式下给出安装指引——装好完整版 ffmpeg 后回本页点「保存」即切换，无需重启。
 
@@ -149,10 +149,10 @@ npm run check:build   # 改了源码却没重新构建时失败（CI 用）
 ```bash
 node test/client-bundle.test.mjs  # 产物契约：loader 握手、React 注入、两个槽位
 node test/client-lib.test.mjs     # 面板纯函数：格式化、时间码、裁剪窗口、按类型目标
-node test/plan.test.mjs           # 格式表、参数、元数据解析、裁剪、copy/GPU/容量/线程
+node test/plan.test.mjs           # 格式表、参数、元数据解析、裁剪、copy/显卡后端/容量/线程
 node test/base64.test.mjs         # 魔数嗅探、Base64 往返、文本回退
-node test/platform.test.mjs       # ffmpeg 查找顺序、文件管理器命令、文件名规则、目录归属判定（含 Windows 分支）
-node test/host.test.mjs           # 真 ffmpeg 端到端：27 种格式矩阵 + 字幕 + 标签改写 + 取消 + 失败路径 + Agent 工具 + 上传上限 + PTC JSON 计划/模型目录/进度 + copy/GPU
+node test/platform.test.mjs       # ffmpeg 查找顺序、文件管理器命令、文件名规则、目录归属判定、各平台显卡后端与并行设备检查（含 Windows 分支）
+node test/host.test.mjs           # 真 ffmpeg 端到端：27 种格式矩阵 + 字幕 + 标签改写 + 取消 + 失败路径 + Agent 工具 + 上传上限 + PTC JSON 计划/模型目录/进度 + copy + 注入式探测显卡后端 + 硬解失败重试路径 + 坏 ffmpeg 的格式表回退
 ```
 
 `test/host.test.mjs` 需要本机有 ffmpeg；没有会**失败**（不是跳过——静默跳过等于假绿）。
@@ -190,11 +190,11 @@ src/client/vue/           FileQueue（队列行）、QueueGroup（按类型分�
 src/client/lib.ts         纯函数（格式化/时间码/裁剪窗口）+ fetch 封装，不碰 DOM
 vite.config.ts            构建：IIFE + __ModuleLoader__ 握手 + React 走宿主模块表
 client.js                 构建产物（提交进仓库，勿手改）
-index.ts                  宿主：/api/media-convert/* 路由、ffmpeg 任务、PTC 模型目录/计划/进度、自适应队列、GPU 探测、预览与 Base64、Agent 工具 media_toolbox
-lib/plan.ts               格式表、参数生成（含 copy/GPU/线程）、元数据解析（ffmpeg stderr 与 ffprobe JSON 两路，同一 MediaMeta）、裁剪（也定义面板要用的媒体类型）
+index.ts                  宿主：/api/media-convert/* 路由、ffmpeg 任务、PTC 模型目录/计划/进度、自适应队列、显卡后端探测、预览与 Base64、Agent 工具 media_toolbox
+lib/plan.ts               格式表、参数生成（含 copy/显卡硬编/线程）、显卡后端表（VideoToolbox/NVENC/QSV/AMF）、元数据解析（ffmpeg stderr 与 ffprobe JSON 两路，同一 MediaMeta）、裁剪（也定义面板要用的媒体类型）
 lib/schedule.ts           自适应容量、任务权重、每任务线程数（纯函数）
 lib/base64.ts             Base64 嗅探与还原
-lib/platform.ts           ffmpeg 查找、文件管理器、文件名规则（纯函数，跨平台分支可测）
+lib/platform.ts           ffmpeg 查找、文件管理器、文件名规则、各平台可用的显卡后端（纯函数，跨平台分支可测）
 test/                     七套自检（.mjs，跑编译产物）
 dist/                     构建产物：宿主入口 dist/index.js（npm 包入口）+ dist/lib/、dist/src/
 ```
@@ -211,7 +211,7 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位。`t` 由平台按槽�
 - 批量提取只处理视频；不适用或没有音轨的行标「跳过」，不算失败。
 - 固定规则批量逐行串行；PTC 批量走自适应 CPU 队列（1–4 路，GPU 另限 2 路），并按组多次沙箱求值；上传中或处理中不能增删文件。
 - PTC 只用于批量转换且至少 2 个文件；默认关，开关不随页面保存。可选已注册模型；模型只返回每文件计划；每次运行仍会调用一次主模型（消耗 token）；单次求值默认 2 分钟、最长 10 分钟；整批会拆成多组，因此可以超过 10 分钟。
-- PTC 不提供改分辨率、合并或 remux 参数；GPU 只覆盖 H.264 的 mp4/mov/mkv/flv/ts；直接拷贝只覆盖兼容的编码/容器矩阵。
+- PTC 不提供改分辨率、合并或 remux 参数；GPU 只覆盖 H.264 的 mp4/mov/mkv/flv/ts（macOS 用 VideoToolbox，Windows 用 NVENC/QSV/AMF 三者之一）；直接拷贝只覆盖兼容的编码/容器矩阵。
 - 上传的临时副本保留 2 小时后自动删除。
 - Windows 上「在资源管理器中显示」用 `explorer /select,`，macOS 用 `open -R`，Linux 用 `xdg-open`（打开所在目录）。
 

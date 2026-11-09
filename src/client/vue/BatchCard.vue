@@ -12,6 +12,10 @@ const props = defineProps<{
   usePtc: boolean;
   useGpu: boolean;
   showGpu: boolean;
+  // The Host is still checking the graphics driver.
+  gpuPending: boolean;
+  // The backend the Host probed, e.g. "NVIDIA NVENC".
+  gpuLabel: string;
   models: PtcModelOption[];
   defaultModel: { provider: string; model: string; name: string } | null;
   modelKey: string;
@@ -50,6 +54,9 @@ watch(
 const setOperation = (value: Operation) => emit('update:operation', value);
 const setPtc = (event: Event) => emit('ptc', (event.target as HTMLInputElement).checked);
 const setGpu = (event: Event) => emit('gpu', (event.target as HTMLInputElement).checked);
+// The switch names the backend the Host found, so "GPU" is never a lie about
+// which encoder will run.
+const gpuTitle = computed(() => props.t('batch.gpu').replace('%s', props.gpuLabel || 'GPU'));
 const setModel = (event: Event) => emit('update:model-key', (event.target as HTMLSelectElement).value);
 const modelValue = (item: PtcModelOption) => item.provider + '\u0000' + item.id;
 const modelGroups = computed(() => {
@@ -144,9 +151,12 @@ const defaultLabel = computed(() => {
       <div v-if="showGpu" class="mc-ptc-row">
         <label class="mc-check mc-ptc-check">
           <input type="checkbox" :checked="useGpu" :disabled="disabled" @change="setGpu" />
-          {{ t('batch.gpu') }}
+          {{ gpuTitle }}
         </label>
         <span class="mc-hint">{{ t('batch.gpuHint') }}</span>
+      </div>
+      <div v-else-if="gpuPending" class="mc-ptc-row">
+        <span class="mc-hint">{{ t('batch.gpuDetecting') }}</span>
       </div>
     </template>
 

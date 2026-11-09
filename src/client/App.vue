@@ -90,6 +90,8 @@ const onGpuToggle = (value: boolean) => {
   gpuTouched = true;
   useGpu.value = value;
 };
+// True while the panel waits for the Host's graphics driver check to land.
+const gpuWaiting = ref(false);
 const GPU_FORMATS = new Set(['mp4', 'mov', 'mkv', 'flv', 'ts']);
 const ptcModels = ref<PtcModelOption[]>([]);
 const ptcDefaultModel = ref<ModelsResponse['default']>(null);
@@ -298,6 +300,7 @@ const anyUploading = computed(() => items.value.some((item) => item.state === 'u
 const busy = computed(
   () =>
     batchRunning.value ||
+    gpuWaiting.value ||
     anyUploading.value ||
     items.value.some((item) => item.state === 'converting' || item.state === 'cancelling'),
 );
@@ -336,12 +339,18 @@ const videoTargets = computed(() => batchTargets.value.filter((item) => item.upl
 const canAudio = computed(() => audioTargets.value.length > 0);
 const canVideo = computed(() => videoTargets.value.length > 0);
 const ptcAllowed = computed(() => operation.value === 'convert' && batchTargets.value.length >= 2);
-const showGpu = computed(
+// The batch holds a video whose target the GPU can encode: only then is the
+// GPU switch worth showing.
+const gpuRelevant = computed(
   () =>
     operation.value === 'convert' &&
-    Boolean(status.value?.hardware?.h264) &&
     batchTargets.value.some((item) => item.upload!.kind === 'video' && GPU_FORMATS.has(effectiveTarget(item))),
 );
+const showGpu = computed(() => gpuRelevant.value && Boolean(status.value?.hardware?.h264));
+// The Host is still checking the graphics driver: the switch waits for it.
+const showGpuPending = computed(() => gpuRelevant.value && Boolean(status.value?.hardware?.detecting));
+// The backend the Host probed (NVIDIA NVENC, Intel Quick Sync, AMD AMF, …).
+const gpuLabel = computed(() => status.value?.hardware?.backendLabel || 'GPU');
 const batchSummary = computed(() => {
   const counts: Record<ConvertibleKind, number> = { video: 0, audio: 0, image: 0 };
   for (const item of batchTargets.value) {
@@ -921,14 +930,34 @@ async function loadModels() {
 
 async function loadStatusWithRetry() {
   let attempt = 0;
-  while (!disposed) {
+  for (;;) {
     const data = await fetchStatus();
-    if (data || attempt >= 9 || disposed) break;
-    attempt += 1;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(4000, 400 * attempt)));
+    if (disposed) return;
+    if (!data) {
+      // The Host is not answering yet: try again, a little slower each time.
+      attempt += 1;
+      if (attempt >= 9) break;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(4000, 400 * attempt)));
+      continue;
+    }
+    // The graphics driver check runs in the background; ask again until it
+    // lands, so the GPU switch shows up as soon as it is known.
+    if (!data.hardware.detecting) break;
+    await new Promise((resolve) => setTimeout(resolve, 1200));
   }
   if (!disposed && !status.value) {
     networkError.value = statusError ? t('error.service').replace('%s', statusError) : t('error.network');
+  }
+}
+
+// Wait for the graphics driver check to land. The Host times the check out
+// on its own, so this ends either way.
+async function waitForGpu(): Promise<void> {
+  for (let i = 0; i < 20 && showGpuPending.value; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (disposed) return;
+    const data = await fetchStatus();
+    if (!data) return;
   }
 }
 
@@ -1361,6 +1390,17 @@ async function runServerBatch(rows: Item[], ptc = false) {
 
 async function startBatch() {
   if (busy.value || !batchTargets.value.length) return;
+  // The backend is not known yet: wait for the driver check instead of
+  // quietly converting on the CPU.
+  if (showGpuPending.value) {
+    gpuWaiting.value = true;
+    try {
+      await waitForGpu();
+    } finally {
+      gpuWaiting.value = false;
+    }
+    if (busy.value || disposed) return;
+  }
   batchError.value = '';
   lastRun.value = null;
   ptcTiming.value = null;
@@ -1845,6 +1885,8 @@ watch([action, panelOpen], async () => {
             :use-ptc="usePtc"
             :use-gpu="useGpu"
             :show-gpu="showGpu"
+            :gpu-pending="showGpuPending"
+            :gpu-label="gpuLabel"
             :models="ptcModels"
             :default-model="ptcDefaultModel"
             :model-key="ptcModelKey"

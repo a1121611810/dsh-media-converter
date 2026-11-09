@@ -5,9 +5,10 @@ import {
   binaryNames,
   expandDirs,
   ffmpegCandidates,
-  hardwarePathAllowed,
+  hardwareBackendsFor,
   imageioPatterns,
   isInsideDir,
+  pickBackend,
   probeCandidates,
   revealCommand,
   safeBaseName,
@@ -121,9 +122,86 @@ assert.equal(safeBaseName('', 'darwin'), 'input');
 assert.equal(safeBaseName('.png', 'darwin'), 'output', 'a name that is only an extension');
 
 // --- the hardware transcode path ------------------------------------------------
-// videotoolbox is Apple-only; elsewhere the hardware ask degrades to software.
-assert.equal(hardwarePathAllowed('darwin'), true);
-assert.equal(hardwarePathAllowed('win32'), false);
-assert.equal(hardwarePathAllowed('linux'), false);
+// The platform only says which backends may be tried; the probe then checks
+// whether this machine can really run one of them.
+assert.deepEqual(hardwareBackendsFor('darwin'), ['videotoolbox']);
+assert.deepEqual(hardwareBackendsFor('win32'), ['nvenc', 'amf', 'qsv']);
+assert.deepEqual(hardwareBackendsFor('linux'), [], 'no Linux backend yet');
+
+// --- picking the backend this machine can really run -------------------------
+// The device check is injected, so the decision is checked on any host.
+const ALL_ENCODERS = ['h264_nvenc', 'h264_amf', 'h264_qsv'];
+const ALL_ACCELS = ['cuda', 'd3d11va', 'qsv'];
+const ready = (id) => async (backend) => backend.id === id;
+
+assert.equal(
+  (await pickBackend('win32', ALL_ENCODERS, ALL_ACCELS, ready('nvenc')))?.id,
+  'nvenc',
+  'the discrete GPU wins',
+);
+assert.equal(
+  (await pickBackend('win32', ALL_ENCODERS, ALL_ACCELS, ready('amf')))?.id,
+  'amf',
+  'AMD is tried before Intel',
+);
+assert.equal(
+  (await pickBackend('win32', ALL_ENCODERS, ALL_ACCELS, ready('qsv')))?.id,
+  'qsv',
+  'Intel is the last resort',
+);
+
+// A GPU that cannot encode is not offered, whatever the binary carries.
+assert.equal(
+  await pickBackend('win32', ALL_ENCODERS, ALL_ACCELS, async () => false),
+  null,
+  'a failing device check means no backend',
+);
+
+// An encoder the binary does not carry is not considered.
+assert.equal(
+  (await pickBackend('win32', ['h264_qsv'], ['qsv'], async () => true))?.id,
+  'qsv',
+  'only the encoders the binary carries count',
+);
+assert.equal(
+  await pickBackend('win32', ['libx264'], ['cuda'], async () => true),
+  null,
+  'a binary without a hardware encoder gets none',
+);
+
+// Every candidate that passes the cheap checks is checked, and the priority
+// still decides: a driver that hangs costs one wait, not one per candidate.
+const checked = [];
+await pickBackend('win32', ALL_ENCODERS, ALL_ACCELS, async (backend) => {
+  checked.push(backend.id);
+  return backend.id === 'qsv';
+});
+assert.deepEqual(checked.sort(), ['amf', 'nvenc', 'qsv'], 'every candidate is checked');
+assert.equal(
+  (
+    await pickBackend(
+      'win32',
+      ALL_ENCODERS,
+      ALL_ACCELS,
+      async (backend) => backend.id === 'nvenc' || backend.id === 'amf',
+    )
+  )?.id,
+  'nvenc',
+  'the first candidate in order still wins',
+);
+
+// A candidate whose check throws must not sink the probe.
+const throwing = await pickBackend('win32', ALL_ENCODERS, ALL_ACCELS, async (backend) => {
+  if (backend.id === 'nvenc') throw new Error('driver hung');
+  return backend.id === 'qsv';
+});
+assert.equal(throwing?.id, 'qsv', 'a throwing device check does not sink the probe');
+
+// macOS keeps its own backend, Linux has none yet.
+assert.equal(
+  (await pickBackend('darwin', ['h264_videotoolbox'], ['videotoolbox'], async () => true))?.id,
+  'videotoolbox',
+);
+assert.equal(await pickBackend('linux', ALL_ENCODERS, ALL_ACCELS, async () => true), null, 'no Linux backend yet');
 
 console.log('platform.test.mjs: ok');

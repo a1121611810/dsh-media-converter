@@ -29,7 +29,9 @@ function sources(dir, out = []) {
 // zero. Braces are not counted — a value may hold them ({name} is the
 // platform's own placeholder syntax) and that would throw the count off.
 function block(text, marker) {
-  const lines = text.split('\n');
+  // A Windows checkout has CRLF line endings, and the block ends at a line
+  // that must compare equal.
+  const lines = text.split(/\r?\n/);
   const start = lines.findIndex((line) => line.includes(marker));
   assert.notEqual(start, -1, `locales.ts is missing "${marker}"`);
   const end = lines.findIndex((line, i) => i > start && (line === '};' || line === '} as const;'));
