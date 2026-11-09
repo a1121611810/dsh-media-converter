@@ -112,6 +112,12 @@ const ZH: Record<string, string> = {
   'history.preview': '预览',
   'history.reveal': '打开所在位置',
   'history.loadMore': '加载更多',
+  'history.selectAll': '全选',
+  'history.deleteFiles': '同时删除真实文件',
+  'history.deleteSelected': '删除所选',
+  'history.delete': '删除',
+  'history.confirm': '再点一次确认',
+  'history.confirmFiles': '再点一次：文件将一并删除',
   'error.network': '无法连接到本地服务，请确认插件已启用。',
   'error.service': '本地服务拒绝了请求：%s。请重启 DSH 后再试。',
   'footer.out': '输出目录',
@@ -392,6 +398,12 @@ const EN: Record<string, string> = {
   'history.preview': 'Preview',
   'history.reveal': 'Show in folder',
   'history.loadMore': 'Load more',
+  'history.selectAll': 'Select all',
+  'history.deleteFiles': 'Also delete output files',
+  'history.deleteSelected': 'Delete selected',
+  'history.delete': 'Delete',
+  'history.confirm': 'Click again to confirm',
+  'history.confirmFiles': 'Click again: files will be deleted too',
   'error.network': 'Cannot reach the local service; check that the plugin is enabled.',
   'error.service': 'The local service refused the request: %s. Restart DSH and try again.',
   'footer.out': 'Output folder',
@@ -1138,6 +1150,9 @@ const CSS = `
       .mc-history-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 200px; border: 1.5px dashed var(--dsw-alias-border-l2, rgba(128,128,128,0.5)); border-radius: 16px; }
       .mc-history-empty svg { width: 34px; height: 34px; color: var(--dsw-alias-label-tertiary, inherit); }
       .mc-history-more { margin-top: 10px; }
+      .mc-history-bar { display: flex; align-items: center; gap: 14px; padding: 7px 12px; margin-bottom: 10px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.3)); border-radius: 10px; }
+      .mc-history-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--dsw-alias-label-secondary, inherit); cursor: pointer; user-select: none; }
+      li .mc-history-check { flex: none; margin-top: 6px; cursor: default; }
       .mc-ok { font-weight: 600; color: var(--dsw-alias-state-success-primary, #2ba471); }
       .mc-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; word-break: break-all; padding: 8px 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); }
       .mc-foot { display: flex; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-secondary, inherit); word-break: break-all; }

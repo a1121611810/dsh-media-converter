@@ -1847,6 +1847,81 @@ assert.ok(!appended.out.includes('/'), 'the row stores the file NAME, not an abs
 assert.ok(appended.size > 0, 'a done row carries the real output size');
 assert.equal(typeof appended.at, 'number');
 
+// --- history delete -----------------------------------------------------------
+// Record-only delete drops the ledger row and keeps the output file on disk.
+const delOnly = await histCall('history/delete', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ at: 1000, out: 'kept.mp4' }] }),
+});
+assert.equal(delOnly.data.ok, true);
+assert.equal(delOnly.data.removed, 1);
+assert.equal(delOnly.data.filesDeleted, 0);
+assert.ok(fs.existsSync(keptOutput), 'record-only delete leaves the output file on disk');
+const linesAfterOnly = fs.readFileSync(historyFile, 'utf8').trim().split('\n').filter(Boolean);
+assert.equal(linesAfterOnly.length, 4, 'one ledger row was dropped');
+
+// A batch delete drops several rows in one call.
+const delBatch = await histCall('history/delete', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [
+      { at: 2000, out: 'gone.mp4' },
+      { at: 3000, out: 'err.mp4' },
+    ],
+  }),
+});
+assert.equal(delBatch.data.removed, 2);
+const linesAfterBatch = fs.readFileSync(historyFile, 'utf8').trim().split('\n').filter(Boolean);
+assert.equal(linesAfterBatch.length, 2, 'two more rows were dropped');
+assert.ok(
+  linesAfterBatch.some((l) => l.includes('"torn"')),
+  'the torn line rides through the rewrite',
+);
+
+// deleteFiles unlinks the matched output file itself.
+const lastRow = JSON.parse(linesAfterBatch.find((l) => !l.includes('"torn"')));
+const lastRowOut = path.join(outDir, lastRow.out);
+assert.ok(fs.existsSync(lastRowOut));
+const delFile = await histCall('history/delete', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ at: lastRow.at, out: lastRow.out }], deleteFiles: true }),
+});
+assert.equal(delFile.data.removed, 1);
+assert.equal(delFile.data.filesDeleted, 1);
+assert.ok(!fs.existsSync(lastRowOut), 'deleteFiles removes the output file from disk');
+const textAfterFile = fs.readFileSync(historyFile, 'utf8');
+assert.ok(textAfterFile.includes('"torn"'), 'the torn line survives every rewrite');
+
+// A hand-edited row pointing outside the output dir: the record still goes,
+// the outside file survives.
+const outsideFile = path.join(ledgerDir, 'escape.txt');
+fs.writeFileSync(outsideFile, 'x');
+const escapeOut = `../${path.basename(ledgerDir)}/escape.txt`;
+fs.appendFileSync(
+  historyFile,
+  JSON.stringify({ name: 'evil.mp4', out: escapeOut, size: 1, state: 'done', error: null, at: 4000 }) + '\n',
+);
+const delEscape = await histCall('history/delete', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ at: 4000, out: escapeOut }], deleteFiles: true }),
+});
+assert.equal(delEscape.data.ok, true);
+assert.equal(delEscape.data.removed, 1);
+assert.equal(delEscape.data.filesDeleted, 0, 'a row escaping the output dir never unlinks its file');
+assert.ok(fs.existsSync(outsideFile), 'the outside file survives');
+
+// Garbage in, method discipline: empty batch refused, GET answered 405.
+const delEmpty = await histCall('history/delete', { method: 'POST', body: JSON.stringify({ items: [] }) });
+assert.equal(delEmpty.data.ok, false, 'an empty delete request is refused');
+const delWrongMethod = await histCall('history/delete');
+assert.equal(delWrongMethod.status, 405, 'the delete route is POST only');
+
+// The ledger is now only the torn line: the page reads empty, not broken.
+const histAfterAll = await histCall('history');
+assert.equal(histAfterAll.data.ok, true);
+assert.equal(histAfterAll.data.total, 0);
+assert.equal(histAfterAll.data.items.length, 0);
+
 histCleanups.forEach((dispose) => dispose());
 
 cleanups.forEach((dispose) => dispose());

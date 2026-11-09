@@ -114,6 +114,16 @@ const MUTANTS = [
     distAnchor: 'deadbeef',
     expect: '/status 必须携带 UUID 形态的 instanceId，突变后为 deadbeef → 测试红',
   },
+  {
+    id: 'A8',
+    name: '历史删除的 insideOutput 守卫失效（可删输出目录外文件）',
+    // 整行删除：target 下方 fsp.rm 仍在用，不会 TS6133；守卫没了 → 穿越行被 unlink。
+    // dist 锚点用调用本身——构建器会把整行 if 断行，带 continue 的长锚点匹配不到。
+    apply: (s) => deleteLine(s, 'if (!insideOutput(target)) continue;'),
+    distAnchor: 'insideOutput(target)',
+    expect: '指向输出目录外的账本行绝不能 unlink 其文件，突变后 escape.txt 被删 → 测试红',
+    delete: true,
+  },
 ];
 
 function build() {

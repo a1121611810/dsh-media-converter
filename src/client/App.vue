@@ -30,6 +30,7 @@ import type { MediaKind, StreamMeta } from '../../lib/plan.js';
 import type {
   Base64Response,
   ErrorResponse,
+  HistoryDeleteResponse,
   HistoryItem,
   HistoryResponse,
   Job,
@@ -171,6 +172,77 @@ function historyStateClass(item: HistoryItem): string {
 
 function historyStateLabel(item: HistoryItem): string {
   return t(item.deleted ? 'history.deleted' : `history.state.${item.state}`);
+}
+
+// Row selection for batch delete, the file toggle, and a two-step confirm that
+// doubles as the "the real file goes too" warning. Keys are the row's at:out,
+// the same composite the list keys by.
+const historySel = ref<Set<string>>(new Set());
+const historyDeleteFiles = ref(false);
+const historyConfirmKey = ref('');
+const historyError = ref('');
+let historyConfirmTimer: ReturnType<typeof setTimeout> | 0 = 0;
+
+const historyKey = (item: HistoryItem): string => `${item.at}:${item.out}`;
+const selectedHistory = computed(() => historyItems.value.filter((item) => historySel.value.has(historyKey(item))));
+const historyAllSelected = computed(
+  () => historyItems.value.length > 0 && selectedHistory.value.length === historyItems.value.length,
+);
+
+function toggleHistorySelect(item: HistoryItem, on: boolean): void {
+  const next = new Set(historySel.value);
+  if (on) next.add(historyKey(item));
+  else next.delete(historyKey(item));
+  historySel.value = next;
+}
+
+function toggleAllHistory(on: boolean): void {
+  historySel.value = on ? new Set(historyItems.value.map(historyKey)) : new Set();
+}
+
+async function deleteHistory(items: HistoryItem[]): Promise<void> {
+  if (!items.length) return;
+  try {
+    const data = await readJson<HistoryDeleteResponse | ErrorResponse>(
+      await fetch('/api/media-convert/history/delete', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          items: items.map(({ at, out }) => ({ at, out })),
+          deleteFiles: historyDeleteFiles.value,
+        }),
+      }),
+    );
+    if (!data.ok) {
+      historyError.value = data.error || t('error.title');
+      return;
+    }
+    historyError.value = '';
+    const gone = new Set(items.map(historyKey));
+    historyItems.value = historyItems.value.filter((item) => !gone.has(historyKey(item)));
+    historySel.value = new Set([...historySel.value].filter((key) => !gone.has(key)));
+    historyTotal.value = Math.max(0, historyTotal.value - data.removed);
+  } catch {
+    historyError.value = t('error.title');
+  }
+}
+
+function requestHistoryDelete(key: string, items: HistoryItem[]): void {
+  if (historyConfirmKey.value !== key) {
+    historyConfirmKey.value = key;
+    clearTimeout(historyConfirmTimer);
+    historyConfirmTimer = setTimeout(() => {
+      historyConfirmKey.value = '';
+    }, 4000);
+    return;
+  }
+  historyConfirmKey.value = '';
+  clearTimeout(historyConfirmTimer);
+  void deleteHistory(items);
+}
+
+function historyConfirmLabel(): string {
+  return t(historyDeleteFiles.value ? 'history.confirmFiles' : 'history.confirm');
 }
 const query = ref('');
 const format = ref('');
@@ -1868,32 +1940,77 @@ watch([action, panelOpen], async () => {
         <p class="mc-sub">{{ t('history.empty') }}</p>
       </div>
 
-      <ul v-else class="mc-history">
-        <li v-for="item in historyItems" :key="`${item.at}:${item.out}`" class="mc-history-row">
-          <span class="mc-history-dot" :class="historyStateClass(item)" aria-hidden="true"></span>
-          <div class="mc-history-main">
-            <div class="mc-history-top">
-              <span class="mc-history-name" :title="item.name">{{ item.name }}</span>
-              <span class="mc-history-chip" :class="historyStateClass(item)">{{ historyStateLabel(item) }}</span>
+      <template v-else>
+        <div class="mc-history-bar">
+          <label class="mc-history-check">
+            <input
+              type="checkbox"
+              :checked="historyAllSelected"
+              @change="toggleAllHistory(($event.target as HTMLInputElement).checked)"
+            />
+            {{ t('history.selectAll') }}
+          </label>
+          <label class="mc-history-check">
+            <input v-model="historyDeleteFiles" type="checkbox" />
+            {{ t('history.deleteFiles') }}
+          </label>
+          <span class="mc-grow"></span>
+          <button
+            type="button"
+            class="mc-btn mc-btn-ghost"
+            :class="{ 'mc-btn-danger': historyConfirmKey === 'batch' }"
+            :disabled="!selectedHistory.length"
+            @click="requestHistoryDelete('batch', selectedHistory)"
+          >
+            {{
+              historyConfirmKey === 'batch'
+                ? historyConfirmLabel()
+                : `${t('history.deleteSelected')} (${selectedHistory.length})`
+            }}
+          </button>
+        </div>
+        <p v-if="historyError" class="mc-history-err">{{ historyError }}</p>
+
+        <ul class="mc-history">
+          <li v-for="item in historyItems" :key="`${item.at}:${item.out}`" class="mc-history-row">
+            <input
+              type="checkbox"
+              class="mc-history-check"
+              :checked="historySel.has(`${item.at}:${item.out}`)"
+              @change="toggleHistorySelect(item, ($event.target as HTMLInputElement).checked)"
+            />
+            <span class="mc-history-dot" :class="historyStateClass(item)" aria-hidden="true"></span>
+            <div class="mc-history-main">
+              <div class="mc-history-top">
+                <span class="mc-history-name" :title="item.name">{{ item.name }}</span>
+                <span class="mc-history-chip" :class="historyStateClass(item)">{{ historyStateLabel(item) }}</span>
+              </div>
+              <div class="mc-history-meta">
+                <span class="mc-history-out" :title="item.out">{{ item.out }}</span>
+                <span>{{ formatSize(item.size) }}</span>
+                <span aria-hidden="true">·</span>
+                <span>{{ new Date(item.at).toLocaleString() }}</span>
+              </div>
+              <div v-if="!item.deleted && item.error" class="mc-history-err" :title="item.error">
+                {{ item.error }}
+              </div>
             </div>
-            <div class="mc-history-meta">
-              <span class="mc-history-out" :title="item.out">{{ item.out }}</span>
-              <span>{{ formatSize(item.size) }}</span>
-              <span aria-hidden="true">·</span>
-              <span>{{ new Date(item.at).toLocaleString() }}</span>
+            <div class="mc-history-actions">
+              <template v-if="!item.deleted">
+                <a :href="previewUrl(item.out)" target="_blank" rel="noopener">{{ t('history.preview') }}</a>
+                <button type="button" @click="reveal(item.out)">{{ t('history.reveal') }}</button>
+              </template>
+              <button
+                type="button"
+                :class="{ 'mc-btn-danger': historyConfirmKey === `${item.at}:${item.out}` }"
+                @click="requestHistoryDelete(`${item.at}:${item.out}`, [item])"
+              >
+                {{ historyConfirmKey === `${item.at}:${item.out}` ? historyConfirmLabel() : t('history.delete') }}
+              </button>
             </div>
-            <div v-if="!item.deleted && item.error" class="mc-history-err" :title="item.error">
-              {{ item.error }}
-            </div>
-          </div>
-          <div class="mc-history-actions">
-            <template v-if="!item.deleted">
-              <a :href="previewUrl(item.out)" target="_blank" rel="noopener">{{ t('history.preview') }}</a>
-              <button type="button" @click="reveal(item.out)">{{ t('history.reveal') }}</button>
-            </template>
-          </div>
-        </li>
-      </ul>
+          </li>
+        </ul>
+      </template>
       <button
         v-if="historyItems.length < historyTotal"
         type="button"

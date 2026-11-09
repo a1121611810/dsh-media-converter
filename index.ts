@@ -305,6 +305,18 @@ export interface HistoryResponse {
   items: HistoryItem[];
   total: number;
 }
+// What the panel sends to drop ledger rows: the row key is at + out, the same
+// composite the list view keys by. deleteFiles additionally unlinks the output
+// file of every matched row.
+export interface HistoryDeleteRequest {
+  items: Array<{ at: number; out: string }>;
+  deleteFiles?: boolean;
+}
+export interface HistoryDeleteResponse {
+  ok: true;
+  removed: number;
+  filesDeleted: number;
+}
 
 // One checked batch is a server-side "run": the Host walks its items in order,
 // starting one normal Job per file. The run is what a page restores from when
@@ -805,11 +817,19 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   const instanceId = randomUUID();
   // The append-only ledger of settled jobs. Env override exists for tests and
   // for hosts that keep dotfiles elsewhere; the default sits next to the other
-  // media-toolbox state in the home directory. Writes are fire-and-forget: a
-  // lost history row never blocks or fails a conversion.
+  // media-toolbox state in the home directory. Every write (append or the
+  // filtered rewrite behind /history/delete) funnels through one promise
+  // chain, so the two can never interleave and a rewrite can never swallow an
+  // in-flight append. A lost history row never blocks or fails a conversion.
   const historyFile = process.env.MEDIA_TOOLBOX_HISTORY || path.join(os.homedir(), '.media-toolbox-history.json');
+  let historyWrite: Promise<unknown> = Promise.resolve();
+  const withLedgerLock = <T>(fn: () => Promise<T>): Promise<T> => {
+    const run = historyWrite.then(fn, fn);
+    historyWrite = run.catch(() => {});
+    return run;
+  };
   const appendHistory = (entry: HistoryEntry) => {
-    fs.appendFile(historyFile, `${JSON.stringify(entry)}\n`, () => {});
+    void withLedgerLock(() => fsp.appendFile(historyFile, `${JSON.stringify(entry)}\n`, 'utf8')).catch(() => {});
   };
   const runs = new Map<string, RunInfo>();
   const runControllers = new Map<string, AbortController>();
@@ -2550,6 +2570,71 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               }),
             );
             json(res, 200, { ok: true, items, total: entries.length } satisfies HistoryResponse);
+          } catch (err) {
+            json(res, 200, errorPayload(errorText(err)));
+          }
+        },
+      }),
+      // Dropping ledger rows, with an optional per-row unlink of the output
+      // file. The ledger is append-only, so a delete is a filtered rewrite
+      // under the ledger lock; torn lines ride through untouched. File
+      // deletion refuses anything outside the output directory — a hand-edited
+      // ledger line must not turn this route into an arbitrary unlink. Files
+      // go first so a failed ledger write can be retried instead of leaving
+      // orphan outputs no record points at.
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/history/delete`,
+        handler: async (req, res) => {
+          if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
+          if (rejectUnauthenticated(req, res)) return;
+          try {
+            const body = (await readJson(req)) as HistoryDeleteRequest;
+            const targets = (Array.isArray(body.items) ? body.items : []).filter(
+              (it): it is { at: number; out: string } =>
+                typeof it?.at === 'number' &&
+                Number.isFinite(it.at) &&
+                typeof it?.out === 'string' &&
+                it.out.length > 0 &&
+                it.out.length <= 255,
+            );
+            if (!targets.length || targets.length > 500) {
+              return json(res, 200, errorPayload('无效的删除请求'));
+            }
+            const deleteFiles = Boolean(body.deleteFiles);
+            const result = await withLedgerLock(async () => {
+              let lines: string[] = [];
+              try {
+                lines = (await fsp.readFile(historyFile, 'utf8')).split('\n').filter((line) => line.trim());
+              } catch {
+                return { removed: 0, filesDeleted: 0 };
+              }
+              const wanted = new Set(targets.map((t) => `${t.at}:${t.out}`));
+              const kept: string[] = [];
+              const removed: HistoryEntry[] = [];
+              for (const line of lines) {
+                let entry: HistoryEntry | null = null;
+                try {
+                  entry = JSON.parse(line) as HistoryEntry;
+                } catch {
+                  // A torn line is carried through the rewrite untouched.
+                }
+                if (entry && wanted.has(`${entry.at}:${entry.out}`)) removed.push(entry);
+                else kept.push(line);
+              }
+              let filesDeleted = 0;
+              if (deleteFiles) {
+                for (const entry of removed) {
+                  const target = path.resolve(outDir, entry.out);
+                  if (!insideOutput(target)) continue;
+                  await fsp.rm(target, { force: true });
+                  filesDeleted += 1;
+                }
+              }
+              await fsp.writeFile(historyFile, kept.length ? `${kept.join('\n')}\n` : '', 'utf8');
+              return { removed: removed.length, filesDeleted };
+            });
+            json(res, 200, { ok: true, ...result } satisfies HistoryDeleteResponse);
           } catch (err) {
             json(res, 200, errorPayload(errorText(err)));
           }
