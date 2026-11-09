@@ -248,8 +248,13 @@ const IMAGE: Record<string, string[]> = {
 };
 
 // Lossy formats only: the UI shows its quality control for exactly these.
+// The five video containers are the X264 recipes' containers (the same set as
+// HW_AUDIO): quality maps to their -crf, and to a bitrate factor on hardware.
 export function supportsQuality(kind: MediaKind, format: string): boolean {
-  return kind === 'image' && (format === 'jpg' || format === 'webp');
+  return (
+    (kind === 'image' && (format === 'jpg' || format === 'webp')) ||
+    (kind === 'video' && ['mp4', 'mov', 'mkv', 'flv', 'ts'].includes(format))
+  );
 }
 
 // Split one CPU across concurrent ffmpeg jobs; 0 lets ffmpeg choose.
@@ -382,11 +387,13 @@ export function hardwareFor(
   format: string,
   size: number,
   duration: number,
+  quality?: number,
 ): { args: string[]; inputArgs: string[] } | null {
   const audio = HW_AUDIO[format];
   if (kind !== 'video' || !audio) return null;
   const totalKbps = duration > 0 ? (size * 8) / duration / 1000 : 0;
-  const videoKbps = Math.min(12000, Math.max(1500, Math.round(totalKbps - 192)));
+  const q = Math.min(100, Math.max(1, Math.round(Number(quality) || 90)));
+  const videoKbps = Math.min(12000, Math.max(1500, Math.round((totalKbps - 192) * hwFactorOf(q))));
   return {
     inputArgs: [...backend.decodeArgs],
     args: [
@@ -411,6 +418,19 @@ function jpegQscale(quality: number): string {
   return String(Math.max(2, Math.round(31 - quality * 0.29)));
 }
 
+// 1..100 user quality -> x264 CRF: 90 (the default) keeps the recipe's 23,
+// higher is better; clamped to the range that still makes visual sense.
+function crfOf(quality: number): number {
+  return Math.min(32, Math.max(18, Math.round(23 + (90 - quality) * 0.1)));
+}
+
+// Hardware encoders have no CRF (a probe of h264_videotoolbox shows no
+// quality option at all), so quality scales the bitrate the plan derives
+// from the source file: 90 (the default) leaves it unchanged.
+function hwFactorOf(quality: number): number {
+  return Math.min(1.6, Math.max(0.4, 1 + (quality - 90) * 0.01));
+}
+
 export function buildArgs(kind: MediaKind, format: string, quality = 90): string[] {
   const table = kind === 'audio' ? AUDIO : kind === 'image' ? IMAGE : VIDEO;
   const base = table[format];
@@ -418,7 +438,12 @@ export function buildArgs(kind: MediaKind, format: string, quality = 90): string
   const args = base.slice();
   if (supportsQuality(kind, format)) {
     const q = Math.min(100, Math.max(1, Math.round(Number(quality) || 90)));
-    args.push(...(format === 'jpg' ? ['-q:v', jpegQscale(q)] : ['-quality', String(q)]));
+    if (kind === 'video') {
+      const at = args.indexOf('-crf');
+      if (at >= 0) args[at + 1] = String(crfOf(q));
+    } else {
+      args.push(...(format === 'jpg' ? ['-q:v', jpegQscale(q)] : ['-quality', String(q)]));
+    }
   }
   return args;
 }

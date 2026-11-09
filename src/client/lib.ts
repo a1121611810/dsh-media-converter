@@ -260,6 +260,15 @@ export function unavailableTarget(file: UploadResponse | null, target: string): 
   );
 }
 
+// Mirror of the Host's supportsQuality (lib/plan.ts): the quality slider
+// shows for exactly these lossy targets, so the two must stay in sync.
+export function supportsQuality(kind: string, format: string): boolean {
+  return (
+    (kind === 'image' && (format === 'jpg' || format === 'webp')) ||
+    (kind === 'video' && ['mp4', 'mov', 'mkv', 'flv', 'ts'].includes(format))
+  );
+}
+
 // The trim window described by the two fields; empty fields mean start/end.
 export type TrimState =
   | { active: true; start: number; end: number; error: string }

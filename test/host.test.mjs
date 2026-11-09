@@ -831,6 +831,32 @@ const inverted = await call('convert', {
 });
 assert.equal(inverted.data.job.trim, null);
 
+// Quality rules on the copy fast path: an explicit quality re-encodes even
+// when the container could just copy; the default anchor (90, or anything
+// rounding to it) keeps the copy.
+const copyDefault = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4' }),
+});
+assert.equal(copyDefault.data.job.copy, true, 'h264+aac to mp4 copies by default');
+const copyQ90 = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', quality: 90 }),
+});
+assert.equal(copyQ90.data.job.copy, true, 'the default quality anchor keeps the copy');
+const copyQ904 = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', quality: 90.4 }),
+});
+assert.equal(copyQ904.data.job.copy, true, 'a quality that rounds to 90 keeps the copy');
+const reencodeQ50 = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', quality: 50 }),
+});
+assert.equal(reencodeQ50.data.job.copy, false, 'an explicit quality forces the re-encode');
+const reencodeJob = await waitJob(reencodeQ50.data.job);
+assert.ok(fs.existsSync(reencodeJob.out), 'the re-encoded output lands on disk');
+
 const audioOnly = await call('convert', {
   method: 'POST',
   body: JSON.stringify({ id: clipUpload.data.id, mode: 'extract-audio' }),
@@ -1174,6 +1200,32 @@ assert.equal(runState.items[1].jobId, '', 'a skipped item starts no job');
 const latestRun = await call('run');
 assert.equal(latestRun.data.ok, true);
 assert.equal(latestRun.data.run.id, runState.id, 'the newest run is restored without an id');
+
+// Per-row quality travels with the run: a row without its own quality falls
+// back to the run default (copy stays), a row with its own re-encodes.
+const qualityRun = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [
+      { id: clipUpload.data.id, format: 'mp4' },
+      { id: clipUpload.data.id, format: 'mp4', quality: 50 },
+    ],
+    quality: 90,
+  }),
+});
+assert.equal(qualityRun.data.ok, true, JSON.stringify(qualityRun.data));
+let qualityState = qualityRun.data.run;
+for (let attempt = 0; attempt < 300 && qualityState.state === 'running'; attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  qualityState = (await call('run?id=' + qualityRun.data.run.id)).data.run;
+}
+assert.equal(qualityState.state, 'done');
+assert.equal(qualityState.items[0].result.copy, true, 'a row on the run default keeps the container copy');
+assert.equal(
+  qualityState.items[1].result.copy,
+  false,
+  'a row with its own quality re-encodes under the same run default',
+);
 
 // Per-row state still comes from /queue: each run item is an ordinary job.
 const runQueue = await call('queue');
@@ -1767,6 +1819,88 @@ assert.ok(!fs.existsSync(expiredOwnedFile), 'an owned copy is deleted from disk'
 assert.ok(fs.existsSync(expiredRegisteredFile), "a file registered by path is the user's own and survives");
 assert.ok(fs.existsSync(keptRunningFile), 'the running job keeps its source on disk');
 fs.rmSync(pruneDir, { recursive: true, force: true });
+
+// --- upload/delete: 移除/清空 drops the Host record for real ----------------
+// Fake-green guards: every case asserts the route answer (removed/skipped)
+// AND an independent observable (/queue membership or the exact file on
+// disk), so a silently no-op route cannot pass.
+const tmpBox = path.join(os.tmpdir(), 'dsh-media-toolbox');
+const queueHas = async (id) => {
+  const q = await call('queue');
+  return q.data.items.some((row) => row.upload.id === id);
+};
+
+// An owned browser-upload copy dies with its record.
+const ownedUp = await call('upload?name=del-owned.png', { method: 'POST', body: fs.readFileSync(sample) });
+assert.equal(ownedUp.data.ok, true, JSON.stringify(ownedUp.data));
+const ownedFile = path.join(tmpBox, ownedUp.data.id + '.png');
+assert.ok(await queueHas(ownedUp.data.id), 'the owned upload is queued');
+assert.ok(fs.existsSync(ownedFile), 'the owned temp copy sits under the id-derived name');
+const delOwned = await call('upload/delete', {
+  method: 'POST',
+  body: JSON.stringify({ ids: [ownedUp.data.id, 'never-heard-of'] }),
+});
+assert.equal(delOwned.data.ok, true);
+assert.equal(delOwned.data.removed, 1, 'one real record removed; an unknown id is not an error');
+assert.deepEqual(delOwned.data.skipped, []);
+assert.ok(!(await queueHas(ownedUp.data.id)), 'the queue row is gone');
+for (let attempt = 0; attempt < 50 && fs.existsSync(ownedFile); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+assert.ok(!fs.existsSync(ownedFile), 'the owned temp copy is deleted from disk');
+const delAgain = await call('upload/delete', {
+  method: 'POST',
+  body: JSON.stringify({ ids: [ownedUp.data.id] }),
+});
+assert.equal(delAgain.data.removed, 0, 'a second delete is a no-op, not a phantom success');
+
+// A file registered by path loses its record but keeps its bytes.
+const registeredFile = path.join(outDir, 'del-registered.png');
+fs.copyFileSync(sample, registeredFile);
+const regUp = await call('register', { method: 'POST', body: JSON.stringify({ paths: [registeredFile] }) });
+assert.equal(regUp.data.ok, true, JSON.stringify(regUp.data));
+assert.ok(await queueHas(regUp.data.uploads[0].id), 'the registered file is queued');
+const delReg = await call('upload/delete', {
+  method: 'POST',
+  body: JSON.stringify({ ids: [regUp.data.uploads[0].id] }),
+});
+assert.equal(delReg.data.removed, 1);
+assert.ok(!(await queueHas(regUp.data.uploads[0].id)), 'the registered row is gone');
+assert.ok(fs.existsSync(registeredFile), "a registered file is the user's own and stays on disk");
+fs.rmSync(registeredFile);
+
+// A row a running job still reads is skipped, never deleted from under ffmpeg.
+const guardUp = await call('upload?name=del-guard.mp4', { method: 'POST', body: fs.readFileSync(clip) });
+assert.equal(guardUp.data.ok, true, JSON.stringify(guardUp.data));
+const guardJob = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: guardUp.data.id, format: 'webm' }),
+});
+let runningSeen = false;
+for (let attempt = 0; attempt < 300; attempt += 1) {
+  const j = await call('job?id=' + guardJob.data.job.id);
+  if (j.data.state === 'running') {
+    runningSeen = true;
+    break;
+  }
+  if (j.data.state === 'done' || j.data.state === 'error') break;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+assert.ok(runningSeen, 'the conversion reaches running before we delete under it');
+const delRunning = await call('upload/delete', {
+  method: 'POST',
+  body: JSON.stringify({ ids: [guardUp.data.id] }),
+});
+assert.deepEqual(delRunning.data.skipped, [guardUp.data.id], 'the running upload is reported, not deleted');
+assert.equal(delRunning.data.removed, 0);
+assert.ok(await queueHas(guardUp.data.id), 'the running row stays in the queue');
+await waitJob(guardJob.data.job);
+const delSettled = await call('upload/delete', {
+  method: 'POST',
+  body: JSON.stringify({ ids: [guardUp.data.id] }),
+});
+assert.equal(delSettled.data.removed, 1, 'once settled, the same upload deletes');
+assert.ok(!(await queueHas(guardUp.data.id)), 'the settled row is gone');
 
 // --- history ledger ----------------------------------------------------------
 // The ledger is an append-only JSONL file of settled jobs. The path override

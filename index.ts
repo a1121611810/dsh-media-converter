@@ -327,6 +327,15 @@ export interface HistoryDeleteResponse {
   filesDeleted: number;
 }
 
+// The queue-removal answer: per-id so one running job cannot block the rest.
+// `skipped` names uploads a running job still reads (they are never deleted
+// from under ffmpeg) and ids the Host never heard of is not an error.
+export interface UploadDeleteResponse {
+  ok: true;
+  removed: number;
+  skipped: string[];
+}
+
 // One checked batch is a server-side "run": the Host walks its items in order,
 // starting one normal Job per file. The run is what a page restores from when
 // it is closed, reloaded, or switched away mid-batch — the browser is not the
@@ -338,6 +347,9 @@ export interface RunItemInfo {
   // 'extract-audio' / 'extract-video' for an audio/video batch, '' for convert.
   mode: string;
   format: string;
+  // The panel's per-row quality choice; the run's top-level quality is the
+  // fallback for rows without one.
+  quality?: number;
   state: RunItemState;
   percent: number | null;
   jobId: string;
@@ -1336,7 +1348,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           continue;
         }
         try {
-          const plan = planFor(upload, { mode: item.mode, format: item.format, quality, hardware }, 0);
+          const plan = planFor(
+            upload,
+            { mode: item.mode, format: item.format, quality: item.quality ?? quality, hardware },
+            0,
+          );
           // Container rewrites (copy, extract-audio, metadata) carry 'copy' in
           // their encoder args but not the copy flag; only a real re-encode
           // belongs on the one-at-a-time software video lane.
@@ -1648,7 +1664,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       throw new Error(`不支持的输出格式: ${format}`);
     }
     const trim = normalizeTrim(body.trim, upload.duration);
-    if (!trim) {
+    // An explicit quality choice means "re-encode to this quality": a container
+    // copy would silently drop it. Audio ignores quality, so this never forces
+    // an audio re-encode. Rounded, so 89.6/90.4 (which buildArgs rounds to the
+    // 90 default) do not force a pointless re-encode.
+    const qualityTuned = upload.kind === 'video' && Number(body.quality) > 0 && Math.round(Number(body.quality)) !== 90;
+    if (!trim && !qualityTuned) {
       const copy = copyArgs(upload.kind, format, upload.meta);
       if (copy) return { ext: format, kind: kindByExt(format), args: copy, copy: true };
     }
@@ -1656,7 +1677,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     // found a backend this machine can really run; elsewhere the hardware ask
     // silently gets the software plan instead of a doomed ffmpeg command.
     if (body.hardware && hwBackend) {
-      const hw = hardwareFor(hwBackend, upload.kind, format, upload.size, upload.duration);
+      const hw = hardwareFor(hwBackend, upload.kind, format, upload.size, upload.duration, Number(body.quality));
       if (hw) {
         return {
           ext: format,
@@ -1686,7 +1707,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       `文件（共 ${files.length} 个，每行已有该文件的 target）：`,
       ...lines,
       '',
-      `图片质量默认：${quality}（仅 jpg/webp 有效）。`,
+      `质量默认：${quality}（1-100，90=默认）。对软件编码的视频（mp4/mov/mkv/flv/ts）映射为 x264 CRF，对 GPU 硬编视频映射为目标码率倍率，对 jpg/webp 图片生效；quality 不是 90 时已强制重编码（不会走拷贝）。`,
       `各类型的可用输出格式：video=${formatsFor('video').join(', ')}；audio=${formatsFor('audio').join(', ')}；image=${formatsFor('image').join(', ')}。`,
       '',
       '只返回一个 JSON 对象。不要代码、不要解释、不要 Markdown 代码块：',
@@ -1695,7 +1716,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       '规则：',
       '1. 每个文件恰好一条，id 必须与上面完全一致；不能多、不能少、不能重复。',
       '2. format 必须属于该文件 kind 的可用格式；优先用该行的 target。',
-      '3. quality 只对图片有效，1–100；其它类型可以省略。',
+      '3. quality 1–100，仅对软件编码视频（mp4/mov/mkv/flv/ts）、GPU 硬编视频和 jpg/webp 图片有意义，其它类型请省略。',
       '4. 没有音轨的文件不要选纯音频格式。',
     ].join('\n');
   };
@@ -2017,7 +2038,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
         '③extract-audio 抽音轨、④extract-video 抽画面（不重编码）；⑤subtitle 导出内嵌字幕为 .srt；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）。' +
-        'convert 可带 trim（秒，{start,end}）裁剪，图片 jpg/webp 可带 quality（1-100）。产物写在输出目录，返回新文件路径。',
+        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts）与图片 jpg/webp 可带 quality（1-100，90=默认）：视频映射 x264 CRF，GPU 硬编时映射为目标码率倍率。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
         properties: {
@@ -2036,7 +2057,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             properties: { start: { type: 'number' }, end: { type: 'number' } },
             description: '裁剪区间（秒）。',
           },
-          quality: { type: 'number', description: '图片质量 1-100（jpg/webp 有效）。' },
+          quality: {
+            type: 'number',
+            description:
+              '质量 1-100（90=默认）：软件编码视频 mp4/mov/mkv/flv/ts 映射 CRF，GPU 硬编映射码率倍率，jpg/webp 图片有效。',
+          },
           tags: {
             type: 'object',
             properties: {
@@ -2304,6 +2329,44 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             if (file) await fsp.rm(file, { force: true }).catch(() => {});
             console.error('[dsh-media-converter] upload failed:', err instanceof Error ? err.message : err);
             json(res, 500, errorPayload(errorText(err)));
+          }
+        },
+      }),
+      // Queue removal is per-id: the panel's 移除/清空 deletes the Host record
+      // for real, so a rebuilt page does not resurrect the row. A row whose
+      // job is still running is skipped, never deleted from under ffmpeg; an
+      // owned browser-upload copy goes with its record, a registered path is
+      // the user's own file and stays on disk.
+      webServer.register({
+        kind: 'exact',
+        path: `${PREFIX}/upload/delete`,
+        handler: async (req, res) => {
+          if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
+          if (rejectUnauthenticated(req, res)) return;
+          try {
+            const body = await readJson(req);
+            const raw = Array.isArray(body.ids) ? body.ids : [];
+            const ids = [...new Set(raw.map(String).filter(Boolean))].slice(0, 2000);
+            let removed = 0;
+            const skipped: string[] = [];
+            for (const id of ids) {
+              const upload = uploads.get(id);
+              if (!upload) continue; // TTL may have swept it first; stay idempotent.
+              if (
+                [...jobs.values()].some(
+                  (job) => job.uploadId === id && (job.state === 'running' || job.state === 'cancelling'),
+                )
+              ) {
+                skipped.push(id);
+                continue;
+              }
+              uploads.delete(id);
+              if (upload.owned) fs.rm(upload.path, { force: true }, () => {});
+              removed += 1;
+            }
+            json(res, 200, { ok: true, removed, skipped } satisfies UploadDeleteResponse);
+          } catch (err) {
+            json(res, 200, errorPayload(errorText(err)));
           }
         },
       }),
@@ -2605,10 +2668,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               // asked for an audio-only target) travels with the run so it is
               // still explained after a page rebuild.
               const skipped = row.skip === true;
+              const q = Number(row.quality);
               items.push({
                 id,
                 mode: String(row.mode || ''),
                 format: String(row.format || ''),
+                quality: Number.isFinite(q) && q >= 1 && q <= 100 ? Math.round(q) : undefined,
                 state: skipped ? 'skipped' : 'waiting',
                 percent: null,
                 jobId: '',

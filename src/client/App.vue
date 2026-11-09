@@ -21,6 +21,7 @@ import {
   rowPlan,
   runItemPatch,
   sourceUrl,
+  supportsQuality,
   trimWindow,
   unavailableTarget,
   withoutKnownUploads,
@@ -38,6 +39,7 @@ import type {
   PtcModelOption,
   RunInfo,
   StatusResponse,
+  UploadDeleteResponse,
   UploadResponse,
 } from '../../index.js';
 import CompareSlider from './vue/CompareSlider.vue';
@@ -404,12 +406,9 @@ const queueGroups = computed<QueueSection[]>(() => {
         targetOptions: formatTable.value,
         showTargets: Boolean(convertible) && operation.value === 'convert',
         showQuality: Boolean(
-          convertible === 'image' &&
+          convertible &&
           operation.value === 'convert' &&
-          groupItems.some((item) => {
-            const target = effectiveTarget(item);
-            return target === 'jpg' || target === 'webp';
-          }),
+          groupItems.some((item) => supportsQuality(convertible, effectiveTarget(item))),
         ),
         note: key === 'pending' ? t('queue.pendingNote') : key === 'text' ? t('queue.textNoBatch') : '',
       },
@@ -491,7 +490,7 @@ const trimSummary = computed(() =>
       : t('trim.full') + (file.value && file.value.duration ? ' ' + formatClock(file.value.duration) : ''),
 );
 const usesQuality = computed(() =>
-  Boolean(file.value && file.value.kind === 'image' && (format.value === 'jpg' || format.value === 'webp')),
+  Boolean(file.value && format.value && supportsQuality(file.value.kind, format.value)),
 );
 const canExtractAudio = computed(() =>
   Boolean(file.value && file.value.kind === 'video' && file.value.streams && file.value.streams.audio),
@@ -1173,11 +1172,37 @@ function cancelUploads() {
   if (uploadAbort) uploadAbort.abort();
 }
 
-function removeItem(key: string, force = false) {
+async function removeItem(key: string, force = false) {
   if (busy.value && !force) return;
   const index = items.value.findIndex((item) => item.key === key);
   if (index < 0) return;
-  const [item] = items.value.splice(index, 1);
+  const item = items.value[index];
+  // 移除 also drops the Host record: the row only goes away once the Host
+  // agreed, so a rebuilt page cannot resurrect it. A row a running job still
+  // reads stays, with the reason.
+  if (!force && item.upload) {
+    try {
+      const data = await readJson<UploadDeleteResponse | ErrorResponse>(
+        await fetch('/api/media-convert/upload/delete', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ids: [item.upload.id] }),
+        }),
+      );
+      if (!data.ok) throw new Error(data.error || t('error.title'));
+      if (data.skipped.includes(item.upload.id)) {
+        batchError.value = t('remove.running');
+        return;
+      }
+    } catch (err) {
+      batchError.value = String((err && (err as Error).message) || err);
+      return;
+    }
+  }
+  // Re-lookup by key: a double click (or a clearQueue) during the await must
+  // not splice the row that shifted into the captured index.
+  const current = items.value.findIndex((entry) => entry.key === key);
+  if (current >= 0) items.value.splice(current, 1);
   delete rowTargets.value[key];
   visibleThumbs.delete(key);
   queuedThumbs.delete(key);
@@ -1194,7 +1219,7 @@ function removeItem(key: string, force = false) {
   ensureTargets();
 }
 
-function clearQueue() {
+async function clearQueue() {
   if (busy.value) return;
   if (!confirmClear.value) {
     confirmClear.value = true;
@@ -1206,15 +1231,38 @@ function clearQueue() {
   }
   confirmClear.value = false;
   clearTimeout(clearTimer);
-  items.value.forEach((item) => {
+  // Same deal as removeItem: the Host records go with the rows, except the
+  // ones a running job still reads — those rows stay.
+  const ids = items.value.flatMap((item) => (item.upload ? [item.upload.id] : []));
+  const skipped = new Set<string>();
+  if (ids.length) {
+    try {
+      const data = await readJson<UploadDeleteResponse | ErrorResponse>(
+        await fetch('/api/media-convert/upload/delete', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        }),
+      );
+      if (!data.ok) throw new Error(data.error || t('error.title'));
+      for (const id of data.skipped) skipped.add(id);
+    } catch (err) {
+      batchError.value = String((err && (err as Error).message) || err);
+      return;
+    }
+  }
+  const kept = items.value.filter((item) => item.upload && skipped.has(item.upload.id));
+  const keptKeys = new Set(kept.map((item) => item.key));
+  for (const item of items.value) {
+    if (keptKeys.has(item.key)) continue;
     URL.revokeObjectURL(item.url);
     if (item.thumb) URL.revokeObjectURL(item.thumb);
-  });
-  items.value = [];
-  rowTargets.value = {};
+  }
+  items.value = kept;
+  for (const key of Object.keys(rowTargets.value)) if (!keptKeys.has(key)) delete rowTargets.value[key];
   detailKey.value = '';
   view.value = 'queue';
-  batchError.value = '';
+  batchError.value = skipped.size ? t('remove.running') : '';
   lastRun.value = null;
 }
 
@@ -1360,7 +1408,7 @@ async function runServerBatch(rows: Item[], ptc = false) {
     return {
       id,
       format: row.target,
-      quality: row.target === 'jpg' || row.target === 'webp' ? batchQuality.value : undefined,
+      quality: supportsQuality(item.upload!.kind, row.target) ? batchQuality.value : undefined,
       hardware: useGpu.value || undefined,
     };
   });
@@ -1462,7 +1510,7 @@ async function runCurrent(body: Partial<ConvertRequest>, forAction: string) {
 
 function convert() {
   if (!file.value || !format.value) return;
-  const withQuality = file.value.kind === 'image' && (format.value === 'jpg' || format.value === 'webp');
+  const withQuality = usesQuality.value;
   runCurrent({ format: format.value, quality: withQuality ? quality.value : undefined }, 'fmt:' + format.value);
 }
 

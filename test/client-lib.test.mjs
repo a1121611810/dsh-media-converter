@@ -18,6 +18,7 @@ import {
   withoutKnownUploads,
   unavailableTarget,
   sourceUrl,
+  supportsQuality,
 } from '../dist/src/client/lib.js';
 
 assert.deepEqual(fitPreview(4000, 3000), { width: 900, height: 675 });
@@ -26,6 +27,17 @@ assert.deepEqual(fitPreview(6000, 9000, 128), { width: 85, height: 128 });
 assert.equal(previewMime('jpg'), 'image/jpeg');
 assert.equal(previewMime('webp'), 'image/webp');
 assert.equal(previewMime('gif'), 'image/png');
+
+// Mirror of the Host's supportsQuality: the quality slider shows for exactly
+// these lossy targets.
+assert.equal(supportsQuality('image', 'jpg'), true);
+assert.equal(supportsQuality('image', 'webp'), true);
+assert.equal(supportsQuality('image', 'png'), false);
+assert.equal(supportsQuality('video', 'mp4'), true);
+assert.equal(supportsQuality('video', 'mkv'), true);
+assert.equal(supportsQuality('video', 'webm'), false);
+assert.equal(supportsQuality('video', 'gif'), false);
+assert.equal(supportsQuality('audio', 'mp3'), false);
 
 assert.equal(formatSize(0), '');
 assert.equal(formatSize(512), '512 B');

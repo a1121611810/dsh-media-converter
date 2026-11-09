@@ -49,7 +49,24 @@ assert.throws(() => buildArgs('audio', 'mp4'), /不支持的输出格式/);
 assert.equal(supportsQuality('image', 'jpg'), true);
 assert.equal(supportsQuality('image', 'webp'), true);
 assert.equal(supportsQuality('image', 'png'), false);
-assert.equal(supportsQuality('video', 'mp4'), false);
+assert.equal(supportsQuality('audio', 'mp3'), false);
+
+// Video quality: the X264 containers take it as CRF (90 keeps the recipe's
+// 23); every other video recipe ignores it.
+assert.equal(supportsQuality('video', 'mp4'), true);
+assert.equal(supportsQuality('video', 'mkv'), true);
+assert.equal(supportsQuality('video', 'webm'), false);
+assert.equal(supportsQuality('video', 'gif'), false);
+const crfAt = (args) => args[args.indexOf('-crf') + 1];
+assert.equal(crfAt(buildArgs('video', 'mp4')), '23'); // default unchanged
+assert.equal(crfAt(buildArgs('video', 'mp4', 90)), '23');
+assert.equal(crfAt(buildArgs('video', 'mp4', 100)), '22');
+assert.equal(crfAt(buildArgs('video', 'mp4', 50)), '27');
+assert.equal(crfAt(buildArgs('video', 'mp4', 10)), '31');
+assert.equal(crfAt(buildArgs('video', 'mp4', 500)), '22'); // clamped
+assert.equal(crfAt(buildArgs('video', 'mov', 50)), '27');
+assert.equal(crfAt(buildArgs('video', 'webm', 50)), '32'); // vp9 recipe untouched
+assert.ok(!buildArgs('video', 'gif', 50).includes('-crf'));
 assert.deepEqual(buildArgs('image', 'webp', 80), ['-frames:v', '1', '-c:v', 'libwebp', '-quality', '80']);
 assert.deepEqual(buildArgs('image', 'jpg', 100), ['-frames:v', '1', '-q:v', '2']);
 assert.equal(buildArgs('image', 'jpg', 50).at(-1), '17'); // 31 - 50*0.29 = 16.5 -> 17
@@ -408,6 +425,14 @@ assert.deepEqual(amfPlan.inputArgs, ['-hwaccel', 'd3d11va', '-hwaccel_output_for
 assert.ok(!nvencPlan.args.includes('-pix_fmt'));
 // The bitrate comes from the source, the same estimate for every backend.
 assert.ok(nvencPlan.args.includes('8197k'));
+// Quality scales the derived bitrate on the hardware path (90 = unchanged).
+const hwKbps = (quality) => {
+  const plan = hardwareFor(HW_BACKENDS.videotoolbox, 'video', 'mp4', hwSize, hwDuration, quality);
+  return plan.args[plan.args.indexOf('-b:v') + 1];
+};
+assert.equal(hwKbps(90), '8197k');
+assert.equal(hwKbps(100), '9016k');
+assert.equal(hwKbps(10), '3279k');
 for (const backend of Object.values(HW_BACKENDS)) {
   assert.equal(hardwareFor(backend, 'video', 'webm', hwSize, hwDuration), null);
   assert.equal(hardwareFor(backend, 'audio', 'mp3', hwSize, hwDuration), null);
