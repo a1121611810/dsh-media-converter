@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
-import { apply, inject, pruneUploads, resolveGroups } from '../dist/index.js';
+import { apply, inject, probeFfmpeg, pruneUploads, resolveGroups, runJobAttempts } from '../dist/index.js';
 import { formatEncoders, parseDuration } from '../dist/lib/plan.js';
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-out-'));
@@ -391,9 +391,14 @@ async function waitJob(job) {
 }
 
 // A batch run settles in the background, so tests poll it like the panel does.
+// A cancelled run reports itself cancelled before its ffmpeg processes are
+// really gone, so the wait covers the rows too — how long a killed ffmpeg
+// takes to disappear is the machine's business, not the test's.
 async function waitRun(run) {
   let current = run;
-  for (let attempt = 0; attempt < 400 && current.state === 'running'; attempt += 1) {
+  const busy = (state) => state.items.some((item) => item.state === 'waiting' || item.state === 'converting');
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if (current.state !== 'running' && !busy(current)) break;
     await new Promise((resolve) => setTimeout(resolve, 50));
     current = (await call('run?id=' + run.id)).data.run;
   }
@@ -425,6 +430,23 @@ assert.deepEqual(status.data.groups, ['convert', 'edit', 'view'], 'the built-in 
 // structured route, exactly. A detection regression and a hardcoded fallback
 // value both fail here.
 assert.equal(status.data.probeMode, 'ffprobe', 'the structured probing route is reported');
+// The hardware backend the Host probed: a known one or none, and the name the
+// panel shows comes with it.
+assert.ok(
+  status.data.hardware.backend === null ||
+    ['videotoolbox', 'nvenc', 'qsv', 'amf'].includes(status.data.hardware.backend),
+  'the reported backend is a known one',
+);
+assert.equal(
+  Boolean(status.data.hardware.backendLabel),
+  status.data.hardware.backend !== null,
+  'the backend label comes with the backend',
+);
+assert.equal(
+  status.data.hardware.h264,
+  status.data.hardware.backend !== null,
+  'H.264 hardware encoding means a backend was found',
+);
 if (!status.data.ffmpegPath) {
   // A silent skip is a green run that tested nothing; CI installs ffmpeg, so
   // missing it here is a broken environment, not a reason to pass.
@@ -435,7 +457,9 @@ const ffmpeg = status.data.ffmpegPath;
 // The fake only wins where no real ffprobe sits next to ffmpeg (this dev
 // box); CI's apt install puts one there and the real binary answers instead,
 // so the fake-log assertions below are scoped by this flag.
-const fakeProbing = !fs.existsSync(path.join(path.dirname(ffmpeg), 'ffprobe'));
+// The fake ffprobe is a POSIX script: on Windows the real ffprobe.exe next
+// to ffmpeg answers instead, and the log assertions below do not apply.
+const fakeProbing = process.platform !== 'win32' && !fs.existsSync(path.join(path.dirname(ffmpeg), 'ffprobe'));
 // The advertised formats must be encodable by this exact ffmpeg: homebrew 9
 // drops libtheora and a lying table breaks conversions at runtime.
 const encoderText = spawnSync(ffmpeg, ['-hide_banner', '-encoders'], { encoding: 'utf8' }).stdout;
@@ -1922,6 +1946,169 @@ assert.equal(histAfterAll.data.ok, true);
 assert.equal(histAfterAll.data.total, 0);
 assert.equal(histAfterAll.data.items.length, 0);
 
+// --- the hardware backend probe ---------------------------------------------
+// The backends are found at runtime: the encoder list, the hardware decoders,
+// and a one-frame device check. The runner is injected, so the whole chain
+// runs on a machine with no graphics card at all.
+const probeCalls = [];
+const fakeRunner = (deviceWorks) => (args, timeoutMs) => {
+  const joined = args.join(' ');
+  probeCalls.push({ joined, timeoutMs });
+  if (joined.includes('-encoders')) {
+    return Promise.resolve(' V....D h264_nvenc           NVIDIA NVENC H.264 encoder');
+  }
+  if (joined.includes('-hwaccels')) {
+    return Promise.resolve('Hardware acceleration methods:\ncuda\nd3d11va\nqsv');
+  }
+  // The device check is the last thing the probe runs: a machine whose GPU
+  // cannot encode fails here, and then no backend is offered.
+  return deviceWorks ? Promise.resolve('') : Promise.reject(new Error('no device'));
+};
+
+const windowsProbe = await probeFfmpeg('fake', 'win32', fakeRunner(true));
+assert.equal(windowsProbe.info.backend, 'nvenc', 'the NVENC encoder is picked up');
+assert.equal(windowsProbe.info.backendLabel, 'NVIDIA NVENC');
+assert.equal(windowsProbe.info.h264, true, 'a working backend means H.264 hardware encoding');
+assert.ok(windowsProbe.encoders.includes('h264_nvenc'));
+
+// A platform with no hardware backend gets none, whatever the binary claims.
+const linuxProbe = await probeFfmpeg('fake', 'linux', fakeRunner(true));
+assert.equal(linuxProbe.info.backend, null, 'there is no Linux backend yet');
+assert.equal(linuxProbe.info.h264, false, 'no backend means no GPU switch');
+
+// A binary that lists the encoder but cannot run it (no GPU, no driver) must
+// not put a switch in front of the user.
+const brokenProbe = await probeFfmpeg('fake', 'win32', fakeRunner(false));
+assert.equal(brokenProbe.info.backend, null, 'a failing device check means no backend');
+assert.equal(brokenProbe.info.h264, false);
+
+// The real binary, probed the way the panel sees it: the encoder list comes
+// out of the actual output, and a platform without a backend gets none.
+const realProbe = await probeFfmpeg(ffmpeg, 'linux');
+assert.ok(realProbe.encoders.includes('libx264'), 'the real encoder list is parsed');
+assert.equal(realProbe.info.backend, null, 'a platform without a backend gets none');
+
+// The device check starts a graphics driver, so it waits on its own clock:
+// a driver that hangs must not hold the panel hostage.
+const listCall = probeCalls.find((call) => call.joined.includes('-encoders'));
+const deviceCall = probeCalls.find((call) => call.joined.includes('color='));
+assert.ok(listCall && deviceCall, 'the probe asked for the encoder list and ran a device check');
+assert.ok(listCall.timeoutMs >= 15000, 'the encoder list may wait for the binary');
+assert.ok(
+  deviceCall.timeoutMs < listCall.timeoutMs,
+  `the device check waits on its own clock (${deviceCall.timeoutMs} < ${listCall.timeoutMs})`,
+);
+
+// The verdict lands in a later answer: the device check runs in the
+// background, so the panel is never stuck behind a graphics driver.
+let settled = (await call('status')).data;
+for (let i = 0; i < 40 && settled.hardware.detecting; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  settled = (await call('status')).data;
+}
+assert.equal(settled.hardware.detecting, false, 'the device check finishes');
+assert.equal(
+  settled.hardware.h264,
+  settled.hardware.backend !== null,
+  'H.264 hardware encoding means a backend was found',
+);
+assert.ok(
+  settled.hardware.backend === null || ['videotoolbox', 'nvenc', 'qsv', 'amf'].includes(settled.hardware.backend),
+  'the settled backend is a known one',
+);
+
+// --- the hardware retry path ------------------------------------------------
+// A GPU that cannot decode the file runs the same encoder once more with the
+// software decoder. The attempt is injected, so the retry is checked on any
+// host, with or without a graphics card.
+const retryDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-retry-'));
+const retryOut = path.join(retryDir, 'out.mp4');
+const hwPlan = {
+  ext: 'mp4',
+  kind: 'video',
+  args: ['-c:v', 'h264_qsv'],
+  inputArgs: ['-hwaccel', 'qsv'],
+  hardware: true,
+};
+const swPlan = { ext: 'mp4', kind: 'video', args: ['-c:v', 'libx264'] };
+
+// A software job runs once.
+let swCalls = 0;
+const swResult = await runJobAttempts(
+  swPlan,
+  async () => {
+    swCalls += 1;
+    return { ok: true, size: 10, error: '', ms: 5 };
+  },
+  retryOut,
+  () => false,
+);
+assert.equal(swCalls, 1, 'a software job runs once');
+assert.equal(swResult.ok, true);
+assert.equal(swResult.tries, 1);
+
+// A hardware job that fails runs again without the hardware decoder.
+const hwCalls = [];
+const hwResult = await runJobAttempts(
+  hwPlan,
+  async (plan) => {
+    hwCalls.push(plan);
+    return hwCalls.length === 1
+      ? { ok: false, size: 0, error: 'no device', ms: 3 }
+      : { ok: true, size: 42, error: '', ms: 9 };
+  },
+  retryOut,
+  () => false,
+);
+assert.equal(hwCalls.length, 2, 'the failed hardware try is followed by a second one');
+assert.deepEqual(hwCalls[0].inputArgs, ['-hwaccel', 'qsv'], 'the first try decodes on the GPU');
+assert.equal(hwCalls[1].inputArgs, undefined, 'the second try decodes on the CPU');
+assert.deepEqual(hwCalls[1].args, hwPlan.args, 'the encoder stays on the GPU');
+assert.equal(hwResult.ok, true);
+assert.equal(hwResult.size, 42);
+assert.equal(hwResult.tries, 2);
+assert.equal(hwResult.ms, 9, 'the time of the run that worked is the one that counts');
+
+// Both tries fail: the last error is the one reported.
+let failCalls = 0;
+const failed = await runJobAttempts(
+  hwPlan,
+  async () => {
+    failCalls += 1;
+    return { ok: false, size: 0, error: `boom ${failCalls}`, ms: 1 };
+  },
+  retryOut,
+  () => false,
+);
+assert.equal(failed.ok, false);
+assert.equal(failed.error, 'boom 2', 'the error of the last try is reported');
+assert.equal(failed.tries, 2, 'a hardware job tries twice before giving up');
+
+// A cancel between the tries stops the job: no second run.
+let cancelCalls = 0;
+const cancelledRun = await runJobAttempts(
+  hwPlan,
+  async () => {
+    cancelCalls += 1;
+    return { ok: false, size: 0, error: 'cancelled', ms: 1 };
+  },
+  retryOut,
+  () => cancelCalls >= 1,
+);
+assert.equal(cancelCalls, 1, 'a cancelled job does not start a second try');
+assert.equal(cancelledRun.ok, false);
+
+// The half-written output of a failed try is removed before the next one.
+fs.writeFileSync(retryOut, 'junk');
+await runJobAttempts(
+  hwPlan,
+  async () => ({ ok: false, size: 0, error: 'x', ms: 1 }),
+  retryOut,
+  () => false,
+);
+assert.ok(!fs.existsSync(retryOut), 'the failed output is removed before the next try');
+fs.rmSync(retryDir, { recursive: true, force: true });
+
 histCleanups.forEach((dispose) => dispose());
 
 cleanups.forEach((dispose) => dispose());
@@ -1932,4 +2119,106 @@ assert.ok(fs.existsSync(nestedFile), 'a nested registered file is never deleted'
 fs.rmSync(browseDir, { recursive: true, force: true });
 fs.rmSync(ledgerDir, { recursive: true, force: true });
 fs.rmSync(outDir, { recursive: true, force: true });
+// --- a broken ffmpeg must not empty the panel --------------------------------
+// An ffmpeg that cannot even list its encoders must leave the panel usable:
+// the built-in format table is the fallback, and no GPU is offered. This
+// instance runs last: the device check writes the instance's own verdict, and
+// a stray one would only confuse the instances above.
+const brokenRoutes = new Map();
+const brokenOut = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-broken-'));
+const brokenCleanups = [];
+apply(
+  {
+    get: (key) =>
+      key === 'webServer'
+        ? {
+            getOrigin: () => 'http://127.0.0.1:65533',
+            register: (route) => {
+              brokenRoutes.set(route.path, route.handler);
+              return () => brokenRoutes.delete(route.path);
+            },
+          }
+        : key === 'connection'
+          ? connection
+          : undefined,
+    tools: { register: () => () => {} },
+    settings: { configure: () => () => {}, update: async () => {} },
+    effect: (fn) => brokenCleanups.push(fn()),
+  },
+  // node itself is a perfectly executable file that answers nothing ffmpeg
+  // would understand: the probe fails exactly as it would on a broken binary.
+  { outputDir: brokenOut, ffmpegPath: process.execPath },
+);
+const brokenStatus = async () => {
+  const res = makeRes();
+  await brokenRoutes.get('/api/media-convert/status')(
+    fakeReq({ method: 'GET', url: '/api/media-convert/status' }),
+    res,
+  );
+  await res.done;
+  return JSON.parse(Buffer.concat(res.chunks).toString('utf8'));
+};
+const brokenFirst = await brokenStatus();
+assert.equal(brokenFirst.ok, true, JSON.stringify(brokenFirst));
+assert.ok(brokenFirst.formats.video.length > 0, 'a broken ffmpeg keeps the built-in format table');
+assert.ok(brokenFirst.formats.audio.length > 0, 'the audio formats survive too');
+assert.ok(brokenFirst.formats.image.length > 0, 'the image formats survive too');
+assert.equal(brokenFirst.hardware.h264, false, 'a broken ffmpeg offers no GPU');
+assert.equal(brokenFirst.hardware.detecting, true, 'the device check is still running');
+
+// The verdict lands in a later answer.
+const brokenSecond = await brokenStatus();
+assert.equal(brokenSecond.hardware.detecting, false, 'the verdict lands in a later answer');
+assert.equal(brokenSecond.hardware.backend, null, 'a broken ffmpeg has no backend');
+brokenCleanups.forEach((dispose) => dispose());
+fs.rmSync(brokenOut, { recursive: true, force: true });
+
+// --- a reloaded plugin must not wait for a probe that already ran ----------
+// The device probe is cached per ffmpeg path, but the verdict belongs to the
+// instance. A second instance — the plugin was disabled and enabled again —
+// must adopt the cached verdict instead of reporting "still detecting"
+// forever, which would hide the GPU switch for good.
+const reloadRoutes = new Map();
+const reloadOut = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-reload-'));
+const reloadCleanups = [];
+apply(
+  {
+    get: (key) =>
+      key === 'webServer'
+        ? {
+            getOrigin: () => 'http://127.0.0.1:65533',
+            register: (route) => {
+              reloadRoutes.set(route.path, route.handler);
+              return () => reloadRoutes.delete(route.path);
+            },
+          }
+        : key === 'connection'
+          ? connection
+          : undefined,
+    tools: { register: () => () => {} },
+    settings: { configure: () => () => {}, update: async () => {} },
+    effect: (fn) => reloadCleanups.push(fn()),
+  },
+  // The very path the broken instance above already probed: the cache is
+  // warm, so this instance only has to adopt the verdict.
+  { outputDir: reloadOut, ffmpegPath: process.execPath },
+);
+const reloadStatus = async () => {
+  const res = makeRes();
+  await reloadRoutes.get('/api/media-convert/status')(
+    fakeReq({ method: 'GET', url: '/api/media-convert/status' }),
+    res,
+  );
+  await res.done;
+  return JSON.parse(Buffer.concat(res.chunks).toString('utf8'));
+};
+const reloadFirst = await reloadStatus();
+assert.equal(reloadFirst.ok, true, JSON.stringify(reloadFirst));
+assert.equal(reloadFirst.hardware.detecting, true, 'the first answer still reports the check');
+const reloadSecond = await reloadStatus();
+assert.equal(reloadSecond.hardware.detecting, false, 'a reloaded plugin adopts the cached verdict');
+assert.equal(reloadSecond.hardware.backend, null, 'the adopted verdict is the one that was probed');
+reloadCleanups.forEach((dispose) => dispose());
+fs.rmSync(reloadOut, { recursive: true, force: true });
+
 console.log('host.test.mjs: ok');

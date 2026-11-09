@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import {
   FORMATS,
+  HW_BACKENDS,
   buildArgs,
   copyArgs,
   defaultFormat,
@@ -376,14 +377,46 @@ assert.equal(copyArgs('video', 'mp4', { video: { codec: 'vp9' }, audio: { codec:
 assert.ok(copyArgs('audio', 'mp3', { video: null, audio: { codec: 'mp3' } }));
 assert.equal(copyArgs('audio', 'mp3', { video: null, audio: { codec: 'aac' } }), null);
 
-// VideoToolbox only for the libx264 containers.
-const hwPlan = hardwareFor('video', 'mp4', 10 * 1024 * 1024, 10);
-assert.ok(hwPlan.args.includes('h264_videotoolbox'));
-assert.deepEqual(hwPlan.inputArgs, ['-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox']);
+// Hardware H.264: one row per vendor, and only the libx264 containers.
+const hwSize = 10 * 1024 * 1024;
+const hwDuration = 10;
+const vtPlan = hardwareFor(HW_BACKENDS.videotoolbox, 'video', 'mp4', hwSize, hwDuration);
+assert.ok(vtPlan.args.includes('h264_videotoolbox'));
+assert.ok(vtPlan.args.includes('-allow_sw'));
+assert.deepEqual(vtPlan.inputArgs, ['-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox']);
+
+const nvencPlan = hardwareFor(HW_BACKENDS.nvenc, 'video', 'mp4', hwSize, hwDuration);
+assert.ok(nvencPlan.args.includes('h264_nvenc'));
+assert.ok(nvencPlan.args.includes('-rc'));
+assert.ok(nvencPlan.args.includes('vbr'));
+assert.deepEqual(nvencPlan.inputArgs, ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda']);
+
+const qsvPlan = hardwareFor(HW_BACKENDS.qsv, 'video', 'mp4', hwSize, hwDuration);
+assert.ok(qsvPlan.args.includes('h264_qsv'));
+assert.deepEqual(qsvPlan.inputArgs, ['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv']);
+// QSV reads -b:v plus -maxrate as VBR; without -maxrate it falls back to
+// constant QP and the bitrate runs away.
+assert.ok(qsvPlan.args.includes('-maxrate'));
+
+const amfPlan = hardwareFor(HW_BACKENDS.amf, 'video', 'mp4', hwSize, hwDuration);
+assert.ok(amfPlan.args.includes('h264_amf'));
+assert.ok(amfPlan.args.includes('vbr_peak'));
+assert.deepEqual(amfPlan.inputArgs, ['-hwaccel', 'd3d11va', '-hwaccel_output_format', 'd3d11']);
+
 // No -pix_fmt on purpose: forcing a conversion would download the GPU frames
 // and break the zero-copy path.
-assert.ok(!hwPlan.args.includes('-pix_fmt'));
-assert.equal(hardwareFor('video', 'webm', 10 * 1024 * 1024, 10), null);
+assert.ok(!nvencPlan.args.includes('-pix_fmt'));
+// The bitrate comes from the source, the same estimate for every backend.
+assert.ok(nvencPlan.args.includes('8197k'));
+for (const backend of Object.values(HW_BACKENDS)) {
+  assert.equal(hardwareFor(backend, 'video', 'webm', hwSize, hwDuration), null);
+  assert.equal(hardwareFor(backend, 'audio', 'mp3', hwSize, hwDuration), null);
+  for (const format of ['mp4', 'mov', 'mkv', 'flv', 'ts']) {
+    const plan = hardwareFor(backend, 'video', format, hwSize, hwDuration);
+    assert.ok(plan, backend.id + ' supports ' + format);
+    assert.ok(plan.args.includes('-b:v'));
+  }
+}
 
 // CPU-aware capacity and thread split.
 assert.equal(capacityFor(0.9, 10), 1);

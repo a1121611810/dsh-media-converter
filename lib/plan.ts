@@ -79,11 +79,11 @@ export interface ConvertPlan {
   ext: string;
   kind: MediaKind;
   args: string[];
-  // Input options that must sit before -i (e.g. -hwaccel videotoolbox).
+  // Input options that must sit before -i (e.g. -hwaccel cuda).
   inputArgs?: string[];
   // True when the job only rewrites the container.
   copy?: boolean;
-  // True when the video encoder is Apple VideoToolbox.
+  // True when the video encoder runs on the graphics card.
   hardware?: boolean;
   // 0 / undefined lets ffmpeg pick its own thread count.
   threads?: number;
@@ -302,12 +302,72 @@ export function copyArgs(kind: MediaKind, format: string, meta: MediaMeta | null
   return args;
 }
 
-// Apple VideoToolbox H.264. Only the containers that currently use libx264
-// are eligible; the quality/bitrate estimate is explained in the UI. Frames
-// stay on the GPU end to end: -hwaccel_output_format keeps the decoder's
-// videotoolbox_vld frames, which the encoder accepts directly, and no
-// -pix_fmt is set on purpose — forcing yuv420p would download every frame
-// to the CPU for conversion and defeat the zero-copy path.
+// The hardware encoders the toolkit can drive, one row per vendor. The
+// probe picks the first row this machine can really run; the row itself says
+// which encoder to call, how to keep the frames on the GPU, and the few rate
+// control options the encoder needs before -b:v means anything.
+export type HwBackendId = 'videotoolbox' | 'nvenc' | 'qsv' | 'amf';
+
+export interface HwBackend {
+  id: HwBackendId;
+  // Shown in the panel; a vendor name needs no translation.
+  label: string;
+  encoder: string;
+  // The name -hwaccels reports for this vendor's hardware decoder.
+  hwaccel: string;
+  // Input options, before -i: hardware decode that feeds the encoder directly.
+  decodeArgs: string[];
+  // Encoder options that make -b:v/-maxrate mean what they say.
+  rateArgs: string[];
+}
+
+export const HW_BACKENDS: Record<HwBackendId, HwBackend> = {
+  videotoolbox: {
+    id: 'videotoolbox',
+    label: 'Apple VideoToolbox',
+    encoder: 'h264_videotoolbox',
+    hwaccel: 'videotoolbox',
+    decodeArgs: ['-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox'],
+    // VideoToolbox's own fallback switch: software encode if the GPU says no.
+    rateArgs: ['-allow_sw', '1'],
+  },
+  nvenc: {
+    id: 'nvenc',
+    label: 'NVIDIA NVENC',
+    encoder: 'h264_nvenc',
+    hwaccel: 'cuda',
+    decodeArgs: ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'],
+    // Without an explicit rate control mode NVENC decides on its own what
+    // -b:v means.
+    rateArgs: ['-rc', 'vbr'],
+  },
+  qsv: {
+    id: 'qsv',
+    label: 'Intel Quick Sync',
+    encoder: 'h264_qsv',
+    hwaccel: 'qsv',
+    decodeArgs: ['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'],
+    // No rate option needed: QSV reads -b:v plus -maxrate as VBR on its own.
+    rateArgs: [],
+  },
+  amf: {
+    id: 'amf',
+    label: 'AMD AMF',
+    encoder: 'h264_amf',
+    hwaccel: 'd3d11va',
+    // d3d11 (not d3d11va) is what the AMF encoder takes without a copy.
+    decodeArgs: ['-hwaccel', 'd3d11va', '-hwaccel_output_format', 'd3d11'],
+    // AMF would otherwise run constant QP and ignore -b:v entirely.
+    rateArgs: ['-rc', 'vbr_peak'],
+  },
+};
+
+// Hardware H.264. Only the containers that currently use libx264 are
+// eligible; the quality/bitrate estimate is explained in the UI. Frames stay
+// on the GPU end to end: -hwaccel_output_format keeps the decoder's hardware
+// frames, which the encoder accepts directly, and no -pix_fmt is set on
+// purpose — forcing yuv420p would download every frame to the CPU for
+// conversion and defeat the zero-copy path.
 const HW_AUDIO: Record<string, string[]> = {
   mp4: ['-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'],
   mov: ['-c:a', 'aac', '-b:a', '192k'],
@@ -317,6 +377,7 @@ const HW_AUDIO: Record<string, string[]> = {
 };
 
 export function hardwareFor(
+  backend: HwBackend,
   kind: MediaKind,
   format: string,
   size: number,
@@ -327,18 +388,19 @@ export function hardwareFor(
   const totalKbps = duration > 0 ? (size * 8) / duration / 1000 : 0;
   const videoKbps = Math.min(12000, Math.max(1500, Math.round(totalKbps - 192)));
   return {
-    inputArgs: ['-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox'],
+    inputArgs: [...backend.decodeArgs],
     args: [
       '-c:v',
-      'h264_videotoolbox',
+      backend.encoder,
       '-b:v',
       videoKbps + 'k',
+      // -maxrate stays: QSV reads -b:v plus -maxrate as VBR and falls back to
+      // constant QP (an uncontrolled bitrate) when it is missing.
       '-maxrate',
       Math.round(videoKbps * 1.5) + 'k',
       '-bufsize',
       String(videoKbps * 2) + 'k',
-      '-allow_sw',
-      '1',
+      ...backend.rateArgs,
       ...audio,
     ],
   };

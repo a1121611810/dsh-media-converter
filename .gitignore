@@ -159,3 +159,6 @@ dist/
 
 # local agent skills (tooling, not part of the plugin)
 .agents/
+
+# mutation-check crash recovery (see scripts/mutation-check.mjs)
+.mutation-backup/

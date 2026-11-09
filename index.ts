@@ -55,7 +55,16 @@ import {
   threadArgs,
   trimArgs,
 } from './lib/plan.js';
-import type { ConvertPlan, FormatTable, MediaKind, MediaMeta, StreamInfo, TrimWindow } from './lib/plan.js';
+import type {
+  ConvertPlan,
+  FormatTable,
+  HwBackend,
+  HwBackendId,
+  MediaKind,
+  MediaMeta,
+  StreamInfo,
+  TrimWindow,
+} from './lib/plan.js';
 import {
   PTC_DEFAULT_RATES,
   WEIGHTS,
@@ -69,9 +78,9 @@ import type { PtcRates } from './lib/schedule.js';
 import {
   expandDirs,
   ffmpegCandidates,
-  hardwarePathAllowed,
   imageioPatterns,
   isInsideDir,
+  pickBackend,
   probeCandidates,
   revealCommand,
   safeBaseName,
@@ -406,36 +415,142 @@ export interface HardwareInfo {
   h264: boolean;
   hevc: boolean;
   hwaccel: boolean;
+  // The backend the probe settled on, and the name the panel shows.
+  backend: HwBackendId | null;
+  backendLabel: string | null;
+  // True while the device check is still running: the panel must not offer a
+  // backend the Host has not verified yet.
+  detecting: boolean;
 }
-const noHardware: HardwareInfo = { h264: false, hevc: false, hwaccel: false };
-interface FfmpegProbe {
+const noHardware: HardwareInfo = {
+  h264: false,
+  hevc: false,
+  hwaccel: false,
+  backend: null,
+  backendLabel: null,
+  detecting: false,
+};
+export interface FfmpegProbe {
   info: HardwareInfo;
   // Encoder names from `-encoders`, e.g. "libtheora"; drives supportedFormats.
   encoders: string[];
+  // The backend this machine can really run, if any.
+  backend: HwBackend | null;
 }
-const probeCache = new Map<string, Promise<FfmpegProbe>>();
-function detectHardware(ffmpeg: string): Promise<FfmpegProbe> {
-  let pending = probeCache.get(ffmpeg);
-  if (!pending) {
-    pending = new Promise((resolve) => {
-      execFile(ffmpeg, ['-hide_banner', '-encoders'], { timeout: 15000 }, (_e1, enc) => {
-        execFile(ffmpeg, ['-hide_banner', '-hwaccels'], { timeout: 15000 }, (_e2, accel) => {
-          const text = String(enc || '');
-          resolve({
-            info: {
-              h264: /h264_videotoolbox/.test(text),
-              hevc: /hevc_videotoolbox/.test(text),
-              hwaccel: /videotoolbox/.test(String(accel || '')),
-            },
-            // Some lines carry a leading space in the flags column (" VF...D").
-            encoders: [...text.matchAll(/^\s*[A-Z.]{6}\s+(\S+)/gm)].map((match) => match[1]),
-          });
-        });
-      });
+// The cheap half of the probe, per ffmpeg path.
+const buildCache = new Map<string, Promise<FfmpegBuild>>();
+// The device half, per ffmpeg path: one driver check per binary.
+const deviceCache = new Map<string, Promise<HwBackend | null>>();
+
+// Running ffmpeg: resolves with its output, rejects when the command fails.
+// The runner is injected so the whole probe can be walked on a machine that
+// has no graphics card at all.
+export type FfmpegRunner = (args: string[], timeoutMs?: number) => Promise<string>;
+
+// Listing the encoders and the hardware decoders: two local calls, no
+// graphics driver involved.
+const FFMPEG_TIMEOUT_MS = 15_000;
+// One real frame through the encoder starts a graphics driver. A driver that
+// hangs must not hold the panel hostage, so this call waits on its own.
+// shortcut: 8 seconds; no real machine needed more than one, but the first
+// oneVPL init can take a few. Raise it if a real machine needs more.
+const DEVICE_TIMEOUT_MS = 8_000;
+
+function execRunner(ffmpeg: string): FfmpegRunner {
+  return (args, timeoutMs = FFMPEG_TIMEOUT_MS) =>
+    new Promise((resolve, reject) => {
+      execFile(ffmpeg, args, { timeout: timeoutMs }, (err, stdout) =>
+        err ? reject(err) : resolve(String(stdout || '')),
+      );
     });
-    probeCache.set(ffmpeg, pending);
-  }
-  return pending;
+}
+
+// One frame through the encoder. A vendor encoder can be compiled into the
+// binary and still have no device to talk to (no matching GPU, no driver),
+// so only a real encode proves the machine can use it. The rate options ride
+// along: an option name this ffmpeg does not know fails the check here
+// instead of in the middle of a user's batch.
+function deviceArgs(backend: HwBackend): string[] {
+  return [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    'color=c=black:s=64x64:r=1:d=0.1',
+    '-frames:v',
+    '1',
+    ...backend.rateArgs,
+    '-c:v',
+    backend.encoder,
+    '-b:v',
+    '200k',
+    '-f',
+    'null',
+    '-',
+  ];
+}
+
+// What this ffmpeg binary can do: the encoder names and the hardware
+// decoders it carries. Both come from cheap local calls.
+export interface FfmpegBuild {
+  encoders: string[];
+  hwaccels: Set<string>;
+}
+
+export async function probeFfmpegBuild(ffmpeg: string, run: FfmpegRunner = execRunner(ffmpeg)): Promise<FfmpegBuild> {
+  const [encText, accelText] = await Promise.all([
+    run(['-hide_banner', '-encoders'], FFMPEG_TIMEOUT_MS).catch(() => ''),
+    run(['-hide_banner', '-hwaccels'], FFMPEG_TIMEOUT_MS).catch(() => ''),
+  ]);
+  // Some lines carry a leading space in the flags column (" VF...D").
+  const encoders = [...encText.matchAll(/^\s*[A-Z.]{6}\s+(\S+)/gm)].map((match) => match[1]);
+  const hwaccels = new Set(accelText.split(/\s+/).filter((name) => /^[a-z][a-z0-9_]*$/.test(name)));
+  return { encoders, hwaccels };
+}
+
+// Which backend this machine can really run. This starts a graphics driver,
+// so it can take seconds; the caller usually runs it in the background.
+export async function probeFfmpegDevice(
+  platform: string,
+  build: FfmpegBuild,
+  run: FfmpegRunner,
+): Promise<HwBackend | null> {
+  // The first backend this machine can really run wins: a laptop with an
+  // Intel GPU and an NVIDIA card uses the NVIDIA encoder. Only a real encode
+  // counts — an encoder the binary carries but the GPU cannot run must not
+  // put a GPU switch in front of the user.
+  return pickBackend(platform, build.encoders, build.hwaccels, async (backend) => {
+    try {
+      await run(deviceArgs(backend), DEVICE_TIMEOUT_MS);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+// Both halves, for a caller that can wait.
+export async function probeFfmpeg(
+  ffmpeg: string,
+  platform = process.platform,
+  run: FfmpegRunner = execRunner(ffmpeg),
+): Promise<FfmpegProbe> {
+  const build = await probeFfmpegBuild(ffmpeg, run);
+  const chosen = await probeFfmpegDevice(platform, build, run);
+  return {
+    info: {
+      h264: chosen !== null,
+      hevc: build.encoders.includes('hevc_videotoolbox'),
+      hwaccel: chosen !== null,
+      backend: chosen ? chosen.id : null,
+      backendLabel: chosen ? chosen.label : null,
+      detecting: false,
+    },
+    encoders: build.encoders,
+    backend: chosen,
+  };
 }
 
 let modelCatalog: { at: number; models: PtcModelOption[]; unavailable: string[] } | null = null;
@@ -749,6 +864,41 @@ function base64Encoder(): Transform {
 // fence cannot be missed because the plugin started a moment too early.
 export const inject = ['webServer', 'tools', 'settings', 'connection'];
 
+// One ffmpeg run's outcome. ms is how long the run took: the throughput
+// estimate needs the time of the run that actually produced the file.
+export interface AttemptOutcome {
+  ok: boolean;
+  size: number;
+  error: string;
+  ms: number;
+}
+
+// The plans one job tries, in order: the hardware plan first, then the same
+// plan without the hardware decoder (the encoder stays on the GPU). A
+// software job has one try. A failed run can leave half an output file
+// behind, so it is removed before the next try.
+export async function runJobAttempts(
+  plan: ConvertPlan,
+  attempt: (plan: ConvertPlan) => Promise<AttemptOutcome>,
+  out: string,
+  shouldStop: () => boolean,
+): Promise<{ ok: boolean; size: number; error: string; ms: number; tries: number }> {
+  const plans = plan.hardware ? [plan, { ...plan, inputArgs: undefined }] : [plan];
+  let lastError = '';
+  let tries = 0;
+  for (const next of plans) {
+    if (shouldStop()) break;
+    tries += 1;
+    const result = await attempt(next);
+    if (result.ok) return { ok: true, size: result.size, error: '', ms: result.ms, tries };
+    lastError = result.error;
+    if (shouldStop()) break;
+    // The next attempt starts from a clean slate.
+    await fsp.rm(out, { force: true }).catch(() => {});
+  }
+  return { ok: false, size: 0, error: lastError, ms: 0, tries };
+}
+
 export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // The loaded config, updated by the config route after each save so the
   // live merge accumulates across saves instead of restarting from the
@@ -807,6 +957,44 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     queueLimitN = Math.max(10, Math.round(cfgQueueLimit === undefined ? DEFAULT_QUEUE_LIMIT : Number(cfgQueueLimit)));
   };
   resolveConfig(cfg);
+  // The backend this machine can really run. planFor() is synchronous, so the
+  // probe publishes its verdict here. undefined = the device check is still
+  // running, null = no backend works, otherwise the backend itself.
+  let hwBackend: HwBackend | null | undefined = undefined;
+  // Whether the device check has produced its verdict.
+  let deviceSettled = false;
+  // The cheap half of the probe: the encoder list and the hardware decoders.
+  const detectBuild = (bin: string): Promise<FfmpegBuild> => {
+    let pending = buildCache.get(bin);
+    if (!pending) {
+      pending = probeFfmpegBuild(bin);
+      buildCache.set(bin, pending);
+    }
+    return pending;
+  };
+  // The slow half: it starts the graphics driver, so it runs in the
+  // background. The verdict lands in hwBackend when it is ready.
+  const startDeviceProbe = (bin: string, build: FfmpegBuild): Promise<HwBackend | null> => {
+    let pending = deviceCache.get(bin);
+    if (!pending) {
+      pending = probeFfmpegDevice(process.platform, build, execRunner(bin)).catch(() => null);
+      deviceCache.set(bin, pending);
+    }
+    // The cache outlives the instance: whoever asks adopts the verdict, so a
+    // reloaded plugin does not wait for a probe that already ran.
+    return pending.then((backend) => {
+      hwBackend = backend;
+      deviceSettled = true;
+      return backend;
+    });
+  };
+  // Wait for the verdict (the device check times out on its own). For a
+  // request that asks for hardware encoding while the verdict is still
+  // unknown: better to wait than to quietly fall back to the CPU.
+  const deviceVerdict = async (bin: string): Promise<HwBackend | null> => {
+    if (deviceSettled) return hwBackend ?? null;
+    return startDeviceProbe(bin, await detectBuild(bin));
+  };
   const tmpDir = path.join(os.tmpdir(), 'dsh-media-toolbox');
   const version = pluginVersion();
 
@@ -974,87 +1162,123 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       settle = resolve;
     });
 
-    const args = [
-      '-y',
-      '-hide_banner',
-      '-loglevel',
-      'error',
-      ...(plan.inputArgs || []),
-      ...trimArgs(trim),
-      '-i',
-      upload.path,
-      ...plan.args,
-      ...threadArgs(plan.threads),
-      '-progress',
-      'pipe:1',
-      '-nostats',
-      out,
-    ];
-    // The AbortSignal is the whole cancel mechanism: aborting kills the ffmpeg
-    // process, and the close handler below cleans up what it left behind.
-    const controller = new AbortController();
-    // The routes answer with "no ffmpeg" before they ever start a job.
-    const child = spawn(ffmpeg!, args, { stdio: ['ignore', 'pipe', 'pipe'], signal: controller.signal });
-    controllers.set(job.id, { controller, child, killTimer: null });
-    children.add(child);
+    // One ffmpeg run with the given plan. The caller decides how many
+    // plans to try.
+    const attemptOnce = (attempt: ConvertPlan): Promise<AttemptOutcome> =>
+      new Promise((resolve) => {
+        const started = Date.now();
+        const args = [
+          '-y',
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          ...(attempt.inputArgs || []),
+          ...trimArgs(trim),
+          '-i',
+          upload.path,
+          ...attempt.args,
+          ...threadArgs(attempt.threads),
+          '-progress',
+          'pipe:1',
+          '-nostats',
+          out,
+        ];
+        // The AbortSignal is the whole cancel mechanism: aborting kills the
+        // ffmpeg process, and the close handler below cleans up what it left.
+        const controller = new AbortController();
+        // The routes answer with "no ffmpeg" before they ever start a job.
+        const child = spawn(ffmpeg!, args, { stdio: ['ignore', 'pipe', 'pipe'], signal: controller.signal });
+        controllers.set(job.id, { controller, child, killTimer: null });
+        children.add(child);
 
-    let buffered = '';
-    let tail = '';
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => {
-      buffered += chunk;
-      const lines = buffered.split('\n');
-      buffered = lines.pop() || '';
-      for (const line of lines) {
-        if (job.state !== 'running') return;
-        const seconds = progressSeconds(line);
-        if (seconds !== null) job.percent = percentOf(seconds, span);
-      }
-    });
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk) => {
-      tail = normalizeStderr(tail + chunk).slice(-2000);
-    });
-    child.on('error', (err) => {
-      // An aborted job already carries its own state.
-      if (job.state !== 'running') return;
-      job.state = 'error';
-      job.error = String((err && err.message) || err);
-      record('error', 0, job.error);
-    });
-    child.on('close', async (code) => {
+        let buffered = '';
+        let tail = '';
+        let spawnError = '';
+        child.stdout.setEncoding('utf8');
+        child.stdout.on('data', (chunk) => {
+          buffered += chunk;
+          const lines = buffered.split('\n');
+          buffered = lines.pop() || '';
+          for (const line of lines) {
+            if (job.state !== 'running') return;
+            const seconds = progressSeconds(line);
+            if (seconds !== null) job.percent = percentOf(seconds, span);
+          }
+        });
+        child.stderr.setEncoding('utf8');
+        child.stderr.on('data', (chunk) => {
+          tail = normalizeStderr(tail + chunk).slice(-2000);
+        });
+        child.on('error', (err) => {
+          // 'close' follows a spawn failure, so the verdict is made there.
+          spawnError = String((err && err.message) || err);
+        });
+        child.on('close', async (code) => {
+          children.delete(child);
+          const entry = controllers.get(job.id);
+          if (entry && entry.killTimer) clearTimeout(entry.killTimer);
+          controllers.delete(job.id);
+          if (job.state === 'cancelling') {
+            // ffmpeg can have written half an output before the kill landed.
+            await fsp.rm(out, { force: true }).catch(() => {});
+            job.state = 'cancelled';
+            record('cancelled', 0, null);
+            resolve({ ok: false, size: 0, error: 'cancelled', ms: Date.now() - started });
+            return;
+          }
+          if (code === 0 && !spawnError) {
+            try {
+              const size = (await fsp.stat(out)).size;
+              resolve({ ok: true, size, error: '', ms: Date.now() - started });
+            } catch (err) {
+              resolve({ ok: false, size: 0, error: errorText(err), ms: Date.now() - started });
+            }
+            return;
+          }
+          // ffmpeg can create the output before failing; never report that as done.
+          await fsp.rm(out, { force: true }).catch(() => {});
+          resolve({
+            ok: false,
+            size: 0,
+            error: tail.trim().split('\n').slice(-3).join(' ') || spawnError || `ffmpeg 退出码 ${code}`,
+            ms: Date.now() - started,
+          });
+        });
+      });
+
+    // The job runs in the background: the caller gets the job record now and
+    // waits on `done` when it needs the result.
+    const run = async (): Promise<void> => {
       try {
-        children.delete(child);
-        const entry = controllers.get(job.id);
-        if (entry && entry.killTimer) clearTimeout(entry.killTimer);
-        controllers.delete(job.id);
-        if (job.state === 'cancelling') {
-          // ffmpeg can have written half an output before the kill landed.
+        // A GPU that cannot decode this file (VP9 on an older Intel chip,
+        // ProRes, anything the driver does not list) must not sink the job:
+        // the same encoder runs once more with the software decoder. The
+        // encoder stays on the GPU, so the result is still a hardware encode.
+        const result = await runJobAttempts(plan, attemptOnce, out, () => job.state !== 'running');
+        if (result.ok) {
+          job.size = result.size;
+          job.state = 'done';
+          job.percent = 100;
+          recordPtcRate(job, span, result.ms);
+          record('done', job.size, null);
+          return;
+        }
+        if (job.state === 'running') {
+          job.state = 'error';
+          job.error = result.error;
+          record('error', 0, job.error);
+        } else if (job.state === 'cancelling') {
+          // The cancel landed between two attempts: no process was left to kill.
           await fsp.rm(out, { force: true }).catch(() => {});
           job.state = 'cancelled';
           record('cancelled', 0, null);
-          return;
-        }
-        if (job.state !== 'running') return;
-        try {
-          if (code !== 0) throw new Error(`ffmpeg 退出码 ${code}`);
-          job.size = (await fsp.stat(out)).size;
-          job.state = 'done';
-          job.percent = 100;
-          recordPtcRate(job, span, Date.now() - job.at);
-          record('done', job.size, null);
-        } catch (err) {
-          // ffmpeg can create the output before failing; never report that as done.
-          await fsp.rm(out, { force: true }).catch(() => {});
-          job.state = 'error';
-          job.error = tail.trim().split('\n').slice(-3).join(' ') || errorText(err);
-          record('error', 0, job.error);
         }
       } finally {
         // The job has its final state now: whoever waits for it can go on.
         settle();
       }
-    });
+    };
+    void run();
     return { job, done };
   };
 
@@ -1062,11 +1286,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // Shared by the agent tool and the PTC media.convert binding.
   const awaitJob = async (job: Job, done: Promise<void>, signal: AbortSignal): Promise<Job> => {
     const abort = () => {
-      const entry = controllers.get(job.id);
-      if (entry && job.state === 'running') {
-        job.state = 'cancelling';
-        entry.controller.abort();
-      }
+      if (job.state !== 'running') return;
+      // The state is marked first: the job can sit between two attempts, with
+      // no process left to kill.
+      job.state = 'cancelling';
+      controllers.get(job.id)?.controller.abort();
     };
     if (signal.aborted) abort();
     else signal.addEventListener('abort', abort, { once: true });
@@ -1082,11 +1306,15 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
 
   // The run drives its items in three lanes: a software video encode saturates
   // every core (see capacityFor), so only one runs at a time; hardware encodes
-  // ride the Apple media engine, cap 3 — parallel 1080p sessions barely slow
-  // each other, 4K does; everything else (copy/image/audio) is cheap and light.
+  // ride the graphics card's media engine, cap 3 — parallel 1080p sessions
+  // barely slow each other, 4K does; everything else (copy/image/audio) is
+  // cheap and light.
   // A lane's workers walk their own queue, so a slow software video never
   // blocks the other lanes behind it.
   const executeRun = async (run: RunInfo, quality: number, hardware: boolean): Promise<void> => {
+    // The backend must be settled before the plans are built, or a batch
+    // that asked for hardware encoding would quietly fall back to the CPU.
+    if (hardware) await deviceVerdict(ffmpeg!);
     const controller = new AbortController();
     runControllers.set(run.id, controller);
     const { signal } = controller;
@@ -1200,6 +1428,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     quality: number,
     hardware: boolean,
   ): Promise<void> => {
+    // The backend must be settled before the plans are built, or a batch
+    // that asked for hardware encoding would quietly fall back to the CPU.
+    if (hardware) await deviceVerdict(ffmpeg!);
     const controller = new AbortController();
     runControllers.set(run.id, controller);
     const { signal } = controller;
@@ -1421,10 +1652,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       const copy = copyArgs(upload.kind, format, upload.meta);
       if (copy) return { ext: format, kind: kindByExt(format), args: copy, copy: true };
     }
-    // videotoolbox is Apple-only; elsewhere the hardware ask silently gets
-    // the software plan instead of a doomed ffmpeg command.
-    if (body.hardware && hardwarePathAllowed(process.platform)) {
-      const hw = hardwareFor(upload.kind, format, upload.size, upload.duration);
+    // The hardware path is vendor specific and only exists where the probe
+    // found a backend this machine can really run; elsewhere the hardware ask
+    // silently gets the software plan instead of a doomed ffmpeg command.
+    if (body.hardware && hwBackend) {
+      const hw = hardwareFor(hwBackend, upload.kind, format, upload.size, upload.duration);
       if (hw) {
         return {
           ext: format,
@@ -1606,7 +1838,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // Cooperative CPU-aware queue. ffmpeg processes are CPU-heavy, so the
   // capacity follows the machine's one-second CPU average: one job while busy,
   // a few small jobs while idle. It never preempts a running job. Hardware
-  // (VideoToolbox) jobs use the media engine and get their own two-session cap.
+  // (VideoToolbox, NVENC, Quick Sync, AMF) jobs use the media engine and get
+  // their own two-session cap.
   let cpuUsage = 0.9;
   let cpuTimer: ReturnType<typeof setInterval> | null = null;
   let lastCpu = os.cpus();
@@ -1902,7 +2135,22 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         handler: async (req, res) => {
           if (req.method !== 'GET') return json(res, 405, errorPayload('GET only'));
           if (rejectUnauthenticated(req, res)) return;
-          const probe = ffmpeg ? await detectHardware(ffmpeg) : null;
+          // The cheap half answers right away; the device check keeps
+          // running in the background and its verdict lands in a later answer.
+          const build = ffmpeg ? await detectBuild(ffmpeg) : null;
+          if (build) startDeviceProbe(ffmpeg!, build);
+          const info: HardwareInfo = build
+            ? {
+                h264: hwBackend != null,
+                hevc: build.encoders.includes('hevc_videotoolbox'),
+                hwaccel: hwBackend != null,
+                backend: hwBackend?.id ?? null,
+                backendLabel: hwBackend?.label ?? null,
+                // The device check is still running: the panel must not offer
+                // a backend the Host has not verified yet.
+                detecting: !deviceSettled,
+              }
+            : noHardware;
           json(
             res,
             200,
@@ -1917,9 +2165,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               Math.round(uploadTtlMs / 60000),
               queueLimitN,
               instanceId,
-              probe?.info ?? noHardware,
+              info,
               ffprobe ? 'ffprobe' : 'ffmpeg',
-              probe ? supportedFormats(probe.encoders) : FORMATS,
+              // An ffmpeg that cannot even list its encoders must not empty
+              // the panel's format table: the built-in one is the fallback.
+              build?.encoders.length ? supportedFormats(build.encoders) : FORMATS,
             ),
           );
         },
@@ -2238,6 +2488,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             const body = await readJson(req);
             const upload = body.id ? uploads.get(body.id) : undefined;
             if (!upload) return json(res, 200, errorPayload('文件已失效，请重新选择'));
+            // A request that asks for hardware encoding waits for the verdict
+            // instead of quietly converting on the CPU.
+            if (body.hardware) await deviceVerdict(ffmpeg!);
             const { job } = await startJob(
               upload,
               planFor(upload, body, 0),

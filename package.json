@@ -71,8 +71,8 @@
   },
   "scripts": {
     "build:host": "tsrs -p tsconfig.json",
-    "build:client": "vite build && cp dist/client/client.js client.js && cp dist/client/client.js.map client.js.map",
-    "build": "rm -rf dist && npm run build:host && npm run build:client",
+    "build:client": "vite build && node -e \"const fs=require('fs');for(const f of ['client.js','client.js.map'])fs.copyFileSync('dist/client/'+f,f)\"",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && npm run build:host && npm run build:client",
     "typecheck": "tsrs -p tsconfig.client.json --noEmit --runExternalCode",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
