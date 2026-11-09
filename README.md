@@ -199,7 +199,7 @@ test/                     七套自检（.mjs，跑编译产物）
 dist/                     构建产物：宿主入口 dist/index.js（npm 包入口）+ dist/lib/、dist/src/
 ```
 
-React 只剩一个壳：把 `<media-panel>` 挂进槽位并传 `t`。面板本身是 Vue，`shadowRoot: false`（light DOM），样式由壳注入的 `<style>` 提供——Vue 的 `defineCustomElement` 在 light DOM 下不会注入 SFC 样式。
+React 只剩一个壳：把 `<media-panel>` 挂进槽位。`t` 由平台按槽位的 `locale:` 声明注入，语言切换时换新引用，面板随之刷新。面板本身是 Vue，`shadowRoot: false`（light DOM），样式由壳注入的 `<style>` 提供——Vue 的 `defineCustomElement` 在 light DOM 下不会注入 SFC 样式。
 
 ## 限制
 

@@ -92,4 +92,15 @@ assert.deepEqual(
 with a dynamic shape this test does not recognise, extend the two family patterns above.',
 );
 
+// The Vue panel lives outside the React tree: it re-renders only when the `t`
+// prop changes identity. The platform mints a fresh `t` per locale revision
+// only for a slot that declares its namespace, so the main slot must declare
+// `locale: NS` and hand `Shell` straight to the platform. A closure capturing
+// our own stable `t` would shadow the injected seat, and the panel would
+// silently keep the old language — no error, just stale text.
+assert(
+  /register\(\{[^}]*locale: NS[^}]*\}, Shell\)/.test(read('src/client/index.ts')),
+  'the main slot must register Shell directly with locale: NS: the platform injects a fresh t only for a slot that declares its namespace, and the Vue panel only re-renders when that t changes identity',
+);
+
 console.log('i18n.test.mjs: ok');

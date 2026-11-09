@@ -40,6 +40,7 @@ interface SlotRegistration {
   key?: string;
   order?: number;
   label?: () => string;
+  locale?: string;
 }
 interface PluginContext {
   locale: {
@@ -807,7 +808,11 @@ const plugin = {
         PanelIcon,
       ),
     );
-    ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID }, () => h(Shell, { t })));
+    // The platform injects the translator when the slot declares its locale
+    // namespace, and mints a fresh reference per language switch. The panel is
+    // a Vue island outside the React tree, so that new reference is the only
+    // thing that can make it re-render in the new language.
+    ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS }, Shell));
 
     // A compact button in the composer tool row (the "+" button's row): one
     // click puts the media instruction into the draft.
