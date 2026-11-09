@@ -127,7 +127,7 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 ## 开发
 
 ```bash
-npm test              # 类型检查 + 构建（宿主 dist/ 与浏览器 client.js）+ 六套自检
+npm test              # 类型检查 + 构建（宿主 dist/ 与浏览器 client.js）+ 七套自检
 npm run build         # 构建：宿主 tsrs → dist/，浏览器 vite → client.js
 npm run build:host    # 只构建宿主半边（tsrs → dist/）
 npm run build:client  # 只构建浏览器半边（vite → client.js + sourcemap）
@@ -183,7 +183,8 @@ npm run release -- 1.2.0
 ## 结构
 
 ```
-src/client/index.ts       加载器握手 + React 8 行壳 + 侧边栏图标 + i18n 字典 + CSS
+src/client/index.ts       加载器握手 + React 8 行壳 + 侧边栏图标 + CSS
+src/client/locales.ts     面板 i18n 字典（zh 为准，en 由类型保证齐平）
 src/client/App.vue        <media-panel>：队列首页 + 文件详情、上传/批量/单文件任务、预览/对比、Base64、元数据
 src/client/vue/           FileQueue（队列行）、QueueGroup（按类型分组的组头）、BatchCard（批量任务卡）、ActionGrid、CompareSlider、ResultBlock
 src/client/lib.ts         纯函数（格式化/时间码/裁剪窗口）+ fetch 封装，不碰 DOM
@@ -194,7 +195,7 @@ lib/plan.ts               格式表、参数生成（含 copy/GPU/线程）、�
 lib/schedule.ts           自适应容量、任务权重、每任务线程数（纯函数）
 lib/base64.ts             Base64 嗅探与还原
 lib/platform.ts           ffmpeg 查找、文件管理器、文件名规则（纯函数，跨平台分支可测）
-test/                     六套自检（.mjs，跑编译产物）
+test/                     七套自检（.mjs，跑编译产物）
 dist/                     构建产物：宿主入口 dist/index.js（npm 包入口）+ dist/lib/、dist/src/
 ```
 
