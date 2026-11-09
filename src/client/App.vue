@@ -18,6 +18,7 @@ import {
   previewMime,
   previewUrl,
   readJson,
+  removeUploadRow,
   rowPlan,
   runItemPatch,
   sourceUrl,
@@ -1174,40 +1175,38 @@ function cancelUploads() {
 
 async function removeItem(key: string, force = false) {
   if (busy.value && !force) return;
-  const index = items.value.findIndex((item) => item.key === key);
-  if (index < 0) return;
-  const item = items.value[index];
+  const item = items.value.find((entry) => entry.key === key);
+  if (!item) return;
   // 移除 also drops the Host record: the row only goes away once the Host
-  // agreed, so a rebuilt page cannot resurrect it. A row a running job still
-  // reads stays, with the reason.
-  if (!force && item.upload) {
-    try {
-      const data = await readJson<UploadDeleteResponse | ErrorResponse>(
-        await fetch('/api/media-convert/upload/delete', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ ids: [item.upload.id] }),
-        }),
-      );
-      if (!data.ok) throw new Error(data.error || t('error.title'));
-      if (data.skipped.includes(item.upload.id)) {
-        batchError.value = t('remove.running');
-        return;
-      }
-    } catch (err) {
-      batchError.value = String((err && (err as Error).message) || err);
-      return;
-    }
+  // agreed, so a rebuilt page cannot resurrect it. The removal itself lives
+  // in removeUploadRow, which re-reads the live list after the await.
+  const serverDelete =
+    !force && item.upload
+      ? async (id: string) =>
+          readJson<UploadDeleteResponse | ErrorResponse>(
+            await fetch('/api/media-convert/upload/delete', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ ids: [id] }),
+            }),
+          )
+      : null;
+  const result = await removeUploadRow(() => items.value, key, serverDelete);
+  if (result.error) {
+    batchError.value = result.error;
+    return;
   }
-  // Re-lookup by key: a double click (or a clearQueue) during the await must
-  // not splice the row that shifted into the captured index.
-  const current = items.value.findIndex((entry) => entry.key === key);
-  if (current >= 0) items.value.splice(current, 1);
+  if (result.skipped) {
+    batchError.value = t('remove.running');
+    return;
+  }
+  if (!result.removed) return; // a racing second click already took it
+  items.value = result.rows;
   delete rowTargets.value[key];
   visibleThumbs.delete(key);
   queuedThumbs.delete(key);
-  URL.revokeObjectURL(item.url);
-  if (item.thumb) URL.revokeObjectURL(item.thumb);
+  URL.revokeObjectURL(result.removed.url);
+  if (result.removed.thumb) URL.revokeObjectURL(result.removed.thumb);
   if (detailKey.value === key) {
     detailKey.value = '';
     view.value = 'queue';

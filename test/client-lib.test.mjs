@@ -19,6 +19,7 @@ import {
   unavailableTarget,
   sourceUrl,
   supportsQuality,
+  removeUploadRow,
 } from '../dist/src/client/lib.js';
 
 assert.deepEqual(fitPreview(4000, 3000), { width: 900, height: 675 });
@@ -38,6 +39,138 @@ assert.equal(supportsQuality('video', 'mkv'), true);
 assert.equal(supportsQuality('video', 'webm'), false);
 assert.equal(supportsQuality('video', 'gif'), false);
 assert.equal(supportsQuality('audio', 'mp3'), false);
+
+// removeUploadRow: the async core of 移除. The race case is the point — two
+// overlapping clicks, the later one resolving after the first was applied,
+// must drop nothing.
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+
+const rowA = { key: 'a', upload: { id: 'ua' } };
+const rowB = { key: 'b', upload: { id: 'ub' } };
+const okAnswer = { ok: true, removed: 1, skipped: [] };
+
+// The double click, deterministically: second click lands before the first
+// request resolves; the first result is applied; the late second resolution
+// must find the row already gone. A captured-index implementation would drop
+// the neighbour here and fail the last two asserts.
+{
+  let live = [rowA, rowB];
+  const first = deferred();
+  const second = deferred();
+  const calls = [];
+  const del = (d) => (id) => {
+    calls.push(id);
+    return d.promise;
+  };
+  const p1 = removeUploadRow(() => live, 'a', del(first));
+  const p2 = removeUploadRow(() => live, 'a', del(second));
+  first.resolve(okAnswer);
+  const r1 = await p1;
+  live = r1.rows; // the panel applies the first result
+  assert.equal(r1.removed, rowA);
+  assert.deepEqual(
+    live.map((r) => r.key),
+    ['b'],
+  );
+  second.resolve({ ok: true, removed: 0, skipped: [] }); // the Host treats the second delete as a no-op
+  const r2 = await p2;
+  live = r2.rows;
+  assert.equal(r2.removed, null, 'the late second click drops nothing');
+  assert.deepEqual(
+    live.map((r) => r.key),
+    ['b'],
+    'the neighbour survives the double click',
+  );
+  assert.deepEqual(calls, ['ua', 'ua']);
+}
+
+// A running job keeps the row, flagged as skipped.
+{
+  let live = [rowA, rowB];
+  const r = await removeUploadRow(
+    () => live,
+    'a',
+    async () => ({ ok: true, removed: 0, skipped: ['ua'] }),
+  );
+  assert.equal(r.removed, null);
+  assert.equal(r.skipped, true);
+  assert.equal(r.error, null);
+  assert.deepEqual(
+    r.rows.map((row) => row.key),
+    ['a', 'b'],
+  );
+}
+
+// A rejected request keeps the row and reports why.
+{
+  let live = [rowA, rowB];
+  const r = await removeUploadRow(
+    () => live,
+    'a',
+    async () => {
+      throw new Error('网络错误');
+    },
+  );
+  assert.equal(r.removed, null);
+  assert.match(r.error, /网络错误/);
+  assert.deepEqual(
+    r.rows.map((row) => row.key),
+    ['a', 'b'],
+  );
+}
+
+// An explicit !ok answer surfaces its message.
+{
+  let live = [rowA, rowB];
+  const r = await removeUploadRow(
+    () => live,
+    'a',
+    async () => ({ ok: false, error: 'unauthorized' }),
+  );
+  assert.equal(r.error, 'unauthorized');
+  assert.deepEqual(
+    r.rows.map((row) => row.key),
+    ['a', 'b'],
+  );
+}
+
+// Unknown key: no-op, no error, and the injected delete is never consulted.
+{
+  let live = [rowA, rowB];
+  const r = await removeUploadRow(
+    () => live,
+    'zzz',
+    async () => {
+      throw new Error('must not be called');
+    },
+  );
+  assert.equal(r.removed, null);
+  assert.equal(r.error, null);
+  assert.equal(r.skipped, false);
+  assert.deepEqual(
+    r.rows.map((row) => row.key),
+    ['a', 'b'],
+  );
+}
+
+// serverDelete null (force/abort path): local-only, no request.
+{
+  let live = [rowA, rowB];
+  const r = await removeUploadRow(() => live, 'a', null);
+  assert.equal(r.removed, rowA);
+  assert.deepEqual(
+    r.rows.map((row) => row.key),
+    ['b'],
+  );
+}
 
 assert.equal(formatSize(0), '');
 assert.equal(formatSize(512), '512 B');

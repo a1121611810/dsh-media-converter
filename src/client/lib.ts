@@ -1,7 +1,7 @@
 // Framework-free helpers shared by the panel (App.vue) and its tests.
 // Nothing here touches the DOM except downloadText/previewUrl consumers.
 import type { MediaKind, TrimWindow } from '../../lib/plan.js';
-import type { DecodeResponse, RunItemInfo, UploadResponse } from '../../index.js';
+import type { DecodeResponse, ErrorResponse, RunItemInfo, UploadDeleteResponse, UploadResponse } from '../../index.js';
 
 export const TAG_KEYS = ['title', 'artist', 'album', 'comment', 'date', 'genre'];
 
@@ -267,6 +267,46 @@ export function supportsQuality(kind: string, format: string): boolean {
     (kind === 'image' && (format === 'jpg' || format === 'webp')) ||
     (kind === 'video' && ['mp4', 'mov', 'mkv', 'flv', 'ts'].includes(format))
   );
+}
+
+// The testable core of the panel's 移除: ask the Host first, drop the row
+// only on success. The removal index is re-read from getRows() AFTER the
+// await, so the later of two overlapping clicks finds the row already gone
+// and becomes a no-op instead of splicing the neighbour that shifted into a
+// captured index. `serverDelete: null` is the local-only path (force/abort).
+export interface RowRemoval<Row> {
+  rows: Row[];
+  removed: Row | null;
+  error: string | null;
+  skipped: boolean;
+}
+
+export async function removeUploadRow<Row extends { key: string; upload: { id: string } | null }>(
+  getRows: () => readonly Row[],
+  key: string,
+  serverDelete: ((id: string) => Promise<UploadDeleteResponse | ErrorResponse>) | null,
+): Promise<RowRemoval<Row>> {
+  const unchanged = (): RowRemoval<Row> => ({ rows: [...getRows()], removed: null, error: null, skipped: false });
+  const target = getRows().find((row) => row.key === key);
+  if (!target) return unchanged();
+  if (serverDelete) {
+    const id = target.upload?.id;
+    if (id) {
+      let data: UploadDeleteResponse | ErrorResponse;
+      try {
+        data = await serverDelete(id);
+      } catch (err) {
+        return { ...unchanged(), error: String((err && (err as Error).message) || err) };
+      }
+      if (!data.ok) return { ...unchanged(), error: data.error };
+      if (data.skipped.includes(id)) return { ...unchanged(), skipped: true };
+    }
+  }
+  const current = getRows().findIndex((row) => row.key === key);
+  if (current < 0) return unchanged(); // a racing click (or clearQueue) already took it
+  const rows = getRows().slice();
+  const [removed] = rows.splice(current, 1);
+  return { rows, removed: removed ?? null, error: null, skipped: false };
 }
 
 // The trim window described by the two fields; empty fields mean start/end.
