@@ -412,6 +412,13 @@ const HW_AUDIO: Record<string, string[]> = {
   ts: ['-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts'],
 };
 
+// The containers the hardware plan re-encodes an audio track for; planFor's
+// copy gate uses this so an explicit audio ask reaches the hardware branch
+// instead of coming back as a copied stream.
+export function supportsHardwareAudio(format: string): boolean {
+  return Boolean(HW_AUDIO[format]);
+}
+
 // HEVC-in-FLV is non-standard, so the codec choice stops at the containers
 // where HEVC belongs; mp4/mov additionally need the hvc1 tag Apple players
 // require (the same tag copyArgs already writes for stream copies).
@@ -425,6 +432,9 @@ export function hardwareFor(
   duration: number,
   quality?: number,
   codec?: string,
+  bitrate?: number,
+  channels?: number,
+  sampleRate?: number,
 ): { args: string[]; inputArgs: string[] } | null {
   const audio = HW_AUDIO[format];
   if (kind !== 'video' || !audio) return null;
@@ -449,7 +459,9 @@ export function hardwareFor(
       // Apple players refuse HEVC in mp4/mov without the hvc1 tag.
       ...(wantHevc && (format === 'mp4' || format === 'mov') ? ['-tag:v', 'hvc1'] : []),
       ...backend.rateArgs,
-      ...audio,
+      // The audio track is software-encoded on the GPU path too, so the same
+      // three knobs apply; absent values leave the recipe untouched.
+      ...applyAudioTune(audio.slice(), bitrate, channels, sampleRate),
     ],
   };
 }
@@ -490,6 +502,25 @@ function hwFactorOf(quality: number): number {
   return Math.min(1.6, Math.max(0.4, 1 + (quality - 90) * 0.01));
 }
 
+// The three audio-track knobs in one home so the clamps live once: an
+// explicit bitrate rewrites the recipe's -b:a, channels/sample-rate write
+// -ac/-ar (rewriting a recipe value when it already carries one). Zero,
+// absent or garbage anywhere means "keep the recipe/source" — a no-op.
+export function applyAudioTune(args: string[], bitrate?: number, channels?: number, sampleRate?: number): string[] {
+  if (Number.isFinite(Number(bitrate)) && Number(bitrate) > 0) {
+    const at = args.indexOf('-b:a');
+    if (at >= 0) args[at + 1] = String(Math.min(320, Math.max(32, Math.round(Number(bitrate))))) + 'k';
+  }
+  if (Number(channels) > 0) args.push('-ac', String(Math.min(2, Math.max(1, Math.round(Number(channels))))));
+  if (Number(sampleRate) > 0) {
+    const value = String(Math.min(96000, Math.max(8000, Math.round(Number(sampleRate)))));
+    const at = args.indexOf('-ar');
+    if (at >= 0) args[at + 1] = value;
+    else args.push('-ar', value);
+  }
+  return args;
+}
+
 export function buildArgs(
   kind: MediaKind,
   format: string,
@@ -523,13 +554,10 @@ export function buildArgs(
       args.push(...(format === 'jpg' ? ['-q:v', jpegQscale(q)] : ['-quality', String(q)]));
     }
   }
-  // An absent, zero/negative or non-finite bitrate keeps the recipe's own
-  // -b:a; a real positive number overrides it (clamped to the range every
-  // lossy codec accepts). Zero means "unset" for every caller.
-  if (supportsBitrate(kind, format) && Number.isFinite(Number(bitrate)) && Number(bitrate) > 0) {
-    const at = args.indexOf('-b:a');
-    if (at >= 0) args[at + 1] = String(Math.min(320, Math.max(32, Math.round(Number(bitrate))))) + 'k';
-  }
+  // Audio-encode targets take the three audio knobs; the gate is
+  // supportsAudioTune alone because every supportsBitrate format is also an
+  // audio-encode target (recipes without -b:a are untouched by the override).
+  if (supportsAudioTune(kind, format)) applyAudioTune(args, bitrate, channels, sampleRate);
   // GIF is the one recipe with a tunable filter chain: an explicit fps/width
   // rebuilds the -vf value, absent/zero/garbage keeps the recipe's 12fps/640px.
   if (format === 'gif' && (Number(fps) > 0 || Number(width) > 0)) {
@@ -537,14 +565,6 @@ export function buildArgs(
     const w = Number(width) > 0 ? Math.min(7680, Math.max(16, Math.round(Number(width)))) : 640;
     const at = args.indexOf('-vf');
     if (at >= 0) args[at + 1] = `fps=${f},scale='min(${w},iw)':-2:flags=lanczos`;
-  }
-  // Audio-encode targets take channel/sample-rate downsampling (the speech
-  // use case): the recipes carry no -ac/-ar of their own, so these push.
-  // Zero/absent/garbage keeps the source's own layout and rate.
-  if (supportsAudioTune(kind, format)) {
-    if (Number(channels) > 0) args.push('-ac', String(Math.min(2, Math.max(1, Math.round(Number(channels))))));
-    if (Number(sampleRate) > 0)
-      args.push('-ar', String(Math.min(96000, Math.max(8000, Math.round(Number(sampleRate))))));
   }
   return args;
 }

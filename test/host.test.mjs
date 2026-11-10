@@ -1301,6 +1301,36 @@ const monoAsk = await call('convert', {
   body: JSON.stringify({ id: stereoUpload.data.id, format: 'mp3', channels: 1 }),
 });
 assert.equal(monoAsk.data.job.copy, false, 'a mono ask re-encodes instead of copying stereo');
+
+// A mono ask on a video container is a documented software-path no-op: the
+// copy stays. Without this anchor the tuned gate would pull it into a full
+// re-encode that still drops the ask.
+const swVideoMono = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', channels: 1 }),
+});
+assert.equal(
+  swVideoMono.data.job.copy,
+  true,
+  'a software-path mono ask on a video container keeps the copy (documented no-op)',
+);
+// The GPU audio copy-trap: with a probed backend, a mono ask alongside the
+// GPU switch must reach the hardware plan (a real re-encode carrying -ac),
+// not a copied stream. Without a backend the ask stays the no-op above.
+const gpuMono = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', channels: 1, hardware: true }),
+});
+// The convert route waits for the device verdict itself, so by now the
+// backend is settled: read it from a fresh status, not the early one (the
+// device check still runs in the background when that first status answered).
+const gpuStatus = (await call('status')).data.hardware;
+if (gpuStatus.backend) {
+  assert.equal(gpuMono.data.job.copy, false, 'a GPU mono ask re-encodes instead of copying');
+  assert.equal(gpuMono.data.job.hardware, true, 'the GPU mono ask runs on the hardware plan');
+} else {
+  assert.equal(gpuMono.data.job.copy, true, 'without a backend the GPU mono ask is a no-op; the copy stays');
+}
 const monoJob = await waitJob(monoAsk.data.job);
 const monoOut = audioLayout(monoJob.out);
 assert.equal(monoOut.mono, true, 'the output really is mono');

@@ -24,6 +24,7 @@ import {
   supportedFormats,
   supportsAudioTune,
   supportsBitrate,
+  supportsHardwareAudio,
   supportsQuality,
   trimArgs,
 } from '../dist/lib/plan.js';
@@ -591,6 +592,46 @@ assert.ok(
 for (const backend of Object.values(HW_BACKENDS)) {
   assert.ok(backend.hevcEncoder.startsWith('hevc_'), backend.id + ' names its HEVC sibling');
 }
+
+// The audio track is software-encoded on the GPU path too, so the three
+// audio knobs ride along: an explicit bitrate rewrites the recipe's -b:a,
+// channels pushes -ac, rate rewrites a recipe's own -ar (flv). Clamps and
+// absent values behave exactly like the software path.
+const tunedHw = hardwareFor(HW_BACKENDS.videotoolbox, 'video', 'mp4', hwSize, hwDuration, 90, '', 128, 1, 22050);
+assert.deepEqual(tunedHw.args.slice(tunedHw.args.indexOf('-c:a')), [
+  '-c:a',
+  'aac',
+  '-b:a',
+  '128k',
+  '-movflags',
+  '+faststart',
+  '-ac',
+  '1',
+  '-ar',
+  '22050',
+]);
+// flv carries its own -ar 44100: an explicit rate rewrites it, not duplicates it.
+const tunedFlv = hardwareFor(HW_BACKENDS.videotoolbox, 'video', 'flv', hwSize, hwDuration, 90, '', 0, 0, 22050);
+assert.deepEqual(tunedFlv.args.slice(tunedFlv.args.indexOf('-c:a')), ['-c:a', 'aac', '-b:a', '128k', '-ar', '22050']);
+// The same clamps as the software path; garbage/zero/absent keeps the recipe.
+const clampedHw = hardwareFor(HW_BACKENDS.nvenc, 'video', 'mkv', hwSize, hwDuration, 90, '', 9999, 9, 1000);
+const clampedTail = clampedHw.args.slice(clampedHw.args.indexOf('-c:a'));
+assert.ok(clampedTail.includes('320k'), 'bitrate clamps to 320k');
+assert.ok(clampedTail.includes('2'), 'channels clamp to stereo');
+assert.ok(clampedTail.includes('8000'), 'rate clamps to 8000 Hz');
+// The recipe itself must survive a tuned call (the plan works on a copy): a
+// fresh default plan still ends with the untouched HW_AUDIO tail.
+assert.deepEqual(hardwareFor(HW_BACKENDS.videotoolbox, 'video', 'mp4', hwSize, hwDuration).args.slice(-6), [
+  '-c:a',
+  'aac',
+  '-b:a',
+  '192k',
+  '-movflags',
+  '+faststart',
+]);
+assert.ok(supportsHardwareAudio('mp4'));
+assert.ok(!supportsHardwareAudio('webm'));
+assert.ok(!supportsHardwareAudio('gif'));
 
 // CPU-aware capacity and thread split.
 assert.equal(capacityFor(0.9, 10), 1);

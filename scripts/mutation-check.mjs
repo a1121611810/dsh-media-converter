@@ -276,9 +276,9 @@ const MUTANTS = [
   },
   {
     id: 'B1',
-    name: '音频码率参数被旁路（buildArgs 恒写配方默认）',
-    // bitrate 仍在条件里被读取（Number(bitrate)），不会 TS6133；只是替换值
-    // 不再来自入参 —— 128 也要回 192。
+    name: '音频码率参数被旁路（applyAudioTune 恒写 192k）',
+    // 钳制行已随助手抽取移到 applyAudioTune（内部没有 format 入参，旧突变
+    // 形态 TS2304 编不过）；等价语义：替换值不再来自入参 —— 显式 128 也回 192。
     source: 'lib/plan.ts',
     test: 'test/plan.test.mjs',
     dist: 'dist/lib/plan.js',
@@ -286,10 +286,10 @@ const MUTANTS = [
       replaceOnce(
         s,
         "args[at + 1] = String(Math.min(320, Math.max(32, Math.round(Number(bitrate))))) + 'k';",
-        "args[at + 1] = String(defaultBitrate(format)) + 'k';",
+        "args[at + 1] = '192k';",
       ),
-    distAnchor: 'String(defaultBitrate(format))',
-    expect: '显式码率必须替换 -b:a（128 → 128k），突变后恒为配方默认 → 测试红',
+    distAnchor: "args[at + 1] = '192k'",
+    expect: '显式码率必须替换 -b:a（128 → 128k），突变后恒为 192k → 测试红',
   },
   {
     id: 'B2',
@@ -335,12 +335,16 @@ const MUTANTS = [
     id: 'B5',
     name: '音频声道/采样率被旁路（buildArgs 恒不写 -ac/-ar）',
     // channels/sampleRate 仍在条件里被读取（Number(...)），不会 TS6133；
-    // 条件永假后任何 downmix 请求都静默丢弃。
+    // 条件永假后任何 downmix 请求都静默丢弃。锚点是单行 if（无花括号）。
     source: 'lib/plan.ts',
     test: 'test/plan.test.mjs',
     dist: 'dist/lib/plan.js',
     apply: (s) =>
-      replaceOnce(s, 'if (supportsAudioTune(kind, format)) {', 'if (false && supportsAudioTune(kind, format)) {'),
+      replaceOnce(
+        s,
+        'if (supportsAudioTune(kind, format)) applyAudioTune(args, bitrate, channels, sampleRate);',
+        'if (false && supportsAudioTune(kind, format)) applyAudioTune(args, bitrate, channels, sampleRate);',
+      ),
     distAnchor: 'false && supportsAudioTune',
     expect: 'mono/22050 请求必须写出 -ac/-ar，突变后产物回源布局 → 测试红',
   },
@@ -388,6 +392,39 @@ const MUTANTS = [
       ),
     distAnchor: 'Number(a.channels ?? entry?.channels) * 0',
     expect: 'PTC 计划里的声道必须作用到产物，突变后输出回立体声 → 测试红',
+  },
+  {
+    id: 'B9',
+    name: 'GPU 路径音轨参数被旁路（hardwareFor 恒写 HW_AUDIO 默认）',
+    // Number() 包裹保持读取（裸 `bitrate * 0` 会撞 strict 空检查 TS18048，
+    // 构建失败不是红）；恒 0 后任何音轨请求都静默丢弃，与软件路径分叉。
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        '...applyAudioTune(audio.slice(), bitrate, channels, sampleRate),',
+        '...applyAudioTune(audio.slice(), Number(bitrate) * 0, Number(channels) * 0, Number(sampleRate) * 0),',
+      ),
+    distAnchor: 'Number(bitrate) * 0, Number(channels) * 0, Number(sampleRate) * 0',
+    expect: 'GPU 路径的 -b:a/-ac/-ar 必须来自入参，突变后音轨请求回配方默认 → 测试红',
+  },
+  {
+    id: 'B10',
+    name: 'GPU 音轨请求被 copy 短路（hwAudioTuned 门失效）',
+    // 仍读取 body.bitrate/channels/sampleRate，不会 TS6133；门永假后
+    // GPU+mono 请求拿回拷贝的立体声——host 的 GPU copy-trap 探针必红。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        `supportsHardwareAudio(format) &&
+      (Number(body.bitrate) > 0 || Number(body.channels) > 0 || Number(body.sampleRate) > 0);`,
+        `supportsHardwareAudio(format) &&
+      (Number(body.bitrate) > 0 || Number(body.channels) < 0 || Number(body.sampleRate) > 0);`,
+      ),
+    distAnchor: 'Number(body.channels) < 0 || Number(body.sampleRate) > 0',
+    expect: 'GPU 音轨请求必须绕开拷贝路径，突变后 result.copy 变 true → 测试红',
   },
   {
     id: 'C1',
@@ -725,6 +762,9 @@ try {
     } catch {
       console.error(`[mutation] ${m.id} 构建失败——攻击形态会让 TS 编译炸（如 TS6133 参数未用），换等价语义突变`);
       failures += 1;
+      // 必须当场恢复：残留的坏突变会让后续所有用例连坐构建失败（B1 曾
+      // 拖垮 B2–B8），把一处攻击脚本问题放大成一片。
+      writeFileRobust(source, original);
       continue;
     }
     const built = fs.readFileSync(dist, 'utf8');

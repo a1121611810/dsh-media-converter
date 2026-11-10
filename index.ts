@@ -52,6 +52,7 @@ import {
   progressSeconds,
   streamInfoOf,
   subtitlePlan,
+  supportsHardwareAudio,
   supportedFormats,
   supportsAudioTune,
   supportsBitrate,
@@ -1780,7 +1781,18 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     // ask must never come back as a copied stereo stream.
     const audioTuned =
       supportsAudioTune(upload.kind, format) && (Number(body.channels) > 0 || Number(body.sampleRate) > 0);
-    if (!trim && !qualityTuned && !bitrateTuned && !codecTuned && !audioTuned) {
+    // The same rule on the GPU path: an explicit audio ask (bitrate,
+    // channels, rate) for a container the hardware plan re-encodes audio for
+    // must reach the hardware branch, not come back as a copied stream. The
+    // condition mirrors the branch below: without a hardware ask or a probed
+    // backend the ask is a documented software-path no-op and the copy stays.
+    const hwAudioTuned =
+      Boolean(body.hardware) &&
+      Boolean(hwBackend) &&
+      upload.kind === 'video' &&
+      supportsHardwareAudio(format) &&
+      (Number(body.bitrate) > 0 || Number(body.channels) > 0 || Number(body.sampleRate) > 0);
+    if (!trim && !qualityTuned && !bitrateTuned && !codecTuned && !audioTuned && !hwAudioTuned) {
       const copy = copyArgs(upload.kind, format, upload.meta);
       if (copy) return { ext: format, kind: kindByExt(format), args: copy, copy: true };
     }
@@ -1798,6 +1810,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         upload.duration,
         Number(body.quality),
         String(body.codec || ''),
+        Number(body.bitrate),
+        Number(body.channels),
+        Number(body.sampleRate),
       );
       if (hw) {
         return {
@@ -1866,6 +1881,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       '6. codec 仅对 GPU 硬编视频有效（h264/hevc），省略默认 h264；hevc 仅 mp4/mov/mkv/ts 可选。',
       '7. channels（1=单声道，2=立体声）与 rate（采样率 Hz，8000–96000，如 22050）仅对音频编码目标有效（音频文件，或视频转 mp3/m4a），省略则保留源；该行 channels/rate 非空时优先用它们。',
       '8. 没有音轨的文件不要选纯音频格式。',
+      '9. 批次走 GPU 硬编时，bitrate/channels/rate 对 mp4/mov/mkv/flv/ts 的输出音轨同样生效（不限于音频编码目标）。',
     ].join('\n');
   };
 
@@ -2296,7 +2312,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
         '③extract-audio 抽音轨、④extract-video 抽画面（不重编码）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）。' +
-        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；指定 codec（h264/hevc）即视同请求 GPU 硬编（无显卡时自动回退软件编码；hevc 仅 mp4/mov/mkv/ts 有效，体积更小）；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；视频转视频时内嵌音轨不受此参数控制）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
+        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；指定 codec（h264/hevc）即视同请求 GPU 硬编（无显卡时自动回退软件编码；hevc 仅 mp4/mov/mkv/ts 有效，体积更小）；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
         properties: {

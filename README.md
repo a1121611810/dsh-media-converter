@@ -56,7 +56,7 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | action | 作用 |
 | --- | --- |
 | `probe` | 读时长、分辨率、编码、音轨、字幕轨、标签 |
-| `convert` | 转格式（可带 `trim` 裁剪；`quality` 1-100：软件编码视频映射各编码质量参数——mp4/mov/mkv/flv/ts 为 CRF、webm 为 vp9 CRF、avi/wmv/ogv 为 qscale——GPU 硬编映射目标码率倍率，图片 jpg/webp/avif 有效；转 mp3/m4a/aac/opus 可带 `bitrate` kbps 32-320，音频编码目标可带 `channels` 1/2 与 `sampleRate` Hz 8000-96000；指定 `codec`（h264/hevc）即视同请求 GPU 硬编，hevc 仅 mp4/mov/mkv/ts） |
+| `convert` | 转格式（可带 `trim` 裁剪；`quality` 1-100：软件编码视频映射各编码质量参数——mp4/mov/mkv/flv/ts 为 CRF、webm 为 vp9 CRF、avi/wmv/ogv 为 qscale——GPU 硬编映射目标码率倍率，图片 jpg/webp/avif 有效；转 mp3/m4a/aac/opus 可带 `bitrate` kbps 32-320，音频编码目标可带 `channels` 1/2 与 `sampleRate` Hz 8000-96000——GPU 硬编时这三个音轨参数对 mp4/mov/mkv/flv/ts 的输出音轨同样生效；指定 `codec`（h264/hevc）即视同请求 GPU 硬编，hevc 仅 mp4/mov/mkv/ts） |
 | `extract-audio` / `extract-video` | 抽音轨 / 抽画面，不重编码 |
 | `subtitle` | 导出内嵌字幕为 `.srt`/`.ass`/`.vtt`（`format` 选格式，默认 srt） |
 | `rewrite-tags` | 改写标题/作者/专辑/备注/日期/流派 |
