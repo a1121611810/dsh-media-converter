@@ -332,6 +332,64 @@ const MUTANTS = [
     expect: 'PTC 计划里的码率必须作用到产物，突变后输出为拷贝/默认码率 → 测试红',
   },
   {
+    id: 'B5',
+    name: '音频声道/采样率被旁路（buildArgs 恒不写 -ac/-ar）',
+    // channels/sampleRate 仍在条件里被读取（Number(...)），不会 TS6133；
+    // 条件永假后任何 downmix 请求都静默丢弃。
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(s, 'if (supportsAudioTune(kind, format)) {', 'if (false && supportsAudioTune(kind, format)) {'),
+    distAnchor: 'false && supportsAudioTune',
+    expect: 'mono/22050 请求必须写出 -ac/-ar，突变后产物回源布局 → 测试红',
+  },
+  {
+    id: 'B6',
+    name: 'mono 请求被 copy 短路（audioTuned 门失效）',
+    // 条件永假后 mono 请求拿回拷贝的立体声——host 的 copy-trap 探针必红。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'supportsAudioTune(upload.kind, format) && (Number(body.channels) > 0 || Number(body.sampleRate) > 0);',
+        'supportsAudioTune(upload.kind, format) && (Number(body.channels) < 0 || Number(body.sampleRate) < 0);',
+      ),
+    distAnchor: 'body.channels) < 0',
+    expect: 'mono 请求必须绕开拷贝路径，突变后 result.copy 变 true → 测试红',
+  },
+  {
+    id: 'B7',
+    name: '/run 行级声道/采样率不进 items（固定批量丢失）',
+    // ch 仍被 Number.isFinite 读取，不会 TS6133；范围永假后行参数被丢弃，
+    // 批量 mono 请求回落拷贝路径。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'channels: Number.isFinite(ch) && ch >= 1 && ch <= 2 ? Math.round(ch) : undefined,',
+        'channels: Number.isFinite(ch) && ch >= 9 && ch <= 2 ? Math.round(ch) : undefined,',
+      ),
+    distAnchor: 'ch >= 9 && ch <= 2',
+    expect: '固定批量的行级声道必须到达编码器，突变后输出回源布局 → 测试红',
+  },
+  {
+    id: 'B8',
+    name: 'PTC convert 绑定丢弃声道/采样率（计划带了也白搭）',
+    // 正式 planFor 的 channels 恒 0（被忽略），estimate 那处不动。锚点带
+    // fps/width 上下文区分 estimate 调用。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        `                  fps: Number(a.fps ?? entry?.fps),
+                  width: Number(a.width ?? entry?.width),
+                  channels: Number(a.channels ?? entry?.channels),`,
+        `                  fps: Number(a.fps ?? entry?.fps),
+                  width: Number(a.width ?? entry?.width),
+                  channels: Number(a.channels ?? entry?.channels) * 0,`,
+      ),
+    distAnchor: 'Number(a.channels ?? entry?.channels) * 0',
+    expect: 'PTC 计划里的声道必须作用到产物，突变后输出回立体声 → 测试红',
+  },
+  {
     id: 'C1',
     name: 'GIF fps/width 被旁路（buildArgs 恒写配方默认）',
     // false && 仍读取 fps/width，不会 TS6133；条件永假后 -vf 永不重建。
@@ -396,12 +454,17 @@ const MUTANTS = [
     id: 'C5',
     name: '单任务 /convert 的 GIF 参数不进 buildArgs',
     // body.fps/width 仍被 /run 路由与 PTC 绑定读取，不会 TS6133；只有
-    // planFor 这条汇流点被掐断。
+    // planFor 这条汇流点被掐断。channels/sampleRate 保持入参——它们走的是
+    // 同一调用但不是本突变的目标（B5-B8 守它们）。
     apply: (s) =>
       replaceOnce(
         s,
-        'args: buildArgs(upload.kind, format, body.quality, body.bitrate, body.fps, body.width),',
-        'args: buildArgs(upload.kind, format, body.quality, body.bitrate, 0, 0),',
+        `        body.fps,
+        body.width,
+        body.channels,`,
+        `        0,
+        0,
+        body.channels,`,
       ),
     distAnchor: 'body.bitrate, 0, 0',
     expect: '单任务转换的 fps/width 必须到达 ffmpeg 参数，突变后产物回默认 12/640 → 测试红',
