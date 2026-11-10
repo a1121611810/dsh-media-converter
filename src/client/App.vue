@@ -2,6 +2,7 @@
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { PropType } from 'vue';
 import {
+  BITRATE_OPTIONS,
   CONVERTIBLE_KINDS,
   PLATFORM,
   PREVIEW_MAX,
@@ -22,6 +23,7 @@ import {
   rowPlan,
   runItemPatch,
   sourceUrl,
+  supportsBitrate,
   supportsQuality,
   trimWindow,
   unavailableTarget,
@@ -84,6 +86,7 @@ const operation = ref<Operation>('convert');
 const targets = ref<Record<ConvertibleKind, string>>(defaultTargets({}));
 const rowTargets = ref<Record<string, string>>({});
 const batchQuality = ref(90);
+const batchBitrate = ref(0);
 const usePtc = ref(false);
 // On by default whenever the batch can use the media engine (see showGpu);
 // the user can still turn it off, after which the auto-default never overrides.
@@ -253,6 +256,7 @@ const query = ref('');
 const format = ref('');
 const outputName = ref('');
 const quality = ref(90);
+const bitrate = ref(0);
 const trimStart = ref('');
 const trimEnd = ref('');
 const metaTags = ref<Record<string, string>>({});
@@ -379,6 +383,7 @@ interface QueueSection {
   targetOptions: Record<string, string[]>;
   showTargets: boolean;
   showQuality: boolean;
+  showBitrate: boolean;
   note: string;
 }
 const queueGroups = computed<QueueSection[]>(() => {
@@ -410,6 +415,11 @@ const queueGroups = computed<QueueSection[]>(() => {
           convertible &&
           operation.value === 'convert' &&
           groupItems.some((item) => supportsQuality(convertible, effectiveTarget(item))),
+        ),
+        showBitrate: Boolean(
+          convertible &&
+          operation.value === 'convert' &&
+          groupItems.some((item) => supportsBitrate(convertible, effectiveTarget(item))),
         ),
         note: key === 'pending' ? t('queue.pendingNote') : key === 'text' ? t('queue.textNoBatch') : '',
       },
@@ -492,6 +502,9 @@ const trimSummary = computed(() =>
 );
 const usesQuality = computed(() =>
   Boolean(file.value && format.value && supportsQuality(file.value.kind, format.value)),
+);
+const usesBitrate = computed(() =>
+  Boolean(file.value && format.value && supportsBitrate(file.value.kind, format.value)),
 );
 const canExtractAudio = computed(() =>
   Boolean(file.value && file.value.kind === 'video' && file.value.streams && file.value.streams.audio),
@@ -1408,6 +1421,7 @@ async function runServerBatch(rows: Item[], ptc = false) {
       id,
       format: row.target,
       quality: supportsQuality(item.upload!.kind, row.target) ? batchQuality.value : undefined,
+      bitrate: supportsBitrate(item.upload!.kind, row.target) ? batchBitrate.value || undefined : undefined,
       hardware: useGpu.value || undefined,
     };
   });
@@ -1510,7 +1524,14 @@ async function runCurrent(body: Partial<ConvertRequest>, forAction: string) {
 function convert() {
   if (!file.value || !format.value) return;
   const withQuality = usesQuality.value;
-  runCurrent({ format: format.value, quality: withQuality ? quality.value : undefined }, 'fmt:' + format.value);
+  runCurrent(
+    {
+      format: format.value,
+      quality: withQuality ? quality.value : undefined,
+      bitrate: usesBitrate.value ? bitrate.value || undefined : undefined,
+    },
+    'fmt:' + format.value,
+  );
 }
 
 function applyTrim() {
@@ -1528,6 +1549,7 @@ function applyTrim() {
     {
       format: format.value,
       quality: file.value.kind === 'image' ? quality.value : undefined,
+      bitrate: usesBitrate.value ? bitrate.value || undefined : undefined,
       trim: { start: window.start, end: window.end },
     },
     'trim',
@@ -1785,7 +1807,7 @@ watch(
   },
 );
 
-watch([operation, batchQuality, usePtc, useGpu], () => {
+watch([operation, batchQuality, batchBitrate, usePtc, useGpu], () => {
   if (!batchRunning.value) lastRun.value = null;
   ptcTiming.value = null;
 });
@@ -1984,6 +2006,8 @@ watch([action, panelOpen], async () => {
               :show-targets="group.showTargets"
               :quality="batchQuality"
               :show-quality="group.showQuality"
+              :bitrate="batchBitrate"
+              :show-bitrate="group.showBitrate"
               :note="group.note"
               :disabled="busy"
               :t="t"
@@ -1991,6 +2015,7 @@ watch([action, panelOpen], async () => {
               @update:target="group.kind !== 'pending' && setTarget(group.kind as ConvertibleKind, $event)"
               @update:row-target="setRowTarget"
               @update:quality="batchQuality = $event"
+              @update:bitrate="batchBitrate = $event"
               @toggle="toggleChecked"
               @open="openDetail"
               @reveal="reveal"
@@ -2264,6 +2289,19 @@ watch([action, panelOpen], async () => {
                 />
                 <span class="mc-muted">{{ quality }}</span>
                 <span class="mc-muted">{{ t('quality.hint') }}</span>
+              </div>
+              <div v-if="usesBitrate && currentAction.id === 'fmt:' + format" class="mc-row">
+                <span class="mc-muted">{{ t('bitrate.label') }}</span>
+                <select
+                  class="mc-select"
+                  v-model.number="bitrate"
+                  :disabled="busy"
+                  :aria-label="t('bitrate.label')"
+                  @change="resetResult"
+                >
+                  <option :value="0">{{ t('bitrate.default') }}</option>
+                  <option v-for="option in BITRATE_OPTIONS" :key="option" :value="option">{{ option }} kbps</option>
+                </select>
               </div>
               <div class="mc-row">
                 <button

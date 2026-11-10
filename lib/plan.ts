@@ -257,6 +257,18 @@ export function supportsQuality(kind: MediaKind, format: string): boolean {
   );
 }
 
+// Lossy audio formats only: the bitrate control shows for exactly these. The
+// client mirrors this (lib.ts); the two must stay in sync.
+export function supportsBitrate(kind: MediaKind, format: string): boolean {
+  return kind === 'audio' && ['mp3', 'm4a', 'aac', 'opus'].includes(format);
+}
+
+// The recipe's own -b:a value, the anchor for "explicitly asked for the
+// default" (keeps the copy fast path) vs "a real re-encode request".
+export function defaultBitrate(format: string): number {
+  return format === 'opus' ? 128 : 192;
+}
+
 // Split one CPU across concurrent ffmpeg jobs; 0 lets ffmpeg choose.
 export function threadArgs(threads?: number): string[] {
   return threads && threads > 1 ? ['-threads', String(threads), '-filter_threads', String(threads)] : [];
@@ -431,7 +443,7 @@ function hwFactorOf(quality: number): number {
   return Math.min(1.6, Math.max(0.4, 1 + (quality - 90) * 0.01));
 }
 
-export function buildArgs(kind: MediaKind, format: string, quality = 90): string[] {
+export function buildArgs(kind: MediaKind, format: string, quality = 90, bitrate?: number): string[] {
   const table = kind === 'audio' ? AUDIO : kind === 'image' ? IMAGE : VIDEO;
   const base = table[format];
   if (!base) throw new Error(`不支持的输出格式: ${format}`);
@@ -444,6 +456,13 @@ export function buildArgs(kind: MediaKind, format: string, quality = 90): string
     } else {
       args.push(...(format === 'jpg' ? ['-q:v', jpegQscale(q)] : ['-quality', String(q)]));
     }
+  }
+  // An absent, zero/negative or non-finite bitrate keeps the recipe's own
+  // -b:a; a real positive number overrides it (clamped to the range every
+  // lossy codec accepts). Zero means "unset" for every caller.
+  if (supportsBitrate(kind, format) && Number.isFinite(Number(bitrate)) && Number(bitrate) > 0) {
+    const at = args.indexOf('-b:a');
+    if (at >= 0) args[at + 1] = String(Math.min(320, Math.max(32, Math.round(Number(bitrate))))) + 'k';
   }
   return args;
 }

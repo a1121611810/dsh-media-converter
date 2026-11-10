@@ -289,11 +289,14 @@ const llm = {
     ptcReasoning = options.reasoningEffort;
     // One plan row per file the prompt lists, picking each file's own target so
     // videos, audio and images all get a format the Host accepts.
-    const rows = [...ptcPrompt.matchAll(/id=(\S+) name=[^\n]*? kind=(\S+) target=(\S*)/g)].map(
-      ([, id, kind, target]) => ({
+    const rows = [...ptcPrompt.matchAll(/id=(\S+) name=[^\n]*? kind=(\S+) target=(\S*) bitrate=(\S*)/g)].map(
+      ([, id, kind, target, bitrate]) => ({
         id,
         format: target || (kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : 'jpg'),
         quality: 60,
+        // Echo the per-row bitrate target like a model following the prompt
+        // rule; rows without one stay without one.
+        ...(bitrate ? { bitrate: Number(bitrate) } : {}),
       }),
     );
     yield { type: 'text-delta', index: 0, text: JSON.stringify({ files: rows }) };
@@ -856,6 +859,110 @@ const reencodeQ50 = await call('convert', {
 assert.equal(reencodeQ50.data.job.copy, false, 'an explicit quality forces the re-encode');
 const reencodeJob = await waitJob(reencodeQ50.data.job);
 assert.ok(fs.existsSync(reencodeJob.out), 'the re-encoded output lands on disk');
+
+// --- audio bitrate: an explicit kbps re-encodes, the default keeps the copy --
+const tone = path.join(outDir, 'tone.mp3');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'sine=frequency=440',
+  '-c:a',
+  'libmp3lame',
+  '-b:a',
+  '192k',
+  tone,
+]);
+const toneUpload = await call('upload?name=tone.mp3', { method: 'POST', body: fs.readFileSync(tone) });
+assert.equal(toneUpload.data.kind, 'audio');
+const audioKbps = (file) => {
+  const probe = spawnSync(ffmpeg, ['-hide_banner', '-i', file], { encoding: 'utf8' }).stderr;
+  const kbps = /(\d+)\s*kb\/s/.exec(probe);
+  return kbps ? Number(kbps[1]) : 0;
+};
+
+const audioCopy = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: toneUpload.data.id, format: 'mp3' }),
+});
+assert.equal(audioCopy.data.job.copy, true, 'mp3->mp3 copies by default');
+const audioCopyDefault = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: toneUpload.data.id, format: 'mp3', bitrate: 192 }),
+});
+assert.equal(audioCopyDefault.data.job.copy, true, 'asking for the recipe default keeps the copy');
+const audioReenc = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: toneUpload.data.id, format: 'mp3', bitrate: 128 }),
+});
+assert.equal(audioReenc.data.job.copy, false, 'an explicit bitrate forces the re-encode');
+const audioReencJob = await waitJob(audioReenc.data.job);
+assert.ok(
+  Math.abs(audioKbps(audioReencJob.out) - 128) <= 8,
+  `the re-encoded mp3 sits at ~128k (${audioKbps(audioReencJob.out)})`,
+);
+const m4aJob = await waitJob(
+  (
+    await call('convert', {
+      method: 'POST',
+      body: JSON.stringify({ id: toneUpload.data.id, format: 'm4a', bitrate: 96 }),
+    })
+  ).data.job,
+);
+assert.ok(Math.abs(audioKbps(m4aJob.out) - 96) <= 8, `the m4a encode takes the bitrate (${audioKbps(m4aJob.out)})`);
+
+// Fixed-rule batch: the per-row bitrate reaches planFor without the model.
+const plainBitrate = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: toneUpload.data.id, format: 'mp3', bitrate: 128 }] }),
+});
+assert.equal(plainBitrate.data.ok, true, JSON.stringify(plainBitrate.data));
+const plainBitrateDone = await waitRun(plainBitrate.data.run);
+assert.equal(plainBitrateDone.items[0].state, 'done');
+assert.equal(plainBitrateDone.items[0].result.copy, false, 'the fixed-rule batch re-encodes for the bitrate');
+assert.ok(
+  Math.abs(audioKbps(plainBitrateDone.items[0].result.file) - 128) <= 8,
+  `the batch output sits at ~128k (${audioKbps(plainBitrateDone.items[0].result.file)})`,
+);
+
+// PTC batch: the prompt carries the per-row bitrate and the binding applies it.
+const ptcBitrate = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: toneUpload.data.id, format: 'mp3', bitrate: 96 }], ptc: true }),
+});
+assert.equal(ptcBitrate.data.ok, true, JSON.stringify(ptcBitrate.data));
+const ptcBitrateDone = await waitRun(ptcBitrate.data.run);
+assert.equal(ptcBitrateDone.items[0].state, 'done');
+assert.equal(ptcBitrateDone.items[0].result.copy, false, 'the PTC batch re-encodes for the bitrate');
+assert.match(ptcPrompt, /bitrate=96/, 'the prompt carries the per-row bitrate target');
+assert.ok(
+  Math.abs(audioKbps(ptcBitrateDone.items[0].result.file) - 96) <= 8,
+  `the PTC output sits at ~96k (${audioKbps(ptcBitrateDone.items[0].result.file)})`,
+);
+
+// A model plan with an out-of-range bitrate is refused, not clamped silently.
+const realStream = llm.stream;
+llm.stream = async function* () {
+  yield {
+    type: 'text-delta',
+    index: 0,
+    text: JSON.stringify({ files: [{ id: toneUpload.data.id, format: 'mp3', bitrate: 999 }] }),
+  };
+  yield { type: 'finish', reason: { kind: 'stop' } };
+};
+const ptcBadBitrate = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: toneUpload.data.id, format: 'mp3', bitrate: 96 }], ptc: true }),
+});
+const ptcBadBitrateDone = await waitRun(ptcBadBitrate.data.run);
+assert.equal(ptcBadBitrateDone.state, 'error');
+assert.match(ptcBadBitrateDone.error, /码率不合法/);
+llm.stream = realStream;
 
 const audioOnly = await call('convert', {
   method: 'POST',

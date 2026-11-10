@@ -32,6 +32,7 @@ import {
   FORMATS,
   buildArgs,
   copyArgs,
+  defaultBitrate,
   defaultFormat,
   hardwareFor,
   extOf,
@@ -52,6 +53,7 @@ import {
   streamInfoOf,
   subtitlePlan,
   supportedFormats,
+  supportsBitrate,
   threadArgs,
   trimArgs,
 } from './lib/plan.js';
@@ -350,6 +352,8 @@ export interface RunItemInfo {
   // The panel's per-row quality choice; the run's top-level quality is the
   // fallback for rows without one.
   quality?: number;
+  // The panel's per-row audio bitrate (kbps); lossy audio formats only.
+  bitrate?: number;
   state: RunItemState;
   percent: number | null;
   jobId: string;
@@ -396,6 +400,7 @@ interface JsonBody {
   mode?: string;
   format?: string;
   quality?: number;
+  bitrate?: number;
   hardware?: unknown;
   name?: string;
   stream?: number | string;
@@ -1350,7 +1355,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         try {
           const plan = planFor(
             upload,
-            { mode: item.mode, format: item.format, quality: item.quality ?? quality, hardware },
+            { mode: item.mode, format: item.format, quality: item.quality ?? quality, bitrate: item.bitrate, hardware },
             0,
           );
           // Container rewrites (copy, extract-audio, metadata) carry 'copy' in
@@ -1470,14 +1475,19 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       }
       if (files.length !== planned.length) throw new Error('文件已失效，请重新选择');
       const targets = new Map(planned.map((item) => [item.id, item.format]));
+      const bitrates = new Map(planned.map((item) => [item.id, item.bitrate]));
       const model = await resolvePtcModel(requested);
       run.stage = 'planning';
       const modelStart = Date.now();
-      const plan = await collectPtcPlan(files, targets, quality, model, controller);
+      const plan = await collectPtcPlan(files, targets, bitrates, quality, model, controller);
       run.modelMs = Date.now() - modelStart;
       for (const row of plan) {
         const item = run.items.find((candidate) => candidate.id === row.id);
-        if (item) item.format = row.format;
+        if (item) {
+          item.format = row.format;
+          // The model may omit bitrate: the panel's choice stays the fallback.
+          if (row.bitrate !== undefined) item.bitrate = row.bitrate;
+        }
       }
       run.stage = 'converting';
       await fsp.mkdir(outDir, { recursive: true });
@@ -1492,7 +1502,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       for (const row of plan) {
         const upload = uploads.get(row.id);
         if (!upload) continue;
-        const preview = planFor(upload, { format: row.format, quality: row.quality ?? quality, hardware });
+        const preview = planFor(upload, {
+          format: row.format,
+          quality: row.quality ?? quality,
+          bitrate: row.bitrate ?? bitrates.get(row.id),
+          hardware,
+        });
         const cost = estimatePtcCost(
           {
             duration: upload.duration,
@@ -1534,7 +1549,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           entry.percent = null;
           entry.error = '';
         }
-        const estimate = planFor(upload, { format: target, quality: Number(a.quality ?? quality), hardware });
+        const estimate = planFor(upload, {
+          format: target,
+          quality: Number(a.quality ?? quality),
+          bitrate: Number(a.bitrate ?? entry?.bitrate),
+          hardware,
+        });
         const weight = estimate.copy
           ? WEIGHTS.copy
           : estimate.hardware
@@ -1550,7 +1570,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             async (threads) => {
               const plan = planFor(
                 upload,
-                { format: target, quality: Number(a.quality ?? quality), hardware },
+                {
+                  format: target,
+                  quality: Number(a.quality ?? quality),
+                  bitrate: Number(a.bitrate ?? entry?.bitrate),
+                  hardware,
+                },
                 threads,
               );
               const { job, done } = await startJob(upload, plan, null, '');
@@ -1665,11 +1690,18 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     }
     const trim = normalizeTrim(body.trim, upload.duration);
     // An explicit quality choice means "re-encode to this quality": a container
-    // copy would silently drop it. Audio ignores quality, so this never forces
-    // an audio re-encode. Rounded, so 89.6/90.4 (which buildArgs rounds to the
-    // 90 default) do not force a pointless re-encode.
+    // copy would silently drop it. Rounded, so 89.6/90.4 (which buildArgs rounds
+    // to the 90 default) do not force a pointless re-encode.
     const qualityTuned = upload.kind === 'video' && Number(body.quality) > 0 && Math.round(Number(body.quality)) !== 90;
-    if (!trim && !qualityTuned) {
+    // The same rule for an explicit audio bitrate: asking for 128k when the
+    // source could just be copied is a real re-encode request. Compared against
+    // the recipe's own default, so asking for 192 keeps the copy fast path.
+    const bitrateTuned =
+      upload.kind === 'audio' &&
+      supportsBitrate(upload.kind, format) &&
+      Number(body.bitrate) > 0 &&
+      Math.round(Number(body.bitrate)) !== defaultBitrate(format);
+    if (!trim && !qualityTuned && !bitrateTuned) {
       const copy = copyArgs(upload.kind, format, upload.meta);
       if (copy) return { ext: format, kind: kindByExt(format), args: copy, copy: true };
     }
@@ -1688,17 +1720,28 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         };
       }
     }
-    return { ext: format, kind: kindByExt(format), args: buildArgs(upload.kind, format, body.quality), threads };
+    return {
+      ext: format,
+      kind: kindByExt(format),
+      args: buildArgs(upload.kind, format, body.quality, body.bitrate),
+      threads,
+    };
   };
 
   // --- PTC batch scheduling ------------------------------------------------
   // The panel hands a checked batch to the user's main model, which writes a
   // small program over this one binding. Conversions still go through the
   // same planFor/startJob path, so PTC changes scheduling, not the ffmpeg core.
-  const ptcPlanPrompt = (files: Upload[], targets: Map<string, string>, quality: number): string => {
+  const ptcPlanPrompt = (
+    files: Upload[],
+    targets: Map<string, string>,
+    bitrates: Map<string, number | undefined>,
+    quality: number,
+  ): string => {
     const lines = files.map(
       (f) =>
         `- id=${f.id} name=${f.name} kind=${f.kind} target=${targets.get(f.id) || ''} ` +
+        `bitrate=${bitrates.get(f.id) || ''} ` +
         `duration=${f.duration.toFixed(2)}s video=${f.streams.video ? 'yes' : 'no'} ` +
         `audio=${f.streams.audio ? 'yes' : 'no'} size=${(f.size / 1048576).toFixed(2)}MB`,
     );
@@ -1711,17 +1754,21 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       `各类型的可用输出格式：video=${formatsFor('video').join(', ')}；audio=${formatsFor('audio').join(', ')}；image=${formatsFor('image').join(', ')}。`,
       '',
       '只返回一个 JSON 对象。不要代码、不要解释、不要 Markdown 代码块：',
-      '{"files":[{"id":"文件id","format":"输出格式","quality":90}]}',
+      '{"files":[{"id":"文件id","format":"输出格式","quality":90,"bitrate":128}]}',
       '',
       '规则：',
       '1. 每个文件恰好一条，id 必须与上面完全一致；不能多、不能少、不能重复。',
       '2. format 必须属于该文件 kind 的可用格式；优先用该行的 target。',
       '3. quality 1–100，仅对软件编码视频（mp4/mov/mkv/flv/ts）、GPU 硬编视频和 jpg/webp 图片有意义，其它类型请省略。',
-      '4. 没有音轨的文件不要选纯音频格式。',
+      '4. bitrate 仅对 mp3/m4a/aac/opus 有效（kbps，32-320）；该行 bitrate 非空时优先用它，为空则省略。',
+      '5. 没有音轨的文件不要选纯音频格式。',
     ].join('\n');
   };
 
-  const parsePtcPlan = (text: string, files: Upload[]): { id: string; format: string; quality?: number }[] => {
+  const parsePtcPlan = (
+    text: string,
+    files: Upload[],
+  ): { id: string; format: string; quality?: number; bitrate?: number }[] => {
     const clean = text
       .trim()
       .replace(/^```[a-zA-Z]*\s*\n?/, '')
@@ -1754,13 +1801,24 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       if (!formatsFor(file.kind).includes(format)) {
         throw new Error(`模型给 ${file.id} 选了不支持的格式 ${format}`);
       }
+      const out: { id: string; format: string; quality?: number; bitrate?: number } = { id: file.id, format };
       const rawQuality = row.quality;
-      if (rawQuality === undefined || rawQuality === null) return { id: file.id, format };
-      const value = Number(rawQuality);
-      if (!Number.isFinite(value) || value < 1 || value > 100) {
-        throw new Error(`模型给 ${file.id} 的质量不合法`);
+      if (rawQuality !== undefined && rawQuality !== null) {
+        const value = Number(rawQuality);
+        if (!Number.isFinite(value) || value < 1 || value > 100) {
+          throw new Error(`模型给 ${file.id} 的质量不合法`);
+        }
+        out.quality = Math.round(value);
       }
-      return { id: file.id, format, quality: Math.round(value) };
+      const rawBitrate = row.bitrate;
+      if (rawBitrate !== undefined && rawBitrate !== null) {
+        const value = Number(rawBitrate);
+        if (!Number.isFinite(value) || value < 32 || value > 320) {
+          throw new Error(`模型给 ${file.id} 的码率不合法`);
+        }
+        out.bitrate = Math.round(value);
+      }
+      return out;
     });
   };
 
@@ -1798,10 +1856,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   const collectPtcPlan = async (
     files: Upload[],
     targets: Map<string, string>,
+    bitrates: Map<string, number | undefined>,
     quality: number,
     model: { provider: string; modelId: string },
     controller: AbortController,
-  ): Promise<{ id: string; format: string; quality?: number }[]> => {
+  ): Promise<{ id: string; format: string; quality?: number; bitrate?: number }[]> => {
     const llm = ctx.get('llm');
     if (!llm) throw new Error('模型服务不可用');
     const { signal } = controller;
@@ -1819,7 +1878,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       for await (const chunk of llm.stream({
         provider: model.provider,
         model: model.modelId,
-        messages: [{ role: 'user', content: [{ type: 'text', text: ptcPlanPrompt(files, targets, quality) }] }],
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: ptcPlanPrompt(files, targets, bitrates, quality) }] },
+        ],
         maxTokens: 6000,
         ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
         signal,
@@ -1975,6 +2036,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       mode: action === 'rewrite-tags' ? 'meta' : action,
       format: String(a.format || defaultFormat(probed.kind)),
       quality: Number(a.quality || 90),
+      bitrate: Number(a.bitrate || 0),
       stream: Number(a.stream || 0),
       tags: (a.tags || {}) as Record<string, string>,
       trim: a.trim as { start?: unknown; end?: unknown } | undefined,
@@ -2038,7 +2100,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
         '③extract-audio 抽音轨、④extract-video 抽画面（不重编码）；⑤subtitle 导出内嵌字幕为 .srt；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）。' +
-        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts）与图片 jpg/webp 可带 quality（1-100，90=默认）：视频映射 x264 CRF，GPU 硬编时映射为目标码率倍率。产物写在输出目录，返回新文件路径。',
+        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts）与图片 jpg/webp 可带 quality（1-100，90=默认）：视频映射 x264 CRF，GPU 硬编时映射为目标码率倍率；音频文件转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；视频文件内嵌音轨的码率不受此参数控制）。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
         properties: {
@@ -2061,6 +2123,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             type: 'number',
             description:
               '质量 1-100（90=默认）：软件编码视频 mp4/mov/mkv/flv/ts 映射 CRF，GPU 硬编映射码率倍率，jpg/webp 图片有效。',
+          },
+          bitrate: {
+            type: 'number',
+            description: '音频码率 kbps（32-320，仅音频文件转 mp3/m4a/aac/opus；0 或不填用配方默认 192/128）。',
           },
           tags: {
             type: 'object',
@@ -2669,11 +2735,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               // still explained after a page rebuild.
               const skipped = row.skip === true;
               const q = Number(row.quality);
+              const br = Number(row.bitrate);
               items.push({
                 id,
                 mode: String(row.mode || ''),
                 format: String(row.format || ''),
                 quality: Number.isFinite(q) && q >= 1 && q <= 100 ? Math.round(q) : undefined,
+                bitrate: Number.isFinite(br) && br >= 32 && br <= 320 ? Math.round(br) : undefined,
                 state: skipped ? 'skipped' : 'waiting',
                 percent: null,
                 jobId: '',

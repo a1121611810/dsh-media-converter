@@ -4,6 +4,7 @@
 import { computed, ref, watch } from 'vue';
 import FileQueue from './FileQueue.vue';
 import type { QueueRow } from '../lib.js';
+import { BITRATE_OPTIONS } from '../lib.js';
 import type { MediaKind } from '../../../lib/plan.js';
 
 const props = defineProps<{
@@ -19,6 +20,8 @@ const props = defineProps<{
   showTargets: boolean;
   quality: number;
   showQuality: boolean;
+  bitrate: number;
+  showBitrate: boolean;
   note: string;
   disabled: boolean;
   t: (key: string) => string;
@@ -28,6 +31,7 @@ const emit = defineEmits<{
   'toggle-group': [checked: boolean];
   'update:target': [value: string];
   'update:quality': [value: number];
+  'update:bitrate': [value: number];
   toggle: [key: string];
   open: [key: string];
   reveal: [file: string];
@@ -49,6 +53,7 @@ const setGroup = (event: Event) => emit('toggle-group', (event.target as HTMLInp
 const setTarget = (event: Event) => emit('update:target', (event.target as HTMLSelectElement).value);
 const setRowTarget = (key: string, value: string) => emit('update:row-target', key, value);
 const setQuality = (event: Event) => emit('update:quality', Number((event.target as HTMLInputElement).value));
+const setBitrate = (event: Event) => emit('update:bitrate', Number((event.target as HTMLSelectElement).value));
 </script>
 
 <template>
@@ -86,6 +91,19 @@ const setQuality = (event: Event) => emit('update:quality', Number((event.target
           @input="setQuality"
         />
         <span class="mc-muted">{{ quality }}</span>
+      </label>
+      <label v-if="showBitrate" class="mc-field mc-bitrate">
+        <span>{{ t('batch.bitrate') }}</span>
+        <select
+          class="mc-select"
+          :value="bitrate"
+          :disabled="disabled"
+          :aria-label="t('batch.bitrate')"
+          @change="setBitrate"
+        >
+          <option :value="0">{{ t('bitrate.default') }}</option>
+          <option v-for="option in BITRATE_OPTIONS" :key="option" :value="option">{{ option }} kbps</option>
+        </select>
       </label>
       <span v-if="!selectable" class="mc-hint">{{ note }}</span>
     </div>

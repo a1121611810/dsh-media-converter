@@ -49,6 +49,7 @@ export interface ConvertRequest {
   name?: string;
   format?: string;
   quality?: number;
+  bitrate?: number;
   mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta';
   stream?: number;
   tags?: Record<string, string>;
@@ -268,6 +269,16 @@ export function supportsQuality(kind: string, format: string): boolean {
     (kind === 'video' && ['mp4', 'mov', 'mkv', 'flv', 'ts'].includes(format))
   );
 }
+
+// Mirror of the Host's supportsBitrate (lib/plan.ts): the bitrate select
+// shows for exactly these lossy audio targets, so the two must stay in sync.
+export function supportsBitrate(kind: string, format: string): boolean {
+  return kind === 'audio' && ['mp3', 'm4a', 'aac', 'opus'].includes(format);
+}
+
+// The selectable bitrates (kbps) for the bitrate select; '' means the
+// recipe default. Kept here so App and QueueGroup share one list.
+export const BITRATE_OPTIONS = [64, 96, 128, 160, 192, 256, 320];
 
 // The testable core of the panel's 移除: ask the Host first, drop the row
 // only on success. The removal index is re-read from getRows() AFTER the
