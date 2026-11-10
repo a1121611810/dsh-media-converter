@@ -357,6 +357,8 @@ export interface RunItemInfo {
   // The panel's per-row GIF knobs; gif targets only, 0/absent = recipe default.
   fps?: number;
   width?: number;
+  // The panel's per-row GPU codec choice ('h264' | 'hevc'); hardware only.
+  codec?: string;
   state: RunItemState;
   percent: number | null;
   jobId: string;
@@ -406,6 +408,7 @@ interface JsonBody {
   bitrate?: number;
   fps?: number;
   width?: number;
+  codec?: unknown;
   hardware?: unknown;
   name?: string;
   stream?: number | string;
@@ -462,7 +465,7 @@ export interface FfmpegProbe {
 // The cheap half of the probe, per ffmpeg path.
 const buildCache = new Map<string, Promise<FfmpegBuild>>();
 // The device half, per ffmpeg path: one driver check per binary.
-const deviceCache = new Map<string, Promise<HwBackend | null>>();
+const deviceCache = new Map<string, Promise<{ backend: HwBackend; hevc: boolean } | null>>();
 
 // Running ffmpeg: resolves with its output, rejects when the command fails.
 // The runner is injected so the whole probe can be walked on a machine that
@@ -487,12 +490,12 @@ function execRunner(ffmpeg: string): FfmpegRunner {
     });
 }
 
-// One frame through the encoder. A vendor encoder can be compiled into the
-// binary and still have no device to talk to (no matching GPU, no driver),
-// so only a real encode proves the machine can use it. The rate options ride
-// along: an option name this ffmpeg does not know fails the check here
-// instead of in the middle of a user's batch.
-function deviceArgs(backend: HwBackend): string[] {
+// One frame through the given encoder of a backend. A vendor encoder can be
+// compiled into the binary and still have no device to talk to (no matching
+// GPU, no driver), so only a real encode proves the machine can use it. The
+// rate options ride along: an option name this ffmpeg does not know fails the
+// check here instead of in the middle of a user's batch.
+function deviceArgs(backend: HwBackend, encoder: string): string[] {
   return [
     '-hide_banner',
     '-loglevel',
@@ -505,7 +508,7 @@ function deviceArgs(backend: HwBackend): string[] {
     '1',
     ...backend.rateArgs,
     '-c:v',
-    backend.encoder,
+    encoder,
     '-b:v',
     '200k',
     '-f',
@@ -532,25 +535,41 @@ export async function probeFfmpegBuild(ffmpeg: string, run: FfmpegRunner = execR
   return { encoders, hwaccels };
 }
 
-// Which backend this machine can really run. This starts a graphics driver,
-// so it can take seconds; the caller usually runs it in the background.
+// Which backend this machine can really run, and whether its HEVC sibling
+// encodes too. This starts a graphics driver, so it can take seconds; the
+// caller usually runs it in the background. A backend whose H.264 works but
+// whose HEVC does not (an older GPU) stays offered — just without the codec
+// choice.
 export async function probeFfmpegDevice(
   platform: string,
   build: FfmpegBuild,
   run: FfmpegRunner,
-): Promise<HwBackend | null> {
+): Promise<{ backend: HwBackend; hevc: boolean } | null> {
   // The first backend this machine can really run wins: a laptop with an
   // Intel GPU and an NVIDIA card uses the NVIDIA encoder. Only a real encode
   // counts — an encoder the binary carries but the GPU cannot run must not
   // put a GPU switch in front of the user.
-  return pickBackend(platform, build.encoders, build.hwaccels, async (backend) => {
+  const backend = await pickBackend(platform, build.encoders, build.hwaccels, async (candidate) => {
     try {
-      await run(deviceArgs(backend), DEVICE_TIMEOUT_MS);
+      await run(deviceArgs(candidate, candidate.encoder), DEVICE_TIMEOUT_MS);
       return true;
     } catch {
       return false;
     }
   });
+  if (!backend) return null;
+  // The HEVC check is gated on the encoder list: a binary that does not even
+  // carry hevc_nvenc cannot gain the codec by passing a device check.
+  let hevc = false;
+  if (build.encoders.includes(backend.hevcEncoder)) {
+    try {
+      await run(deviceArgs(backend, backend.hevcEncoder), DEVICE_TIMEOUT_MS);
+      hevc = true;
+    } catch {
+      hevc = false;
+    }
+  }
+  return { backend, hevc };
 }
 
 // Both halves, for a caller that can wait.
@@ -564,14 +583,14 @@ export async function probeFfmpeg(
   return {
     info: {
       h264: chosen !== null,
-      hevc: build.encoders.includes('hevc_videotoolbox'),
+      hevc: chosen ? chosen.hevc : false,
       hwaccel: chosen !== null,
-      backend: chosen ? chosen.id : null,
-      backendLabel: chosen ? chosen.label : null,
+      backend: chosen ? chosen.backend.id : null,
+      backendLabel: chosen ? chosen.backend.label : null,
       detecting: false,
     },
     encoders: build.encoders,
-    backend: chosen,
+    backend: chosen ? chosen.backend : null,
   };
 }
 
@@ -983,6 +1002,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // probe publishes its verdict here. undefined = the device check is still
   // running, null = no backend works, otherwise the backend itself.
   let hwBackend: HwBackend | null | undefined = undefined;
+  // Whether the chosen backend's HEVC sibling passed its own device check.
+  let hwHevc = false;
   // Whether the device check has produced its verdict.
   let deviceSettled = false;
   // The cheap half of the probe: the encoder list and the hardware decoders.
@@ -1004,10 +1025,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     }
     // The cache outlives the instance: whoever asks adopts the verdict, so a
     // reloaded plugin does not wait for a probe that already ran.
-    return pending.then((backend) => {
-      hwBackend = backend;
+    return pending.then((verdict) => {
+      hwBackend = verdict ? verdict.backend : null;
+      hwHevc = verdict ? verdict.hevc : false;
       deviceSettled = true;
-      return backend;
+      return hwBackend;
     });
   };
   // Wait for the verdict (the device check times out on its own). For a
@@ -1367,6 +1389,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               bitrate: item.bitrate,
               fps: item.fps,
               width: item.width,
+              codec: item.codec,
               hardware,
             },
             0,
@@ -1498,8 +1521,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         const item = run.items.find((candidate) => candidate.id === row.id);
         if (item) {
           item.format = row.format;
-          // The model may omit bitrate: the panel's choice stays the fallback.
+          // The model may omit bitrate/codec: the panel's choice stays the fallback.
           if (row.bitrate !== undefined) item.bitrate = row.bitrate;
+          if (row.codec !== undefined) item.codec = row.codec;
         }
       }
       run.stage = 'converting';
@@ -1515,10 +1539,14 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       for (const row of plan) {
         const upload = uploads.get(row.id);
         if (!upload) continue;
+        // codec rides along: like quality it can flip the copy gate (a hevc
+        // ask is a re-encode), and a misread plan would cost the row as a
+        // free copy while the binding runs a hardware encode.
         const preview = planFor(upload, {
           format: row.format,
           quality: row.quality ?? quality,
           bitrate: row.bitrate ?? bitrates.get(row.id),
+          codec: row.codec,
           hardware,
         });
         const cost = estimatePtcCost(
@@ -1564,10 +1592,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         }
         // The estimate only picks a scheduling weight: fps/width change the
         // output size, not the lane, so they stay out of the estimate call.
+        // codec stays in for the same reason quality does: it can flip the
+        // copy gate, and a copy-classified hevc job would dodge the GPU cap.
         const estimate = planFor(upload, {
           format: target,
           quality: Number(a.quality ?? quality),
           bitrate: Number(a.bitrate ?? entry?.bitrate),
+          codec: a.codec !== undefined ? String(a.codec) : entry?.codec,
           hardware,
         });
         const weight = estimate.copy
@@ -1591,6 +1622,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                   bitrate: Number(a.bitrate ?? entry?.bitrate),
                   fps: Number(a.fps ?? entry?.fps),
                   width: Number(a.width ?? entry?.width),
+                  codec: a.codec !== undefined ? String(a.codec) : entry?.codec,
                   hardware,
                 },
                 threads,
@@ -1719,7 +1751,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       supportsBitrate(upload.kind, format) &&
       Number(body.bitrate) > 0 &&
       Math.round(Number(body.bitrate)) !== defaultBitrate(format);
-    if (!trim && !qualityTuned && !bitrateTuned) {
+    // The same rule for an explicit GPU codec: asking for HEVC when the
+    // source could just be copied is a real re-encode request.
+    const codecTuned = upload.kind === 'video' && String(body.codec || '') === 'hevc';
+    if (!trim && !qualityTuned && !bitrateTuned && !codecTuned) {
       const copy = copyArgs(upload.kind, format, upload.meta);
       if (copy) return { ext: format, kind: kindByExt(format), args: copy, copy: true };
     }
@@ -1727,7 +1762,17 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     // found a backend this machine can really run; elsewhere the hardware ask
     // silently gets the software plan instead of a doomed ffmpeg command.
     if (body.hardware && hwBackend) {
-      const hw = hardwareFor(hwBackend, upload.kind, format, upload.size, upload.duration, Number(body.quality));
+      // hardwareFor whitelists the codec: 'hevc' outside mp4/mov/mkv/ts (or
+      // any unknown value) quietly becomes H.264 instead of a failed encode.
+      const hw = hardwareFor(
+        hwBackend,
+        upload.kind,
+        format,
+        upload.size,
+        upload.duration,
+        Number(body.quality),
+        String(body.codec || ''),
+      );
       if (hw) {
         return {
           ext: format,
@@ -1768,26 +1813,35 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       `文件（共 ${files.length} 个，每行已有该文件的 target）：`,
       ...lines,
       '',
-      `质量默认：${quality}（1-100，90=默认）。对软件编码的视频（mp4/mov/mkv/flv/ts）映射为 x264 CRF，对 GPU 硬编视频映射为目标码率倍率，对 jpg/webp 图片生效；quality 不是 90 时已强制重编码（不会走拷贝）。`,
+      `质量默认：${quality}（1-100，90=默认）。对软件编码的视频映射为该编码的质量参数（x264/vp9 为 CRF，avi/wmv/ogv 为 qscale），对 GPU 硬编视频映射为目标码率倍率，对 jpg/webp 图片生效；quality 不是 90 时已强制重编码（不会走拷贝）。`,
       `各类型的可用输出格式：video=${formatsFor('video').join(', ')}；audio=${formatsFor('audio').join(', ')}；image=${formatsFor('image').join(', ')}。`,
       '',
       '只返回一个 JSON 对象。不要代码、不要解释、不要 Markdown 代码块：',
-      '{"files":[{"id":"文件id","format":"输出格式","quality":90,"bitrate":128,"fps":12,"width":640}]}',
+      '{"files":[{"id":"文件id","format":"输出格式","quality":90,"bitrate":128,"fps":12,"width":640,"codec":"h264"}]}',
       '',
       '规则：',
       '1. 每个文件恰好一条，id 必须与上面完全一致；不能多、不能少、不能重复。',
       '2. format 必须属于该文件 kind 的可用格式；优先用该行的 target。',
-      '3. quality 1–100，仅对软件编码视频（mp4/mov/mkv/flv/ts）、GPU 硬编视频和 jpg/webp 图片有意义，其它类型请省略。',
+      '3. quality 1–100，仅对视频与 jpg/webp 图片有意义，其它类型请省略。',
       '4. bitrate 仅对 mp3/m4a/aac/opus 有效（kbps，32-320）；该行 bitrate 非空时优先用它，为空则省略。',
       '5. fps（1–30）与 width（≥16 像素）仅对 gif 目标有效，省略则用内置默认 12fps/640px；其它格式不要带。',
-      '6. 没有音轨的文件不要选纯音频格式。',
+      '6. codec 仅对 GPU 硬编视频有效（h264/hevc），省略默认 h264；hevc 仅 mp4/mov/mkv/ts 可选。',
+      '7. 没有音轨的文件不要选纯音频格式。',
     ].join('\n');
   };
 
   const parsePtcPlan = (
     text: string,
     files: Upload[],
-  ): { id: string; format: string; quality?: number; bitrate?: number; fps?: number; width?: number }[] => {
+  ): {
+    id: string;
+    format: string;
+    quality?: number;
+    bitrate?: number;
+    fps?: number;
+    width?: number;
+    codec?: string;
+  }[] => {
     const clean = text
       .trim()
       .replace(/^```[a-zA-Z]*\s*\n?/, '')
@@ -1820,7 +1874,15 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       if (!formatsFor(file.kind).includes(format)) {
         throw new Error(`模型给 ${file.id} 选了不支持的格式 ${format}`);
       }
-      const out: { id: string; format: string; quality?: number; bitrate?: number; fps?: number; width?: number } = {
+      const out: {
+        id: string;
+        format: string;
+        quality?: number;
+        bitrate?: number;
+        fps?: number;
+        width?: number;
+        codec?: string;
+      } = {
         id: file.id,
         format,
       };
@@ -1851,6 +1913,14 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           throw new Error(`模型给 ${file.id} 的 ${key} 不合法`);
         }
         out[key] = Math.round(value);
+      }
+      const rawCodec = row.codec;
+      if (rawCodec !== undefined && rawCodec !== null) {
+        const value = String(rawCodec);
+        if (value !== 'h264' && value !== 'hevc') {
+          throw new Error(`模型给 ${file.id} 的 codec 不合法`);
+        }
+        out.codec = value;
       }
       return out;
     });
@@ -1894,7 +1964,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     quality: number,
     model: { provider: string; modelId: string },
     controller: AbortController,
-  ): Promise<{ id: string; format: string; quality?: number; bitrate?: number; fps?: number; width?: number }[]> => {
+  ): Promise<
+    { id: string; format: string; quality?: number; bitrate?: number; fps?: number; width?: number; codec?: string }[]
+  > => {
     const llm = ctx.get('llm');
     if (!llm) throw new Error('模型服务不可用');
     const { signal } = controller;
@@ -2075,10 +2147,19 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       bitrate: Number(a.bitrate || 0),
       fps: Number(a.fps || 0),
       width: Number(a.width || 0),
+      codec: a.codec !== undefined ? String(a.codec) : undefined,
+      // A codec choice only means something on the GPU: asking for one opts
+      // into hardware encoding (which still falls back to software where no
+      // backend was probed).
+      hardware: a.codec !== undefined ? true : undefined,
       stream: Number(a.stream || 0),
       tags: (a.tags || {}) as Record<string, string>,
       trim: a.trim as { start?: unknown; end?: unknown } | undefined,
     };
+    // The tool opts into the GPU exactly like a batch does, so it waits for
+    // the device verdict too: asking while the check is still running must
+    // not quietly fall back to the CPU.
+    if (body.hardware) await deviceVerdict(ffmpeg!);
     const { job, done } = await startJob(
       upload,
       planFor(upload, body, 0),
@@ -2138,7 +2219,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
         '③extract-audio 抽音轨、④extract-video 抽画面（不重编码）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）。' +
-        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts）与图片 jpg/webp 可带 quality（1-100，90=默认）：视频映射 x264 CRF，GPU 硬编时映射为目标码率倍率；音频文件转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；视频文件内嵌音轨的码率不受此参数控制）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
+        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；指定 codec（h264/hevc）即视同请求 GPU 硬编（无显卡时自动回退软件编码；hevc 仅 mp4/mov/mkv/ts 有效，体积更小）；音频文件转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；视频文件内嵌音轨的码率不受此参数控制）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
         properties: {
@@ -2160,7 +2241,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           quality: {
             type: 'number',
             description:
-              '质量 1-100（90=默认）：软件编码视频 mp4/mov/mkv/flv/ts 映射 CRF，GPU 硬编映射码率倍率，jpg/webp 图片有效。',
+              '质量 1-100（90=默认）：软件编码视频映射该编码的质量参数（mp4/mov/mkv/flv/ts 为 CRF，webm 为 vp9 CRF，avi/wmv/ogv 为 qscale），GPU 硬编映射码率倍率，jpg/webp 图片有效。',
+          },
+          codec: {
+            type: 'string',
+            enum: ['h264', 'hevc'],
+            description:
+              'GPU 编码器（h264/hevc）；指定即视同请求 GPU 硬编（无显卡时自动回退软件编码）。hevc 体积更小，仅 mp4/mov/mkv/ts 有效，预览播放取决于系统解码。',
           },
           bitrate: {
             type: 'number',
@@ -2279,7 +2366,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           const info: HardwareInfo = build
             ? {
                 h264: hwBackend != null,
-                hevc: build.encoders.includes('hevc_videotoolbox'),
+                hevc: hwBackend != null && hwHevc,
                 hwaccel: hwBackend != null,
                 backend: hwBackend?.id ?? null,
                 backendLabel: hwBackend?.label ?? null,
@@ -2784,6 +2871,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               const br = Number(row.bitrate);
               const gf = Number(row.fps);
               const gw = Number(row.width);
+              const codecRaw = String(row.codec || '');
               items.push({
                 id,
                 mode: String(row.mode || ''),
@@ -2792,6 +2880,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                 bitrate: Number.isFinite(br) && br >= 32 && br <= 320 ? Math.round(br) : undefined,
                 fps: Number.isFinite(gf) && gf >= 1 && gf <= 30 ? Math.round(gf) : undefined,
                 width: Number.isFinite(gw) && gw >= 16 && gw <= 7680 ? Math.round(gw) : undefined,
+                codec: codecRaw === 'hevc' || codecRaw === 'h264' ? codecRaw : undefined,
                 state: skipped ? 'skipped' : 'waiting',
                 percent: null,
                 jobId: '',

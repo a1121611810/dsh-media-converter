@@ -16,6 +16,11 @@ const props = defineProps<{
   gpuPending: boolean;
   // The backend the Host probed, e.g. "NVIDIA NVENC".
   gpuLabel: string;
+  // The probed backend's HEVC sibling passed a real encode: the codec choice
+  // is offered only then.
+  gpuHevc: boolean;
+  // The chosen GPU codec: 'h264' or 'hevc'.
+  codec: string;
   models: PtcModelOption[];
   defaultModel: { provider: string; model: string; name: string } | null;
   modelKey: string;
@@ -38,6 +43,7 @@ const emit = defineEmits<{
   'update:operation': [value: Operation];
   ptc: [value: boolean];
   gpu: [value: boolean];
+  'update:codec': [value: string];
   'update:model-key': [value: string];
   run: [];
   cancel: [];
@@ -54,6 +60,7 @@ watch(
 const setOperation = (value: Operation) => emit('update:operation', value);
 const setPtc = (event: Event) => emit('ptc', (event.target as HTMLInputElement).checked);
 const setGpu = (event: Event) => emit('gpu', (event.target as HTMLInputElement).checked);
+const setCodec = (event: Event) => emit('update:codec', (event.target as HTMLSelectElement).value);
 // The switch names the backend the Host found, so "GPU" is never a lie about
 // which encoder will run.
 const gpuTitle = computed(() => props.t('batch.gpu').replace('%s', props.gpuLabel || 'GPU'));
@@ -153,7 +160,15 @@ const defaultLabel = computed(() => {
           <input type="checkbox" :checked="useGpu" :disabled="disabled" @change="setGpu" />
           {{ gpuTitle }}
         </label>
-        <span class="mc-hint">{{ t('batch.gpuHint') }}</span>
+        <label v-if="useGpu && gpuHevc" class="mc-field mc-codec">
+          <span>{{ t('batch.codec') }}</span>
+          <select class="mc-select" :value="codec" :disabled="disabled" @change="setCodec">
+            <option value="h264">H.264</option>
+            <option value="hevc">HEVC</option>
+          </select>
+        </label>
+        <span v-if="useGpu && gpuHevc" class="mc-hint">{{ t('batch.codecHint') }}</span>
+        <span v-else class="mc-hint">{{ t('batch.gpuHint') }}</span>
       </div>
       <div v-else-if="gpuPending" class="mc-ptc-row">
         <span class="mc-hint">{{ t('batch.gpuDetecting') }}</span>

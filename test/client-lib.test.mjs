@@ -37,7 +37,10 @@ assert.equal(supportsQuality('image', 'webp'), true);
 assert.equal(supportsQuality('image', 'png'), false);
 assert.equal(supportsQuality('video', 'mp4'), true);
 assert.equal(supportsQuality('video', 'mkv'), true);
-assert.equal(supportsQuality('video', 'webm'), false);
+assert.equal(supportsQuality('video', 'webm'), true);
+assert.equal(supportsQuality('video', 'avi'), true);
+assert.equal(supportsQuality('video', 'wmv'), true);
+assert.equal(supportsQuality('video', 'ogv'), true);
 assert.equal(supportsQuality('video', 'gif'), false);
 assert.equal(supportsQuality('audio', 'mp3'), false);
 

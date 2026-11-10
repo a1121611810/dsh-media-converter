@@ -53,11 +53,15 @@ assert.equal(supportsQuality('image', 'webp'), true);
 assert.equal(supportsQuality('image', 'png'), false);
 assert.equal(supportsQuality('audio', 'mp3'), false);
 
-// Video quality: the X264 containers take it as CRF (90 keeps the recipe's
-// 23); every other video recipe ignores it.
+// Video quality: the CRF recipes (x264 containers, webm's vp9) rewrite -crf;
+// the qscale recipes (avi/wmv's mpeg4 family, ogv's theora) rewrite -q:v;
+// every other video recipe ignores it.
 assert.equal(supportsQuality('video', 'mp4'), true);
 assert.equal(supportsQuality('video', 'mkv'), true);
-assert.equal(supportsQuality('video', 'webm'), false);
+assert.equal(supportsQuality('video', 'webm'), true);
+assert.equal(supportsQuality('video', 'avi'), true);
+assert.equal(supportsQuality('video', 'wmv'), true);
+assert.equal(supportsQuality('video', 'ogv'), true);
 assert.equal(supportsQuality('video', 'gif'), false);
 const crfAt = (args) => args[args.indexOf('-crf') + 1];
 assert.equal(crfAt(buildArgs('video', 'mp4')), '23'); // default unchanged
@@ -67,7 +71,17 @@ assert.equal(crfAt(buildArgs('video', 'mp4', 50)), '27');
 assert.equal(crfAt(buildArgs('video', 'mp4', 10)), '31');
 assert.equal(crfAt(buildArgs('video', 'mp4', 500)), '22'); // clamped
 assert.equal(crfAt(buildArgs('video', 'mov', 50)), '27');
-assert.equal(crfAt(buildArgs('video', 'webm', 50)), '32'); // vp9 recipe untouched
+// webm's vp9 CRF: 90 keeps the recipe's 32, with a wider clamp than x264.
+assert.equal(crfAt(buildArgs('video', 'webm', 90)), '32'); // default unchanged
+assert.equal(crfAt(buildArgs('video', 'webm', 100)), '29');
+assert.equal(crfAt(buildArgs('video', 'webm', 10)), '45'); // clamped
+const qvAt = (args) => args[args.indexOf('-q:v') + 1];
+assert.equal(qvAt(buildArgs('video', 'avi', 90)), '5'); // mpeg4 default unchanged
+assert.equal(qvAt(buildArgs('video', 'avi', 100)), '2');
+assert.equal(qvAt(buildArgs('video', 'wmv', 50)), '17'); // same qscale as mjpeg
+assert.equal(qvAt(buildArgs('video', 'ogv', 90)), '6'); // theora default unchanged
+assert.equal(qvAt(buildArgs('video', 'ogv', 10)), '10'); // theora scale is 0-10
+assert.equal(qvAt(buildArgs('video', 'ogv', 500)), '5'); // clamped
 assert.ok(!buildArgs('video', 'gif', 50).includes('-crf'));
 
 // GIF fps/width: the filter chain is rebuilt only when one knob is given
@@ -498,6 +512,42 @@ for (const backend of Object.values(HW_BACKENDS)) {
     assert.ok(plan, backend.id + ' supports ' + format);
     assert.ok(plan.args.includes('-b:v'));
   }
+}
+
+// The codec choice: 'hevc' swaps in the device-verified sibling encoder and
+// tags mp4/mov hvc1 (Apple players refuse untagged HEVC); a non-whitelisted
+// format or an unknown value quietly stays H.264 — never a doomed encode.
+const hevcMp4 = hardwareFor(HW_BACKENDS.videotoolbox, 'video', 'mp4', hwSize, hwDuration, 90, 'hevc');
+assert.ok(hevcMp4.args.includes('hevc_videotoolbox'));
+assert.deepEqual(hevcMp4.args.slice(hevcMp4.args.indexOf('-tag:v'), hevcMp4.args.indexOf('-tag:v') + 2), [
+  '-tag:v',
+  'hvc1',
+]);
+assert.ok(
+  hardwareFor(HW_BACKENDS.videotoolbox, 'video', 'mov', hwSize, hwDuration, 90, 'hevc').args.includes('hvc1'),
+  'mov gets the hvc1 tag too',
+);
+const hevcMkv = hardwareFor(HW_BACKENDS.nvenc, 'video', 'mkv', hwSize, hwDuration, 90, 'hevc');
+assert.ok(hevcMkv.args.includes('hevc_nvenc'));
+assert.ok(!hevcMkv.args.includes('hvc1'), 'mkv needs no hvc1 tag');
+assert.ok(
+  hardwareFor(HW_BACKENDS.videotoolbox, 'video', 'flv', hwSize, hwDuration, 90, 'hevc').args.includes(
+    'h264_videotoolbox',
+  ),
+  'flv is not a HEVC container and falls back to H.264',
+);
+assert.ok(
+  hardwareFor(HW_BACKENDS.videotoolbox, 'video', 'mp4', hwSize, hwDuration, 90, 'av1').args.includes(
+    'h264_videotoolbox',
+  ),
+  'an unknown codec value falls back to H.264 too',
+);
+assert.ok(
+  hardwareFor(HW_BACKENDS.videotoolbox, 'video', 'mp4', hwSize, hwDuration).args.includes('h264_videotoolbox'),
+  'the default stays H.264',
+);
+for (const backend of Object.values(HW_BACKENDS)) {
+  assert.ok(backend.hevcEncoder.startsWith('hevc_'), backend.id + ' names its HEVC sibling');
 }
 
 // CPU-aware capacity and thread split.

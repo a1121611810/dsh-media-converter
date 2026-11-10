@@ -268,7 +268,7 @@ export function unavailableTarget(file: UploadResponse | null, target: string): 
 export function supportsQuality(kind: string, format: string): boolean {
   return (
     (kind === 'image' && (format === 'jpg' || format === 'webp')) ||
-    (kind === 'video' && ['mp4', 'mov', 'mkv', 'flv', 'ts'].includes(format))
+    (kind === 'video' && ['mp4', 'mov', 'mkv', 'flv', 'ts', 'webm', 'avi', 'wmv', 'ogv'].includes(format))
   );
 }
 

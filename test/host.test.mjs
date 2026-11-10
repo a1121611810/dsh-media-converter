@@ -245,6 +245,10 @@ let testUploadId = '';
 let ptcPrompt = '';
 let ptcProgram = '';
 let ptcReasoning;
+// When set, the fake model returns this plan verbatim instead of echoing the
+// prompt rows — the hook for plans a well-behaved model would not produce
+// (an invalid codec, an explicit HEVC choice).
+let ptcFakePlanOverride = null;
 // The real runtime refuses more than maxPendingCalls (128 by default) binding
 // calls per evaluation; the fake uses a small cap so the test stays quick.
 const PTC_PENDING_LIMIT = 20;
@@ -287,6 +291,11 @@ const llm = {
     assert.ok(Array.isArray(options.messages[0].content), 'messages carry content blocks');
     ptcPrompt = options.messages[0].content[0].text;
     ptcReasoning = options.reasoningEffort;
+    if (ptcFakePlanOverride) {
+      yield { type: 'text-delta', index: 0, text: JSON.stringify(ptcFakePlanOverride) };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+      return;
+    }
     // One plan row per file the prompt lists, picking each file's own target so
     // videos, audio and images all get a format the Host accepts.
     const rows = [...ptcPrompt.matchAll(/id=(\S+) name=[^\n]*? kind=(\S+) target=(\S*) bitrate=(\S*)/g)].map(
@@ -1756,6 +1765,17 @@ const toolTrimDuration = parseDuration(
 );
 assert.ok(Math.abs(toolTrimDuration - 1) < 0.25, `trimmed duration ${toolTrimDuration}`);
 
+// Asking for a GPU codec opts the tool into hardware encoding: where the
+// probe verified HEVC the output file itself proves the chain, elsewhere the
+// ask quietly falls back to software and the call still succeeds.
+const toolLiveProbe = await probeFfmpeg(ffmpeg, process.platform);
+const toolHevc = await media.execute({ path: clip, action: 'convert', format: 'mp4', codec: 'hevc' }, exec);
+assert.ok(fs.existsSync(toolHevc.file), 'the tool wrote its output');
+if (toolLiveProbe.info.hevc) {
+  const toolHevcOut = spawnSync(ffmpeg, ['-hide_banner', '-i', toolHevc.file], { encoding: 'utf8' }).stderr;
+  assert.match(toolHevcOut, /Video: hevc/, 'the tool codec ask reaches the GPU encoder');
+}
+
 await assert.rejects(
   () => media.execute({ path: path.join(outDir, 'nope.mp4'), action: 'probe' }, exec),
   /文件不存在/,
@@ -2327,25 +2347,50 @@ assert.equal(histAfterAll.data.items.length, 0);
 // and a one-frame device check. The runner is injected, so the whole chain
 // runs on a machine with no graphics card at all.
 const probeCalls = [];
-const fakeRunner = (deviceWorks) => (args, timeoutMs) => {
-  const joined = args.join(' ');
-  probeCalls.push({ joined, timeoutMs });
-  if (joined.includes('-encoders')) {
-    return Promise.resolve(' V....D h264_nvenc           NVIDIA NVENC H.264 encoder');
-  }
-  if (joined.includes('-hwaccels')) {
-    return Promise.resolve('Hardware acceleration methods:\ncuda\nd3d11va\nqsv');
-  }
-  // The device check is the last thing the probe runs: a machine whose GPU
-  // cannot encode fails here, and then no backend is offered.
-  return deviceWorks ? Promise.resolve('') : Promise.reject(new Error('no device'));
-};
+const fakeRunner =
+  (deviceWorks, encoders = ' V....D h264_nvenc           NVIDIA NVENC H.264 encoder') =>
+  (args, timeoutMs) => {
+    const joined = args.join(' ');
+    probeCalls.push({ joined, timeoutMs });
+    if (joined.includes('-encoders')) {
+      return Promise.resolve(encoders);
+    }
+    if (joined.includes('-hwaccels')) {
+      return Promise.resolve('Hardware acceleration methods:\ncuda\nd3d11va\nqsv');
+    }
+    // The device check is the last thing the probe runs: a machine whose GPU
+    // cannot encode fails here, and then no backend is offered.
+    return deviceWorks ? Promise.resolve('') : Promise.reject(new Error('no device'));
+  };
 
 const windowsProbe = await probeFfmpeg('fake', 'win32', fakeRunner(true));
 assert.equal(windowsProbe.info.backend, 'nvenc', 'the NVENC encoder is picked up');
 assert.equal(windowsProbe.info.backendLabel, 'NVIDIA NVENC');
 assert.equal(windowsProbe.info.h264, true, 'a working backend means H.264 hardware encoding');
 assert.ok(windowsProbe.encoders.includes('h264_nvenc'));
+// The fake binary does not even list a HEVC encoder, so the probe must not
+// burn a device check on one: the codec choice stays off.
+assert.equal(windowsProbe.info.hevc, false);
+
+// A binary carrying the HEVC sibling and a GPU that encodes it turns the
+// codec choice on; an H.264-capable GPU whose HEVC fails keeps the backend
+// without HEVC.
+const bothEncoders =
+  ' V....D h264_nvenc           NVIDIA NVENC H.264 encoder\n V....D hevc_nvenc           NVIDIA NVENC hevc encoder';
+const hevcProbe = await probeFfmpeg('fake', 'win32', fakeRunner(true, bothEncoders));
+assert.equal(hevcProbe.info.backend, 'nvenc');
+assert.equal(hevcProbe.info.hevc, true, 'a working HEVC device check turns the codec choice on');
+const hevcBrokenRunner = (args, timeoutMs) => {
+  const joined = args.join(' ');
+  probeCalls.push({ joined, timeoutMs });
+  if (joined.includes('-encoders')) return Promise.resolve(bothEncoders);
+  if (joined.includes('-hwaccels')) return Promise.resolve('Hardware acceleration methods:\ncuda\nd3d11va\nqsv');
+  if (joined.includes('hevc_nvenc')) return Promise.reject(new Error('no hevc device'));
+  return Promise.resolve('');
+};
+const hevcBrokenProbe = await probeFfmpeg('fake', 'win32', hevcBrokenRunner);
+assert.equal(hevcBrokenProbe.info.backend, 'nvenc', 'a working H.264 keeps the backend');
+assert.equal(hevcBrokenProbe.info.hevc, false, 'a failing HEVC check only drops the codec choice');
 
 // A platform with no hardware backend gets none, whatever the binary claims.
 const linuxProbe = await probeFfmpeg('fake', 'linux', fakeRunner(true));
@@ -2392,6 +2437,91 @@ assert.ok(
   settled.hardware.backend === null || ['videotoolbox', 'nvenc', 'qsv', 'amf'].includes(settled.hardware.backend),
   'the settled backend is a known one',
 );
+assert.ok(!settled.hardware.hevc || settled.hardware.backend !== null, 'HEVC implies a backend');
+// The status flag is the device check's verdict on this very binary: a direct
+// probe must agree (a static compile-list guess would pass on a GPU-less box
+// and lie about a machine whose HEVC device check fails).
+const realPlatformProbe = await probeFfmpeg(ffmpeg, process.platform);
+assert.equal(settled.hardware.backend, realPlatformProbe.info.backend, 'status reports the probed backend');
+assert.equal(settled.hardware.hevc, realPlatformProbe.info.hevc, 'status reports the probed HEVC verdict');
+
+// --- the HEVC codec choice through the PTC channel ---------------------------
+// An invalid codec in the model's plan fails the run loudly instead of being
+// silently ignored.
+ptcFakePlanOverride = { files: [{ id: gifClipUpload.data.id, format: 'mp4', codec: 'av1' }] };
+const ptcBadCodec = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: gifClipUpload.data.id, format: 'mp4' }], ptc: true }),
+});
+assert.equal(ptcBadCodec.data.ok, true, JSON.stringify(ptcBadCodec.data));
+const ptcBadCodecDone = await waitRun(ptcBadCodec.data.run);
+assert.equal(ptcBadCodecDone.state, 'error');
+assert.match(ptcBadCodecDone.error, /codec/, 'an invalid planned codec fails the run');
+assert.equal(ptcBadCodecDone.items[0].state, 'error');
+
+// A planned codec rides the program into the convert binding. Where the
+// probed GPU really encodes HEVC the output file itself proves the chain;
+// elsewhere the ask quietly falls back and the run still completes.
+ptcFakePlanOverride = { files: [{ id: gifClipUpload.data.id, format: 'mp4', codec: 'hevc' }] };
+const ptcHevcStart = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [{ id: gifClipUpload.data.id, format: 'mp4' }],
+    hardware: true,
+    ptc: true,
+  }),
+});
+assert.equal(ptcHevcStart.data.ok, true, JSON.stringify(ptcHevcStart.data));
+const ptcHevcDone = await waitRun(ptcHevcStart.data.run);
+assert.equal(ptcHevcDone.state, 'done', ptcHevcDone.error || '');
+assert.equal(ptcHevcDone.items[0].result.copy, false, 'a planned hevc is a real re-encode, never a container copy');
+assert.match(ptcProgram, /"codec":"hevc"/, 'the planned codec reaches the composed program');
+if (settled.hardware.hevc) {
+  const hevcOut = spawnSync(ffmpeg, ['-hide_banner', '-i', ptcHevcDone.items[0].result.file], {
+    encoding: 'utf8',
+  }).stderr;
+  assert.match(hevcOut, /Video: hevc/, 'the GPU-encoded output really is HEVC');
+}
+ptcFakePlanOverride = null;
+
+// The fixed batch channel reads the same per-row codec; a junk value is
+// dropped at the route instead of reaching ffmpeg.
+const fixedHevc = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [{ id: gifClipUpload.data.id, format: 'mp4', codec: 'hevc' }],
+    hardware: true,
+  }),
+});
+assert.equal(fixedHevc.data.ok, true, JSON.stringify(fixedHevc.data));
+const fixedHevcDone = await waitRun(fixedHevc.data.run);
+assert.equal(fixedHevcDone.state, 'done', fixedHevcDone.error || '');
+assert.equal(
+  fixedHevcDone.items[0].result.copy,
+  false,
+  'a hevc ask is a real re-encode even where the GPU is missing, never a container copy',
+);
+const fixedJunk = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [{ id: gifClipUpload.data.id, format: 'mp4', codec: 'av1' }],
+    hardware: true,
+  }),
+});
+assert.equal(fixedJunk.data.ok, true, JSON.stringify(fixedJunk.data));
+const fixedJunkDone = await waitRun(fixedJunk.data.run);
+assert.equal(fixedJunkDone.state, 'done', fixedJunkDone.error || '');
+assert.equal(fixedJunkDone.items[0].result.copy, true, 'a junk row codec is dropped and the copy path stays');
+if (settled.hardware.hevc) {
+  const fixedHevcOut = spawnSync(ffmpeg, ['-hide_banner', '-i', fixedHevcDone.items[0].result.file], {
+    encoding: 'utf8',
+  }).stderr;
+  assert.match(fixedHevcOut, /Video: hevc/, 'the fixed-batch row codec reaches the encoder');
+  const fixedJunkOut = spawnSync(ffmpeg, ['-hide_banner', '-i', fixedJunkDone.items[0].result.file], {
+    encoding: 'utf8',
+  }).stderr;
+  assert.match(fixedJunkOut, /Video: h264/, 'a junk row codec falls back to H.264');
+}
 
 // --- the hardware retry path ------------------------------------------------
 // A GPU that cannot decode the file runs the same encoder once more with the

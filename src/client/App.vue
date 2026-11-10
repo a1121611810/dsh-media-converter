@@ -362,8 +362,14 @@ const gpuRelevant = computed(
 const showGpu = computed(() => gpuRelevant.value && Boolean(status.value?.hardware?.h264));
 // The Host is still checking the graphics driver: the switch waits for it.
 const showGpuPending = computed(() => gpuRelevant.value && Boolean(status.value?.hardware?.detecting));
+// The probed backend's HEVC sibling really encodes: only then is the codec
+// choice shown.
+const gpuHevc = computed(() => Boolean(status.value?.hardware?.hevc));
 // The backend the Host probed (NVIDIA NVENC, Intel Quick Sync, AMD AMF, …).
 const gpuLabel = computed(() => status.value?.hardware?.backendLabel || 'GPU');
+// The GPU codec choice riding the batch: HEVC only makes sense with the GPU
+// on. The Host whitelists the value, so a plain string is enough here.
+const codec = ref('h264');
 const batchSummary = computed(() => {
   const counts: Record<ConvertibleKind, number> = { video: 0, audio: 0, image: 0 };
   for (const item of batchTargets.value) {
@@ -1442,6 +1448,7 @@ async function runServerBatch(rows: Item[], ptc = false) {
       fps: row.target === 'gif' && item.upload!.kind === 'video' ? batchGifFps.value || undefined : undefined,
       width: row.target === 'gif' && item.upload!.kind === 'video' ? batchGifWidth.value || undefined : undefined,
       hardware: useGpu.value || undefined,
+      codec: useGpu.value ? codec.value : undefined,
     };
   });
   let run: RunInfo;
@@ -1979,6 +1986,8 @@ watch([action, panelOpen], async () => {
             :show-gpu="showGpu"
             :gpu-pending="showGpuPending"
             :gpu-label="gpuLabel"
+            :gpu-hevc="gpuHevc"
+            v-model:codec="codec"
             :models="ptcModels"
             :default-model="ptcDefaultModel"
             :model-key="ptcModelKey"

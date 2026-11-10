@@ -163,10 +163,10 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        '      await run(deviceArgs(backend), DEVICE_TIMEOUT_MS);\n      return true;\n    } catch {\n      return false;\n    }',
-        '      await run(deviceArgs(backend), DEVICE_TIMEOUT_MS);\n      return true;\n    } catch {\n      return backend.encoder.length > 0;\n    }',
+        '      await run(deviceArgs(candidate, candidate.encoder), DEVICE_TIMEOUT_MS);\n      return true;\n    } catch {\n      return false;\n    }',
+        '      await run(deviceArgs(candidate, candidate.encoder), DEVICE_TIMEOUT_MS);\n      return true;\n    } catch {\n      return candidate.encoder.length > 0;\n    }',
       ),
-    distAnchor: 'backend.encoder.length > 0',
+    distAnchor: 'candidate.encoder.length > 0',
     expect: '显卡不能编码时不得给用户 GPU 开关，突变后坏设备也报 nvenc → 测试红',
   },
   {
@@ -199,12 +199,14 @@ const MUTANTS = [
     name: '设备检查又用回长超时（驱动挂住就拖住面板）',
     // 设备检查会启动显卡驱动，必须有自己的短时钟：挂住的驱动只该等一次。
     // Math.max 而不是直接换成 FFMPEG_TIMEOUT_MS：那样 DEVICE_TIMEOUT_MS
-    // 就没人用了，TS6133 让构建炸掉——那是假红，不是测试红。
+    // 就没人用了，TS6133 让构建炸掉——那是假红，不是测试红。突变点是
+    // pickBackend 的 H.264 检查（第一个 color= 调用），探针断言按首个
+    // color= 调用取超时。
     apply: (s) =>
       replaceOnce(
         s,
-        'await run(deviceArgs(backend), DEVICE_TIMEOUT_MS);',
-        'await run(deviceArgs(backend), Math.max(DEVICE_TIMEOUT_MS, FFMPEG_TIMEOUT_MS));',
+        'await run(deviceArgs(candidate, candidate.encoder), DEVICE_TIMEOUT_MS);',
+        'await run(deviceArgs(candidate, candidate.encoder), Math.max(DEVICE_TIMEOUT_MS, FFMPEG_TIMEOUT_MS));',
       ),
     distAnchor: 'Math.max(DEVICE_TIMEOUT_MS',
     expect: '设备检查必须用比编码器列表更短的时钟，突变后驱动挂住会拖住面板 → 测试红',
@@ -228,7 +230,9 @@ const MUTANTS = [
     name: '缓存命中时不落地判定（插件重载后永远「检测中」）',
     // 判定必须写进实例：缓存按 ffmpeg 路径活得更久，插件重载后的新实例只能
     // 接管已缓存的判定。把落地逻辑放回「缓存未命中」分支，命中缓存时就没人
-    // 写实例状态了——面板会永远停在「显卡驱动检测中」。
+    // 写新实例的状态了——面板会永远停在「显卡驱动检测中」。落地 then 必须
+    // 原样返回 verdict（而不是返回 hwBackend），否则缓存类型对不上 TS 编译炸
+    // = 假红；返回端用一次性的 then 摘出 backend 保持签名。
     apply: (s) =>
       replaceOnce(
         s,
@@ -239,25 +243,27 @@ const MUTANTS = [
     }
     // The cache outlives the instance: whoever asks adopts the verdict, so a
     // reloaded plugin does not wait for a probe that already ran.
-    return pending.then((backend) => {
-      hwBackend = backend;
+    return pending.then((verdict) => {
+      hwBackend = verdict ? verdict.backend : null;
+      hwHevc = verdict ? verdict.hevc : false;
       deviceSettled = true;
-      return backend;
+      return hwBackend;
     });`,
         `    let pending = deviceCache.get(bin);
     if (!pending) {
       pending = probeFfmpegDevice(process.platform, build, execRunner(bin))
         .catch(() => null)
-        .then((backend) => {
-          hwBackend = backend;
+        .then((verdict) => {
+          hwBackend = verdict ? verdict.backend : null;
+          hwHevc = verdict ? verdict.hevc : false;
           deviceSettled = true;
-          return backend;
+          return verdict;
         });
       deviceCache.set(bin, pending);
     }
-    return pending;`,
+    return pending.then((verdict) => (verdict ? verdict.backend : null));`,
       ),
-    distAnchor: 'pending.then((backend)',
+    distAnchor: 'return pending.then((verdict) => {',
     delete: true,
     expect: '插件重载后的新实例必须接管已缓存的判定，突变后 GPU 开关永远不出现 → 测试红',
   },
@@ -412,6 +418,137 @@ const MUTANTS = [
       ),
     distAnchor: 'subtitlePlan(upload.streams, body.stream)',
     expect: '面板/工具选的 vtt/ass 必须到达 subtitlePlan，突变后全部导成 srt → 测试红',
+  },
+  {
+    id: 'D1',
+    name: 'HEVC 的 hvc1 容器标签被旁路（Apple 播放器拒播）',
+    // wantHevc 仍被编码器选择行读取，不会 TS6133；条件永假后 mp4/mov 不再
+    // 补 -tag:v hvc1。
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "...(wantHevc && (format === 'mp4' || format === 'mov') ? ['-tag:v', 'hvc1'] : []),",
+        "...(wantHevc && false && (format === 'mp4' || format === 'mov') ? ['-tag:v', 'hvc1'] : []),",
+      ),
+    distAnchor: 'wantHevc && false',
+    expect: 'HEVC 进 mp4/mov 必须带 hvc1 tag，突变后 Apple 播放器拒播 → 测试红',
+  },
+  {
+    id: 'D2',
+    name: 'HEVC 编码器选择被旁路（恒 h264_videotoolbox）',
+    // wantHevc 仍被 hvc1 标签行读取，不会 TS6133；编码器不再随 codec 换。
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'const encoder = wantHevc ? backend.hevcEncoder : backend.encoder;',
+        'const encoder = backend.encoder;',
+      ),
+    distAnchor: 'const encoder = backend.encoder;',
+    expect: 'codec=hevc 必须选 hevcEncoder，突变后恒 h264 → 测试红',
+  },
+  {
+    id: 'D3',
+    name: 'PTC 计划 codec 校验反转（非法值不再报错）',
+    // 条件尾加 && false 后恒假不抛错；value 仍被读取使用，不会 TS6133。
+    // （不能直接改成 === && ===：TS2367 会抓「无交集的比较」让构建炸 = 假红）
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "if (value !== 'h264' && value !== 'hevc') {",
+        "if (value !== 'h264' && value !== 'hevc' && false) {",
+      ),
+    distAnchor: "value !== 'hevc' && false",
+    expect: '模型计划的非法 codec 必须让整批报错，突变后静默按 h264 跑 → 测试红',
+  },
+  {
+    id: 'D4',
+    name: 'HEVC 探测的编译清单闸名存实亡（拿 h264 编码器名过闸）',
+    // 闸还在、编码器名被换成 backend.encoder（选中后端时它必在清单里）：
+    // 没编译 hevc 的二进制也跑设备检查；假 runner 对任何编码都成功 →
+    // info.hevc 谎报为 true。任何机器可测。（true || 短路会让 TS 收窄失效炸构建）
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'if (build.encoders.includes(backend.hevcEncoder)) {',
+        'if (build.encoders.includes(backend.encoder)) {',
+      ),
+    distAnchor: 'if (build.encoders.includes(backend.encoder)) {',
+    expect: '二进制没有 hevc 编码器时 info.hevc 必须为 false，突变后谎报可用 → 测试红',
+  },
+  {
+    id: 'D5',
+    name: 'PTC 程序不再携带 codec（计划带了也白搭）',
+    // replacer 在序列化时丢掉 codec 字段；程序里没有了，绑定自然拿不到。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        `      'const plan = ' +
+      JSON.stringify(rows) +`,
+        `      'const plan = ' +
+      JSON.stringify(rows, (key, value) => (key === 'codec' ? undefined : value)) +`,
+      ),
+    distAnchor: "key === 'codec' ? undefined",
+    expect: '模型计划的 codec 必须进入 PTC 程序 JSON，突变后程序里无 codec → 测试红',
+  },
+  {
+    id: 'D6',
+    name: 'codec 绕过 tuned 门（HEVC 请求被 copy 短路）',
+    // 语义反转后 codec=hevc 不再拦 copy：源可拷时拿到原样拷贝，HEVC 请求
+    // 被静默吞掉。copy===false 断言在无显卡机器上同样红（走软件重编码）。
+    apply: (s) => replaceOnce(s, "String(body.codec || '') === 'hevc';", "String(body.codec || '') !== 'hevc';"),
+    distAnchor: "String(body.codec || '') !== 'hevc';",
+    expect: 'codec=hevc 必须禁用 copy 走真实重编码，突变后拿到原样拷贝 → 测试红',
+  },
+  {
+    id: 'E1',
+    name: 'webm 的 vp9 CRF 钳制反转',
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'return Math.min(45, Math.max(15, Math.round(32 + (90 - quality) * 0.3)));',
+        'return Math.min(15, Math.max(45, Math.round(32 + (90 - quality) * 0.3)));',
+      ),
+    distAnchor: 'Math.min(15, Math.max(45',
+    expect: 'vp9 CRF 必须钳在 15–45，突变后恒 15 → 测试红',
+  },
+  {
+    id: 'E2',
+    name: '视频 CRF 映射按格式互换（webm 拿到 x264 映射）',
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "args[at + 1] = String(format === 'webm' ? vp9CrfOf(q) : crfOf(q));",
+        "args[at + 1] = String(format === 'webm' ? crfOf(q) : vp9CrfOf(q));",
+      ),
+    distAnchor: "format === 'webm' ? crfOf(q) : vp9CrfOf(q)",
+    expect: 'webm 必须用 vp9CrfOf、x264 容器用 crfOf，突变后两边互换 → 测试红',
+  },
+  {
+    id: 'E3',
+    name: '视频 qscale 映射按格式互换（ogv 拿到 mjpeg 映射）',
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "args[atq + 1] = String(format === 'ogv' ? theoraQscale(q) : jpegQscale(q));",
+        "args[atq + 1] = String(format === 'ogv' ? jpegQscale(q) : theoraQscale(q));",
+      ),
+    distAnchor: "format === 'ogv' ? jpegQscale(q) : theoraQscale(q)",
+    expect: 'ogv 必须用 theora 的 0-10 映射、avi/wmv 用 mjpeg 式 qscale，突变后互换 → 测试红',
   },
 ];
 

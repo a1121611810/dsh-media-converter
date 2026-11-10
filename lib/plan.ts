@@ -248,12 +248,12 @@ const IMAGE: Record<string, string[]> = {
 };
 
 // Lossy formats only: the UI shows its quality control for exactly these.
-// The five video containers are the X264 recipes' containers (the same set as
-// HW_AUDIO): quality maps to their -crf, and to a bitrate factor on hardware.
+// Video: the X264 containers take quality as CRF; webm as VP9 CRF; avi/wmv/ogv
+// as codec qscale. The client mirrors this (lib.ts); the two must stay in sync.
 export function supportsQuality(kind: MediaKind, format: string): boolean {
   return (
     (kind === 'image' && (format === 'jpg' || format === 'webp')) ||
-    (kind === 'video' && ['mp4', 'mov', 'mkv', 'flv', 'ts'].includes(format))
+    (kind === 'video' && ['mp4', 'mov', 'mkv', 'flv', 'ts', 'webm', 'avi', 'wmv', 'ogv'].includes(format))
   );
 }
 
@@ -330,6 +330,9 @@ export interface HwBackend {
   // Shown in the panel; a vendor name needs no translation.
   label: string;
   encoder: string;
+  // The H.265 sibling of `encoder`, device-verified separately: a GPU old
+  // enough to lack HEVC encoding keeps working, just without the codec choice.
+  hevcEncoder: string;
   // The name -hwaccels reports for this vendor's hardware decoder.
   hwaccel: string;
   // Input options, before -i: hardware decode that feeds the encoder directly.
@@ -343,6 +346,7 @@ export const HW_BACKENDS: Record<HwBackendId, HwBackend> = {
     id: 'videotoolbox',
     label: 'Apple VideoToolbox',
     encoder: 'h264_videotoolbox',
+    hevcEncoder: 'hevc_videotoolbox',
     hwaccel: 'videotoolbox',
     decodeArgs: ['-hwaccel', 'videotoolbox', '-hwaccel_output_format', 'videotoolbox'],
     // VideoToolbox's own fallback switch: software encode if the GPU says no.
@@ -352,6 +356,7 @@ export const HW_BACKENDS: Record<HwBackendId, HwBackend> = {
     id: 'nvenc',
     label: 'NVIDIA NVENC',
     encoder: 'h264_nvenc',
+    hevcEncoder: 'hevc_nvenc',
     hwaccel: 'cuda',
     decodeArgs: ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'],
     // Without an explicit rate control mode NVENC decides on its own what
@@ -362,6 +367,7 @@ export const HW_BACKENDS: Record<HwBackendId, HwBackend> = {
     id: 'qsv',
     label: 'Intel Quick Sync',
     encoder: 'h264_qsv',
+    hevcEncoder: 'hevc_qsv',
     hwaccel: 'qsv',
     decodeArgs: ['-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv'],
     // No rate option needed: QSV reads -b:v plus -maxrate as VBR on its own.
@@ -371,6 +377,7 @@ export const HW_BACKENDS: Record<HwBackendId, HwBackend> = {
     id: 'amf',
     label: 'AMD AMF',
     encoder: 'h264_amf',
+    hevcEncoder: 'hevc_amf',
     hwaccel: 'd3d11va',
     // d3d11 (not d3d11va) is what the AMF encoder takes without a copy.
     decodeArgs: ['-hwaccel', 'd3d11va', '-hwaccel_output_format', 'd3d11'],
@@ -393,6 +400,11 @@ const HW_AUDIO: Record<string, string[]> = {
   ts: ['-c:a', 'aac', '-b:a', '128k', '-f', 'mpegts'],
 };
 
+// HEVC-in-FLV is non-standard, so the codec choice stops at the containers
+// where HEVC belongs; mp4/mov additionally need the hvc1 tag Apple players
+// require (the same tag copyArgs already writes for stream copies).
+const HEVC_FORMATS = new Set(['mp4', 'mov', 'mkv', 'ts']);
+
 export function hardwareFor(
   backend: HwBackend,
   kind: MediaKind,
@@ -400,9 +412,12 @@ export function hardwareFor(
   size: number,
   duration: number,
   quality?: number,
+  codec?: string,
 ): { args: string[]; inputArgs: string[] } | null {
   const audio = HW_AUDIO[format];
   if (kind !== 'video' || !audio) return null;
+  const wantHevc = codec === 'hevc' && HEVC_FORMATS.has(format);
+  const encoder = wantHevc ? backend.hevcEncoder : backend.encoder;
   const totalKbps = duration > 0 ? (size * 8) / duration / 1000 : 0;
   const q = Math.min(100, Math.max(1, Math.round(Number(quality) || 90)));
   const videoKbps = Math.min(12000, Math.max(1500, Math.round((totalKbps - 192) * hwFactorOf(q))));
@@ -410,7 +425,7 @@ export function hardwareFor(
     inputArgs: [...backend.decodeArgs],
     args: [
       '-c:v',
-      backend.encoder,
+      encoder,
       '-b:v',
       videoKbps + 'k',
       // -maxrate stays: QSV reads -b:v plus -maxrate as VBR and falls back to
@@ -419,6 +434,8 @@ export function hardwareFor(
       Math.round(videoKbps * 1.5) + 'k',
       '-bufsize',
       String(videoKbps * 2) + 'k',
+      // Apple players refuse HEVC in mp4/mov without the hvc1 tag.
+      ...(wantHevc && (format === 'mp4' || format === 'mov') ? ['-tag:v', 'hvc1'] : []),
       ...backend.rateArgs,
       ...audio,
     ],
@@ -434,6 +451,17 @@ function jpegQscale(quality: number): string {
 // higher is better; clamped to the range that still makes visual sense.
 function crfOf(quality: number): number {
   return Math.min(32, Math.max(18, Math.round(23 + (90 - quality) * 0.1)));
+}
+
+// 1..100 user quality -> VP9 CRF: 90 keeps the recipe's 32. VP9 tolerates much
+// higher CRFs than x264 before falling apart, hence the wider clamp.
+function vp9CrfOf(quality: number): number {
+  return Math.min(45, Math.max(15, Math.round(32 + (90 - quality) * 0.3)));
+}
+
+// 1..100 user quality -> Theora -q:v (0 best .. 10 worst): 90 keeps 6.
+function theoraQscale(quality: number): number {
+  return Math.min(10, Math.max(0, Math.round(6 + (90 - quality) * 0.06)));
 }
 
 // Hardware encoders have no CRF (a probe of h264_videotoolbox shows no
@@ -458,8 +486,14 @@ export function buildArgs(
   if (supportsQuality(kind, format)) {
     const q = Math.min(100, Math.max(1, Math.round(Number(quality) || 90)));
     if (kind === 'video') {
+      // The CRF recipes (x264 containers, webm) rewrite -crf; the qscale
+      // recipes (avi/wmv mpeg4-family, ogv theora) rewrite -q:v instead.
       const at = args.indexOf('-crf');
-      if (at >= 0) args[at + 1] = String(crfOf(q));
+      if (at >= 0) args[at + 1] = String(format === 'webm' ? vp9CrfOf(q) : crfOf(q));
+      else {
+        const atq = args.indexOf('-q:v');
+        if (atq >= 0) args[atq + 1] = String(format === 'ogv' ? theoraQscale(q) : jpegQscale(q));
+      }
     } else {
       args.push(...(format === 'jpg' ? ['-q:v', jpegQscale(q)] : ['-quality', String(q)]));
     }

@@ -269,6 +269,8 @@ export const zh = {
   'batch.gpu': 'GPU 编码（%s）',
   'batch.gpuHint': '默认开启：用显卡硬件编码，速度快、CPU 占用低；画质/体积与软件编码不同，可关闭',
   'batch.gpuDetecting': '显卡驱动检测中…（完成后可勾选 GPU 编码）',
+  'batch.codec': '编码',
+  'batch.codecHint': 'HEVC 体积更小；产物能否预览取决于系统解码',
   'ptc.model': '模型',
   'ptc.modelDefault': '跟随 DSH 默认',
   'ptc.modelHint': '默认用 DSH 当前主模型；换一个更快的已注册模型可以缩短等待',
@@ -551,6 +553,8 @@ export const en: Record<MediaConvertKey, string> = {
   'batch.gpuHint':
     'On by default: encodes on the graphics card — faster, lower CPU. Quality and size differ from software encoding; turn off if unwanted.',
   'batch.gpuDetecting': 'Checking the graphics driver… (GPU encoding becomes available once it is done)',
+  'batch.codec': 'Codec',
+  'batch.codecHint': 'HEVC is smaller; whether the result previews depends on system decoding.',
   'ptc.model': 'Model',
   'ptc.modelDefault': 'Follow DSH default',
   'ptc.modelHint': 'Defaults to the DSH model; a faster registered model shortens the wait.',
