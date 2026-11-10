@@ -93,7 +93,9 @@ const MUTANTS = [
     // 不能整行删：jobs 参数只有这一处使用，删掉会 TS6133 构建失败（假红）。
     // 反转条件等价于永不跳过，且仍读取 jobs。
     apply: (s) => replaceOnce(s, 'job.uploadId === id && job.state ===', 'job.uploadId !== id && job.state ==='),
-    distAnchor: 'job.uploadId === id',
+    // upload/delete 路由也有一处 `job.uploadId === id && (job.state ===`，锚点
+    // 必须带 `job.state ===` 后缀区分开，否则突变后产物「仍含锚点」误报。
+    distAnchor: 'job.uploadId === id && job.state ===',
     expect: 'pruneUploads 必须保下 running 任务的上传，突变后永不跳过 → 测试红',
     delete: true,
   },
@@ -265,6 +267,67 @@ const MUTANTS = [
     apply: (s) => replaceOnce(s, 'detecting: !deviceSettled,', 'detecting: deviceSettled,'),
     distAnchor: 'detecting: deviceSettled,',
     expect: '设备检查没跑完时 detecting 必须为真，突变后面板不再等判定 → 测试红',
+  },
+  {
+    id: 'B1',
+    name: '音频码率参数被旁路（buildArgs 恒写配方默认）',
+    // bitrate 仍在条件里被读取（Number(bitrate)），不会 TS6133；只是替换值
+    // 不再来自入参 —— 128 也要回 192。
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "args[at + 1] = String(Math.min(320, Math.max(32, Math.round(Number(bitrate))))) + 'k';",
+        "args[at + 1] = String(defaultBitrate(format)) + 'k';",
+      ),
+    distAnchor: 'String(defaultBitrate(format))',
+    expect: '显式码率必须替换 -b:a（128 → 128k），突变后恒为配方默认 → 测试红',
+  },
+  {
+    id: 'B2',
+    name: '码率 copy 规则反转（显式 128k 反而走拷贝）',
+    // 仍读取 body.bitrate，不会 TS6133；语义反转后只有「恰好要默认码率」
+    // 才重编码 —— 与需求正好相反。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'Math.round(Number(body.bitrate)) !== defaultBitrate(format);',
+        'Math.round(Number(body.bitrate)) === defaultBitrate(format);',
+      ),
+    distAnchor: 'Math.round(Number(body.bitrate)) === defaultBitrate(format)',
+    expect: '显式非默认码率必须禁用 copy 走重编码，突变后 128k 被静默拷贝 → 测试红',
+  },
+  {
+    id: 'B3',
+    name: '/run 行级码率不再进 items（固定规则批量丢失码率）',
+    // br 仍被读取使用，不会 TS6133；恒 0 越不过 >= 32 的闸 → 行级码率全丢。
+    apply: (s) => replaceOnce(s, 'const br = Number(row.bitrate);', 'const br = Number(row.bitrate) * 0;'),
+    distAnchor: 'Number(row.bitrate) * 0',
+    expect: '固定规则批量的行级码率必须到达 planFor，突变后批量输出回到拷贝/192k → 测试红',
+  },
+  {
+    id: 'B4',
+    name: 'PTC convert 绑定丢弃码率（计划带了也白搭）',
+    // 正式 planFor 的 bitrate 恒 0（被忽略），estimate 那处不动：调度权重
+    // 照常，但产物回到拷贝/默认码率。锚点带 threads 上下文区分 estimate 调用。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        `                  quality: Number(a.quality ?? quality),
+                  bitrate: Number(a.bitrate ?? entry?.bitrate),
+                  hardware,
+                },
+                threads,`,
+        `                  quality: Number(a.quality ?? quality),
+                  bitrate: Number(a.bitrate ?? entry?.bitrate) * 0,
+                  hardware,
+                },
+                threads,`,
+      ),
+    distAnchor: 'Number(a.bitrate ?? entry?.bitrate) * 0',
+    expect: 'PTC 计划里的码率必须作用到产物，突变后输出为拷贝/默认码率 → 测试红',
   },
 ];
 
