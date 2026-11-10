@@ -27,7 +27,7 @@ const props = defineProps<{
   showAudioTune: boolean;
   gifFps: number;
   gifWidth: number;
-  showGif: boolean;
+  showVideoTune: boolean;
   note: string;
   disabled: boolean;
   t: (key: string) => string;
@@ -145,7 +145,7 @@ const setGifWidth = (event: Event) => emit('update:gifWidth', Number((event.targ
           <option v-for="option in RATE_OPTIONS" :key="option" :value="option">{{ option }} Hz</option>
         </select>
       </label>
-      <label v-if="showGif" class="mc-field mc-gif">
+      <label v-if="showVideoTune" class="mc-field mc-gif">
         <span>{{ t('gif.fps') }}</span>
         <input
           type="number"

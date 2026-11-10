@@ -275,6 +275,13 @@ export function supportsAudioTune(kind: MediaKind, format: string): boolean {
   return kind === 'audio' || (kind === 'video' && (format === 'mp3' || format === 'm4a'));
 }
 
+// Video-encode targets: every video conversion except the audio-only ones
+// (mp3/m4a carry no picture). The fps/width controls show for exactly these.
+// The client mirrors this (lib.ts).
+export function supportsVideoTune(kind: MediaKind, format: string): boolean {
+  return kind === 'video' && format !== 'mp3' && format !== 'm4a';
+}
+
 // The recipe's own -b:a value, the anchor for "explicitly asked for the
 // default" (keeps the copy fast path) vs "a real re-encode request".
 export function defaultBitrate(format: string): number {
@@ -558,13 +565,27 @@ export function buildArgs(
   // supportsAudioTune alone because every supportsBitrate format is also an
   // audio-encode target (recipes without -b:a are untouched by the override).
   if (supportsAudioTune(kind, format)) applyAudioTune(args, bitrate, channels, sampleRate);
-  // GIF is the one recipe with a tunable filter chain: an explicit fps/width
-  // rebuilds the -vf value, absent/zero/garbage keeps the recipe's 12fps/640px.
-  if (format === 'gif' && (Number(fps) > 0 || Number(width) > 0)) {
-    const f = Number(fps) > 0 ? Math.min(30, Math.max(1, Math.round(Number(fps)))) : 12;
-    const w = Number(width) > 0 ? Math.min(7680, Math.max(16, Math.round(Number(width)))) : 640;
-    const at = args.indexOf('-vf');
-    if (at >= 0) args[at + 1] = `fps=${f},scale='min(${w},iw)':-2:flags=lanczos`;
+  // Video targets take an optional fps/width; absent/zero/garbage leaves the
+  // recipe untouched. GIF rebuilds its whole filter chain, so a missing value
+  // falls back to the recipe's own 12fps/640px; the other recipes carry no -vf
+  // and get one pushed with only what was asked.
+  if (supportsVideoTune(kind, format) && (Number(fps) > 0 || Number(width) > 0)) {
+    if (format === 'gif') {
+      const f = Number(fps) > 0 ? Math.min(30, Math.max(1, Math.round(Number(fps)))) : 12;
+      const w = Number(width) > 0 ? Math.min(7680, Math.max(16, Math.round(Number(width)))) : 640;
+      const at = args.indexOf('-vf');
+      if (at >= 0) args[at + 1] = `fps=${f},scale='min(${w},iw)':-2:flags=lanczos`;
+    } else {
+      const parts: string[] = [];
+      if (Number(fps) > 0) parts.push(`fps=${Math.min(30, Math.max(1, Math.round(Number(fps))))}`);
+      // trunc() keeps the capped width even: x264/vp9/wmv2 all force yuv420p
+      // and reject an odd width, whether it comes from the source or the cap.
+      if (Number(width) > 0)
+        parts.push(
+          `scale='trunc(min(${Math.min(7680, Math.max(16, Math.round(Number(width))))},iw)/2)*2':-2:flags=lanczos`,
+        );
+      args.push('-vf', parts.join(','));
+    }
   }
   return args;
 }

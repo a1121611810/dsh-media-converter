@@ -26,6 +26,7 @@ import {
   supportsBitrate,
   supportsHardwareAudio,
   supportsQuality,
+  supportsVideoTune,
   trimArgs,
 } from '../dist/lib/plan.js';
 import { blendPtcRate, capacityFor, estimatePtcCost, planPtcGroups, threadsFor } from '../dist/lib/schedule.js';
@@ -97,7 +98,23 @@ assert.equal(gifFilter(buildArgs('video', 'gif', 90, 0, 0, 480)), "fps=12,scale=
 assert.equal(gifFilter(buildArgs('video', 'gif', 90, 0, 100)), "fps=30,scale='min(640,iw)':-2:flags=lanczos"); // clamped
 assert.equal(gifFilter(buildArgs('video', 'gif', 90, 0, 'abc')), GIF_VF); // garbage ignored
 assert.equal(gifFilter(buildArgs('video', 'gif', 90, 0, 5, 1)), "fps=5,scale='min(16,iw)':-2:flags=lanczos"); // width floor
-assert.ok(!buildArgs('video', 'mp4', 90, 0, 15).includes('-vf')); // non-gif ignores the knobs
+// Regular video containers: an explicit fps/width pushes a -vf chain carrying
+// only what was asked; absent/zero/garbage leaves the recipe untouched.
+assert.equal(supportsVideoTune('video', 'mp4'), true);
+assert.equal(supportsVideoTune('video', 'gif'), true);
+assert.equal(supportsVideoTune('video', 'mp3'), false); // no picture track
+assert.equal(supportsVideoTune('audio', 'mp3'), false);
+const evenscale = (w) => `scale='trunc(min(${w},iw)/2)*2':-2:flags=lanczos`;
+assert.equal(gifFilter(buildArgs('video', 'mp4', 90, 0, 15)), 'fps=15');
+assert.equal(gifFilter(buildArgs('video', 'mp4', 90, 0, 15, 1280)), `fps=15,${evenscale(1280)}`);
+assert.equal(gifFilter(buildArgs('video', 'mp4', 90, 0, 0, 1280)), evenscale(1280));
+assert.equal(gifFilter(buildArgs('video', 'webm', 90, 0, 24, 854)), `fps=24,${evenscale(854)}`);
+assert.equal(gifFilter(buildArgs('video', 'mp4', 90, 0, 100)), 'fps=30'); // clamped
+assert.equal(gifFilter(buildArgs('video', 'mp4', 90, 0, 0, 99999)), evenscale(7680)); // clamped
+assert.equal(gifFilter(buildArgs('video', 'mp4', 90, 0, 0, 5)), evenscale(16)); // floor
+assert.ok(!buildArgs('video', 'mp4', 90, 0, 'abc').includes('-vf')); // garbage ignored
+assert.ok(!buildArgs('video', 'mp4', 90, 0, -3, 0).includes('-vf')); // non-positive = unset
+assert.ok(!buildArgs('video', 'mp3', 90, 0, 15, 480).includes('-vf')); // audio-only target ignores the knobs
 assert.ok(!buildArgs('video', 'gif', 90, 0, 15, 480).includes('-crf'));
 assert.deepEqual(buildArgs('image', 'webp', 80), ['-frames:v', '1', '-c:v', 'libwebp', '-quality', '80']);
 assert.deepEqual(buildArgs('image', 'jpg', 100), ['-frames:v', '1', '-q:v', '2']);

@@ -56,6 +56,7 @@ import {
   supportedFormats,
   supportsAudioTune,
   supportsBitrate,
+  supportsVideoTune,
   threadArgs,
   trimArgs,
 } from './lib/plan.js';
@@ -356,7 +357,8 @@ export interface RunItemInfo {
   quality?: number;
   // The panel's per-row audio bitrate (kbps); lossy audio formats only.
   bitrate?: number;
-  // The panel's per-row GIF knobs; gif targets only, 0/absent = recipe default.
+  // The panel's per-row video knobs; video targets only (gif and regular
+  // containers), 0/absent = recipe default (gif) or source (others).
   fps?: number;
   width?: number;
   // The panel's per-row GPU codec choice ('h264' | 'hevc'); hardware only.
@@ -1781,6 +1783,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     // ask must never come back as a copied stereo stream.
     const audioTuned =
       supportsAudioTune(upload.kind, format) && (Number(body.channels) > 0 || Number(body.sampleRate) > 0);
+    // An explicit output size or frame rate is a real re-encode request: a
+    // copied stream would silently keep the source's.
+    const videoTuneTuned = supportsVideoTune(upload.kind, format) && (Number(body.fps) > 0 || Number(body.width) > 0);
     // The same rule on the GPU path: an explicit audio ask (bitrate,
     // channels, rate) for a container the hardware plan re-encodes audio for
     // must reach the hardware branch, not come back as a copied stream. The
@@ -1792,14 +1797,16 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       upload.kind === 'video' &&
       supportsHardwareAudio(format) &&
       (Number(body.bitrate) > 0 || Number(body.channels) > 0 || Number(body.sampleRate) > 0);
-    if (!trim && !qualityTuned && !bitrateTuned && !codecTuned && !audioTuned && !hwAudioTuned) {
+    if (!trim && !qualityTuned && !bitrateTuned && !codecTuned && !audioTuned && !videoTuneTuned && !hwAudioTuned) {
       const copy = copyArgs(upload.kind, format, upload.meta);
       if (copy) return { ext: format, kind: kindByExt(format), args: copy, copy: true };
     }
     // The hardware path is vendor specific and only exists where the probe
     // found a backend this machine can really run; elsewhere the hardware ask
-    // silently gets the software plan instead of a doomed ffmpeg command.
-    if (body.hardware && hwBackend) {
+    // silently gets the software plan instead of a doomed ffmpeg command. A
+    // size/frame-rate ask never takes it: -vf would break the zero-copy path,
+    // and the bitrate estimate assumes the source resolution.
+    if (body.hardware && hwBackend && !videoTuneTuned) {
       // hardwareFor whitelists the codec: 'hevc' outside mp4/mov/mkv/ts (or
       // any unknown value) quietly becomes H.264 instead of a failed encode.
       const hw = hardwareFor(
@@ -1877,7 +1884,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       '2. format 必须属于该文件 kind 的可用格式；优先用该行的 target。',
       '3. quality 1–100，仅对视频与 jpg/webp/avif 图片有意义，其它类型请省略。',
       '4. bitrate 仅对 mp3/m4a/aac/opus 有效（kbps，32-320）；该行 bitrate 非空时优先用它，为空则省略。',
-      '5. fps（1–30）与 width（≥16 像素）仅对 gif 目标有效，省略则用内置默认 12fps/640px；其它格式不要带。',
+      '5. fps（1–30）与 width（≥16 像素）对视频目标有效（gif 及普通视频容器；mp3/m4a 无画面不要带）：gif 省略用内置默认 12fps/640px，其它容器省略则保持源分辨率/帧率。',
       '6. codec 仅对 GPU 硬编视频有效（h264/hevc），省略默认 h264；hevc 仅 mp4/mov/mkv/ts 可选。',
       '7. channels（1=单声道，2=立体声）与 rate（采样率 Hz，8000–96000，如 22050）仅对音频编码目标有效（音频文件，或视频转 mp3/m4a），省略则保留源；该行 channels/rate 非空时优先用它们。',
       '8. 没有音轨的文件不要选纯音频格式。',
@@ -2349,11 +2356,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           },
           fps: {
             type: 'number',
-            description: 'GIF 帧率 1-30（仅视频转 gif 有效；0 或不填用默认 12）。',
+            description: '输出帧率 1-30（仅视频目标：gif 与普通视频容器；0 或不填时 gif 用默认 12、其它保持源帧率）。',
           },
           width: {
             type: 'number',
-            description: 'GIF 宽度上限（像素，≥16，等比缩放；0 或不填用默认 640）。',
+            description: '输出宽度上限（像素，≥16，等比缩放不放大；0 或不填时 gif 用默认 640、其它保持源分辨率）。',
           },
           channels: {
             type: 'number',

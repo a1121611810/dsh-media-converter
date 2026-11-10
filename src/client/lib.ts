@@ -290,6 +290,12 @@ export function supportsAudioTune(kind: string, format: string): boolean {
   return kind === 'audio' || (kind === 'video' && (format === 'mp3' || format === 'm4a'));
 }
 
+// Mirror of the Host's supportsVideoTune (lib/plan.ts): the fps/width inputs
+// show for exactly these video-encode targets.
+export function supportsVideoTune(kind: string, format: string): boolean {
+  return kind === 'video' && format !== 'mp3' && format !== 'm4a';
+}
+
 // The selectable channel layouts (1 = mono, 2 = stereo) and sample rates (Hz)
 // for the audio selects; '' means the recipe default. Kept here so App and
 // QueueGroup share one list.

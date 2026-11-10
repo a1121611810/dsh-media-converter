@@ -854,7 +854,11 @@ assert.ok(Number(waveMatch[1]) >= 4 && Number(waveMatch[1]) <= 32, `wave ${waveM
 assert.match(ptcPrompt, /JSON/);
 assert.match(ptcPrompt, /每个文件恰好一条/);
 assert.match(ptcPrompt, new RegExp('id=' + upload.data.id));
-assert.match(ptcPrompt, /fps（1–30）与 width（≥16 像素）仅对 gif 目标有效/, 'the prompt offers the gif knobs');
+assert.match(
+  ptcPrompt,
+  /fps（1–30）与 width（≥16 像素）对视频目标有效/,
+  'the prompt offers the fps/width knobs for video targets',
+);
 assert.equal(ptcReasoning, 'low', 'the lowest reasoning effort is requested');
 
 // A gif row planned by the model carries fps/width into the real encoder: the
@@ -1335,6 +1339,58 @@ const monoJob = await waitJob(monoAsk.data.job);
 const monoOut = audioLayout(monoJob.out);
 assert.equal(monoOut.mono, true, 'the output really is mono');
 assert.equal(monoOut.rate, 44100, 'an untouched rate rides along');
+
+// --- video fps/width: an explicit size or frame rate re-encodes (never
+// copies) and never rides the GPU plan (-vf would break the zero-copy path)
+const videoWidth = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', width: 32 }),
+});
+assert.equal(videoWidth.data.job.copy, false, 'an explicit width forces the re-encode');
+const videoWidthJob = await waitJob(videoWidth.data.job);
+const widthMeta = gifProbe(videoWidthJob.out);
+assert.equal(widthMeta.video.width, 32, `the output really is 32 wide, read ${widthMeta.video.width}`);
+assert.equal(widthMeta.video.height % 2, 0, 'the scaled height stays even');
+const videoFpsStart = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', fps: 5 }),
+});
+assert.equal(videoFpsStart.data.job.copy, false, 'an explicit fps forces the re-encode');
+const videoFpsJob = await waitJob(videoFpsStart.data.job);
+const fpsMeta = gifProbe(videoFpsJob.out);
+assert.ok(Math.abs(fpsMeta.video.fps - 5) < 0.6, `the output really is 5fps, read ${fpsMeta.video.fps}`);
+// A width ask alongside the GPU switch skips the hardware plan even when a
+// backend exists; the copy gate still fires either way.
+const gpuWidth = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', width: 32, hardware: true }),
+});
+assert.equal(gpuWidth.data.job.copy, false, 'a width ask re-encodes instead of copying');
+assert.equal(gpuWidth.data.job.hardware, false, 'a width ask never rides the GPU plan');
+
+// Fixed-rule batch: the per-row width reaches planFor without the model.
+const plainVideoTune = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: clipUpload.data.id, format: 'mp4', width: 32 }] }),
+});
+assert.equal(plainVideoTune.data.ok, true, JSON.stringify(plainVideoTune.data));
+const plainVideoTuneDone = await waitRun(plainVideoTune.data.run);
+assert.equal(plainVideoTuneDone.items[0].state, 'done');
+assert.equal(plainVideoTuneDone.items[0].result.copy, false, 'the fixed-rule batch re-encodes for the width');
+assert.equal(gifProbe(plainVideoTuneDone.items[0].result.file).video.width, 32, 'the batch output really is 32 wide');
+
+// PTC batch: the model-proposed width rides the convert binding.
+ptcFakePlanOverride = { files: [{ id: clipUpload.data.id, format: 'mp4', width: 32 }] };
+const ptcVideoTune = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: clipUpload.data.id, format: 'mp4' }], ptc: true }),
+});
+assert.equal(ptcVideoTune.data.ok, true, JSON.stringify(ptcVideoTune.data));
+const ptcVideoTuneDone = await waitRun(ptcVideoTune.data.run);
+assert.equal(ptcVideoTuneDone.items[0].state, 'done');
+assert.equal(ptcVideoTuneDone.items[0].result.copy, false, 'the PTC batch re-encodes for the model-proposed width');
+assert.equal(gifProbe(ptcVideoTuneDone.items[0].result.file).video.width, 32, 'the PTC output really is 32 wide');
+ptcFakePlanOverride = null;
 
 // Single convert with everything at once: mono + 22050 Hz + 64k + trim.
 const tunedAudio = await call('convert', {

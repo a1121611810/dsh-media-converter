@@ -28,6 +28,7 @@ import {
   supportsAudioTune,
   supportsBitrate,
   supportsQuality,
+  supportsVideoTune,
   trimWindow,
   unavailableTarget,
   withoutKnownUploads,
@@ -264,7 +265,8 @@ const quality = ref(90);
 const bitrate = ref(0);
 const channels = ref(0);
 const sampleRate = ref(0);
-// GIF knobs: 0 means "the recipe default" (12fps / 640px), sent as undefined.
+// Video fps/width knobs: 0 means "unset" (gif falls back to 12fps/640px,
+// other video containers keep the source), sent as undefined.
 const gifFps = ref(0);
 const gifWidth = ref(0);
 const subtitleFormat = ref('srt');
@@ -404,7 +406,7 @@ interface QueueSection {
   showQuality: boolean;
   showBitrate: boolean;
   showAudioTune: boolean;
-  showGif: boolean;
+  showVideoTune: boolean;
   note: string;
 }
 const queueGroups = computed<QueueSection[]>(() => {
@@ -447,10 +449,10 @@ const queueGroups = computed<QueueSection[]>(() => {
           operation.value === 'convert' &&
           groupItems.some((item) => supportsAudioTune(convertible, effectiveTarget(item))),
         ),
-        showGif: Boolean(
+        showVideoTune: Boolean(
           convertible === 'video' &&
           operation.value === 'convert' &&
-          groupItems.some((item) => effectiveTarget(item) === 'gif'),
+          groupItems.some((item) => supportsVideoTune(convertible, effectiveTarget(item))),
         ),
         note: key === 'pending' ? t('queue.pendingNote') : key === 'text' ? t('queue.textNoBatch') : '',
       },
@@ -540,8 +542,10 @@ const usesBitrate = computed(() =>
 const usesAudioTune = computed(() =>
   Boolean(file.value && format.value && supportsAudioTune(file.value.kind, format.value)),
 );
-// GIF is a video target with its own fps/width controls; no kind helper needed.
-const isGif = computed(() => Boolean(file.value && file.value.kind === 'video' && format.value === 'gif'));
+// Video targets carry the fps/width controls; gif just happens to be one.
+const usesVideoTune = computed(() =>
+  Boolean(file.value && format.value && supportsVideoTune(file.value.kind, format.value)),
+);
 const canExtractAudio = computed(() =>
   Boolean(file.value && file.value.kind === 'video' && file.value.streams && file.value.streams.audio),
 );
@@ -1463,8 +1467,8 @@ async function runServerBatch(rows: Item[], ptc = false) {
       bitrate: supportsBitrate(item.upload!.kind, row.target) ? batchBitrate.value || undefined : undefined,
       channels: supportsAudioTune(item.upload!.kind, row.target) ? batchChannels.value || undefined : undefined,
       sampleRate: supportsAudioTune(item.upload!.kind, row.target) ? batchSampleRate.value || undefined : undefined,
-      fps: row.target === 'gif' && item.upload!.kind === 'video' ? batchGifFps.value || undefined : undefined,
-      width: row.target === 'gif' && item.upload!.kind === 'video' ? batchGifWidth.value || undefined : undefined,
+      fps: supportsVideoTune(item.upload!.kind, row.target) ? batchGifFps.value || undefined : undefined,
+      width: supportsVideoTune(item.upload!.kind, row.target) ? batchGifWidth.value || undefined : undefined,
       hardware: useGpu.value || undefined,
       codec: useGpu.value ? codec.value : undefined,
     };
@@ -1575,8 +1579,8 @@ function convert() {
       bitrate: usesBitrate.value ? bitrate.value || undefined : undefined,
       channels: usesAudioTune.value ? channels.value || undefined : undefined,
       sampleRate: usesAudioTune.value ? sampleRate.value || undefined : undefined,
-      fps: isGif.value ? gifFps.value || undefined : undefined,
-      width: isGif.value ? gifWidth.value || undefined : undefined,
+      fps: usesVideoTune.value ? gifFps.value || undefined : undefined,
+      width: usesVideoTune.value ? gifWidth.value || undefined : undefined,
     },
     'fmt:' + format.value,
   );
@@ -1600,8 +1604,8 @@ function applyTrim() {
       bitrate: usesBitrate.value ? bitrate.value || undefined : undefined,
       channels: usesAudioTune.value ? channels.value || undefined : undefined,
       sampleRate: usesAudioTune.value ? sampleRate.value || undefined : undefined,
-      fps: isGif.value ? gifFps.value || undefined : undefined,
-      width: isGif.value ? gifWidth.value || undefined : undefined,
+      fps: usesVideoTune.value ? gifFps.value || undefined : undefined,
+      width: usesVideoTune.value ? gifWidth.value || undefined : undefined,
       trim: { start: window.start, end: window.end },
     },
     'trim',
@@ -2067,7 +2071,7 @@ watch([action, panelOpen], async () => {
               :show-audio-tune="group.showAudioTune"
               :gif-fps="batchGifFps"
               :gif-width="batchGifWidth"
-              :show-gif="group.showGif"
+              :show-video-tune="group.showVideoTune"
               :note="group.note"
               :disabled="busy"
               :t="t"
@@ -2393,7 +2397,7 @@ watch([action, panelOpen], async () => {
                   <option v-for="option in RATE_OPTIONS" :key="option" :value="option">{{ option }} Hz</option>
                 </select>
               </div>
-              <div v-if="isGif && currentAction.id === 'fmt:' + format" class="mc-row">
+              <div v-if="usesVideoTune && currentAction.id === 'fmt:' + format" class="mc-row">
                 <span class="mc-muted">{{ t('gif.fps') }}</span>
                 <input
                   class="mc-name-input"
@@ -2419,7 +2423,7 @@ watch([action, panelOpen], async () => {
                   :aria-label="t('gif.width')"
                   @input="resetResult"
                 />
-                <span class="mc-muted">{{ t('gif.hint') }}</span>
+                <span class="mc-muted">{{ format === 'gif' ? t('gif.hint') : t('video.tuneHint') }}</span>
               </div>
               <div class="mc-row">
                 <button

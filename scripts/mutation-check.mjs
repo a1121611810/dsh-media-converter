@@ -427,20 +427,45 @@ const MUTANTS = [
     expect: 'GPU 音轨请求必须绕开拷贝路径，突变后 result.copy 变 true → 测试红',
   },
   {
+    id: 'B11',
+    name: 'width 请求被 copy 短路（videoTuneTuned 门失效）',
+    // body.width 仍被读取（< 0 永假），不会 TS6133；门失效后 width 请求拿回
+    // 拷贝的源流——host 的 width copy 门用例必红。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'supportsVideoTune(upload.kind, format) && (Number(body.fps) > 0 || Number(body.width) > 0);',
+        'supportsVideoTune(upload.kind, format) && (Number(body.fps) > 0 || Number(body.width) < 0);',
+      ),
+    distAnchor: 'body.width) < 0',
+    expect: '显式 width 必须绕开拷贝路径，突变后 result.copy 变 true → 测试红',
+  },
+  {
+    id: 'B12',
+    name: 'GPU 分支不拦 width 请求（-vf 打断零拷贝）',
+    // videoTuneTuned 仍被 copy 门读取，不会 TS6133；有后端时 width 请求错误地
+    // 骑上 GPU 计划——host 的 gpuWidth 用例必红。
+    apply: (s) =>
+      replaceOnce(s, 'if (body.hardware && hwBackend && !videoTuneTuned) {', 'if (body.hardware && hwBackend) {'),
+    distAnchor: 'if (body.hardware && hwBackend) {',
+    expect: '带 width/fps 的请求必须走软件编码，突变后（有后端时）job.hardware 变 true → 测试红',
+  },
+  {
     id: 'C1',
-    name: 'GIF fps/width 被旁路（buildArgs 恒写配方默认）',
-    // false && 仍读取 fps/width，不会 TS6133；条件永假后 -vf 永不重建。
+    name: '视频 fps/width 被旁路（-vf 永不重建/生成）',
+    // false && 仍读取 fps/width 与 supportsVideoTune，不会 TS6133；条件永假后
+    // gif 回配方 12fps/640px、普通视频容器拿不到 -vf。
     source: 'lib/plan.ts',
     test: 'test/plan.test.mjs',
     dist: 'dist/lib/plan.js',
     apply: (s) =>
       replaceOnce(
         s,
-        "if (format === 'gif' && (Number(fps) > 0 || Number(width) > 0)) {",
-        "if (format === 'gif' && false && (Number(fps) > 0 || Number(width) > 0)) {",
+        'if (supportsVideoTune(kind, format) && (Number(fps) > 0 || Number(width) > 0)) {',
+        'if (false && supportsVideoTune(kind, format) && (Number(fps) > 0 || Number(width) > 0)) {',
       ),
-    distAnchor: "format === 'gif' && false",
-    expect: '显式 fps/width 必须重建 gif 的 -vf，突变后恒为 12fps/640px → 测试红',
+    distAnchor: 'false && supportsVideoTune',
+    expect: '显式 fps/width 必须生成/重建 -vf（gif 与普通容器），突变后 gif 回默认、mp4 无滤镜 → 测试红',
   },
   {
     id: 'C2',
@@ -518,6 +543,23 @@ const MUTANTS = [
       ),
     distAnchor: 'subtitlePlan(upload.streams, body.stream)',
     expect: '面板/工具选的 vtt/ass 必须到达 subtitlePlan，突变后全部导成 srt → 测试红',
+  },
+  {
+    id: 'C7',
+    name: '普通视频容器的 -vf 被旁路（gif 分支正常）',
+    // Number(fps) < 0 永假但保活读取，不会 TS6133；gif 走另一个分支不受影响，
+    // 专守泛化后「非 gif 容器 push -vf」这条新路径。
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "      args.push('-vf', parts.join(','));",
+        "      if (Number(fps) < 0) args.push('-vf', parts.join(','));",
+      ),
+    distAnchor: 'Number(fps) < 0',
+    expect: '普通视频容器的 fps/width 必须 push 出 -vf，突变后 gif 正常、mp4 无滤镜 → 测试红',
   },
   {
     id: 'D1',
