@@ -13,8 +13,9 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | 转成 X | 视频 12 种（mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif/mp3/m4a）、音频 8 种（mp3/m4a/aac/wav/flac/ogg/opus/aiff）、图片 7 种（png/jpg/webp/gif/bmp/tiff/avif）；按本机 ffmpeg 实际具备的编码器过滤——如 homebrew ffmpeg 9 缺 libtheora/libvorbis/libaom/libwebp，则不显示 ogv/ogg/avif/webp |
 | 裁一段 | 从播放器取起点/终点，或手填 `分:秒`；裁剪与转换一次完成 |
 | 提取音频 / 提取画面 | 直接拷贝轨道，不重编码 |
-| 提取字幕 | 内嵌字幕轨导出 `.srt`，文件名带语言码（如 `clip.chi.srt`） |
-| 质量滑杆 | 软件编码视频调各编码的质量参数（mp4/mov/mkv/flv/ts → x264 CRF，webm → vp9 CRF，avi/wmv/ogv → qscale）、GPU 硬编调目标码率倍率、JPG/WEBP 调质量；图片带右侧实时预览 + 并排/滑块对比 |
+| 提取字幕 | 内嵌字幕轨导出 `.srt`/`.ass`/`.vtt`（可选），文件名带语言码（如 `clip.chi.srt`） |
+| 质量滑杆 | 软件编码视频调各编码的质量参数（mp4/mov/mkv/flv/ts → x264 CRF，webm → vp9 CRF，avi/wmv/ogv → qscale）、GPU 硬编调目标码率倍率、JPG/WEBP/AVIF 调质量（AVIF 映射 AV1 CRF）；图片带右侧实时预览 + 并排/滑块对比 |
+| 音频参数 | 音频文件与视频转 mp3/m4a：可选码率（64-320k）、声道（单声道/立体声）与采样率（8k-48k 常用值），语音场景一键 mono + 22050 Hz |
 | 元数据 | 查看容器、章节、逐轨参数与全部标签；改写标题/作者/专辑/备注/日期/流派（另存为新文件） |
 | Base64 | 当前文件 → `data:` URL；或粘贴 Base64 还原成文件 / 文本 |
 | 批量处理 | 按类型分组：视频/音频/图片各自一个目标；文本单独一段、不参与转换；读取中/未识别单独一段；逐组全选/质量、逐行进度/结果/取消 |
@@ -30,12 +31,12 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 
 ## 批量、调度、GPU 与 PTC
 
-- **分组与目标**：视频、音频、图片各自一段，组标题有“默认目标”；每一行还有自己的目标格式下拉，改单行只影响该行。视频段和图片段还有质量滑杆（视频在 GPU 开关打开时映射为码率倍率）。文本单独一段、勾选禁用，详情只保留 Base64；读取中/上传失败单独一段，没有目标、不可批量。
+- **分组与目标**：视频、音频、图片各自一段，组标题有“默认目标”；每一行还有自己的目标格式下拉，改单行只影响该行。视频段和图片段还有质量滑杆（视频在 GPU 开关打开时映射为码率倍率）；音频目标出现码率、声道/采样率下拉。文本单独一段、勾选禁用，详情只保留 Base64；读取中/上传失败单独一段，没有目标、不可批量。
 - **固定规则 vs PTC**：固定规则批量逐行串行（可预测、取消简单），靠 copy 和 GPU 提速；PTC 批量才走自适应 CPU 队列。
 - **自适应 CPU 调度**：[lib/schedule.ts](lib/schedule.ts) 每秒用 `os.cpus()` 的差值采样，EMA 平滑；平滑使用率 >60% 只跑 1 个，35–60% 2 个，<35% 最多 4 个。任务权重：视频 1、音频/图片 0.5、copy 0.25、GPU 0.5；GPU 另限 2 路。容量 >1 时给每个软件编码 ffmpeg 分 `-threads/-filter_threads`；运行中的任务不抢占。
 - **GPU（显卡硬编）**：批量卡出现“GPU 编码（后端名）”——macOS 是 VideoToolbox，Windows 是 NVIDIA NVENC / Intel Quick Sync / AMD AMF，按这个优先级自动选一个。探测分三步：`--encoders` 看二进制里有没有该编码器、`--hwaccels` 看硬解在不在、最后真编一帧确认这台机器的显卡和驱动真的能用；三步都过才显示开关，所以“ffmpeg 里有 nvenc 但机器没 N 卡”不会给出一个必然失败的开关。面板打开即在后台跑第三步，不阻塞界面；检测没结束时批量卡显示“显卡驱动检测中…”，点“开始转换”会等结果，不会悄悄退回软编（服务端也会等，最长 8 秒）。选中 GPU 后若该后端的 HEVC 兄弟编码器也通过了同样的一帧实测，可再选 H.264 / HEVC（HEVC 仅 mp4/mov/mkv/ts，自动补 `hvc1` 标签；体积更小，面板内能否预览取决于系统解码）。对 mp4/mov/mkv/flv/ts 走硬解+硬编的零拷贝路径（NVENC `-hwaccel cuda`、QSV `-hwaccel qsv`、AMF `-hwaccel d3d11va`）；按源码率估 `-b:v/-maxrate/-bufsize`。显卡解不了这个文件时（例如老核显上的 VP9）自动退回 CPU 解码 + 显卡编码重跑一次，编码器不变，结果仍标“GPU 编码”。WebM/VP9/AV1、图片、音频没有对应硬件编码，仍走 CPU。
 - **直接拷贝**：h264/hevc + aac/mp3 等兼容组合直接 `-c copy`（mp4/mov/mkv/webm/ts 与同编码音频容器），有裁剪或编码不兼容才重编码；行上显示“直接拷贝”。
-- **PTC 可选模型**：默认跟随 DSH 当前主模型；下拉列出已注册模型；显式模型不在目录里会报错，不回退默认。对选中模型取最低推理档，`maxTokens` 6000；模型只返回 `{"files":[{"id","format",...}]}`，可选 `quality`（1-100）、`bitrate`（kbps，音频）、`fps`/`width`（gif）、`codec`（h264/hevc，GPU 硬编），宿主校验后拼程序交给 PTC 执行。分组和时限都按实际情况动态算：每个文件的耗时由本机实测吞吐（copy / 硬件编码 / 视频 / 音频各自维护，跑过的任务会持续校准）估算，按「整组估算 ≤ 运行时上限」装组；组内文件数上限随 CPU（约 4×核心数，夹在 4–64），并发波宽随当前 CPU 负载（4–16 个 binding 调用）。每组一次沙箱求值、各自限时，整批可以超过单次 10 分钟；面板会显示基于同一估算的剩余时间。
+- **PTC 可选模型**：默认跟随 DSH 当前主模型；下拉列出已注册模型；显式模型不在目录里会报错，不回退默认。对选中模型取最低推理档，`maxTokens` 6000；模型只返回 `{"files":[{"id","format",...}]}`，可选 `quality`（1-100）、`bitrate`（kbps，音频编码目标）、`channels`/`rate`（1/2 与采样率 Hz，音频编码目标）、`fps`/`width`（gif）、`codec`（h264/hevc，GPU 硬编），宿主校验后拼程序交给 PTC 执行。分组和时限都按实际情况动态算：每个文件的耗时由本机实测吞吐（copy / 硬件编码 / 视频 / 音频各自维护，跑过的任务会持续校准）估算，按「整组估算 ≤ 运行时上限」装组；组内文件数上限随 CPU（约 4×核心数，夹在 4–64），并发波宽随当前 CPU 负载（4–16 个 binding 调用）。每组一次沙箱求值、各自限时，整批可以超过单次 10 分钟；面板会显示基于同一估算的剩余时间。
 - **实测**（10 秒 1080p30 合成样本，机器负载约 4.6；不是你的真实文件）：
 
   | 路径 | 耗时 | 输出 | VMAF |
@@ -55,9 +56,9 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | action | 作用 |
 | --- | --- |
 | `probe` | 读时长、分辨率、编码、音轨、字幕轨、标签 |
-| `convert` | 转格式（可带 `trim` 裁剪；`quality` 1-100：软件编码视频映射各编码质量参数——mp4/mov/mkv/flv/ts 为 CRF、webm 为 vp9 CRF、avi/wmv/ogv 为 qscale——GPU 硬编映射目标码率倍率，图片 jpg/webp 有效；指定 `codec`（h264/hevc）即视同请求 GPU 硬编，hevc 仅 mp4/mov/mkv/ts） |
+| `convert` | 转格式（可带 `trim` 裁剪；`quality` 1-100：软件编码视频映射各编码质量参数——mp4/mov/mkv/flv/ts 为 CRF、webm 为 vp9 CRF、avi/wmv/ogv 为 qscale——GPU 硬编映射目标码率倍率，图片 jpg/webp/avif 有效；转 mp3/m4a/aac/opus 可带 `bitrate` kbps 32-320，音频编码目标可带 `channels` 1/2 与 `sampleRate` Hz 8000-96000；指定 `codec`（h264/hevc）即视同请求 GPU 硬编，hevc 仅 mp4/mov/mkv/ts） |
 | `extract-audio` / `extract-video` | 抽音轨 / 抽画面，不重编码 |
-| `subtitle` | 导出内嵌字幕为 `.srt` |
+| `subtitle` | 导出内嵌字幕为 `.srt`/`.ass`/`.vtt`（`format` 选格式，默认 srt） |
 | `rewrite-tags` | 改写标题/作者/专辑/备注/日期/流派 |
 
 工具吃的是**本机绝对路径**，不走上传：产物写在同一个输出目录，返回新文件路径。调用被取消或超时（30 分钟）时，ffmpeg 会被终止，半成品会被清掉。
@@ -213,7 +214,7 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位。`t` 由平台按槽�
 - 批量提取只处理视频；不适用或没有音轨的行标「跳过」，不算失败。
 - 固定规则批量逐行串行；PTC 批量走自适应 CPU 队列（1–4 路，GPU 另限 2 路），并按组多次沙箱求值；上传中或处理中不能增删文件。
 - PTC 只用于批量转换且至少 2 个文件；默认关，开关不随页面保存。可选已注册模型；模型只返回每文件计划；每次运行仍会调用一次主模型（消耗 token）；单次求值默认 2 分钟、最长 10 分钟；整批会拆成多组，因此可以超过 10 分钟。
-- PTC 不提供改分辨率、合并或 remux 参数；GPU 覆盖 mp4/mov/mkv/flv/ts 的 H.264，探测到 HEVC 能力后同格式可选 HEVC（自动补 `hvc1` 标签；macOS 用 VideoToolbox，Windows 用 NVENC/QSV/AMF 三者之一）；直接拷贝只覆盖兼容的编码/容器矩阵，显式调 quality/bitrate/codec 任一即禁用拷贝走重编码。
+- PTC 不提供改分辨率、合并或 remux 参数；GPU 覆盖 mp4/mov/mkv/flv/ts 的 H.264，探测到 HEVC 能力后同格式可选 HEVC（自动补 `hvc1` 标签；macOS 用 VideoToolbox，Windows 用 NVENC/QSV/AMF 三者之一）；直接拷贝只覆盖兼容的编码/容器矩阵，显式调 quality/bitrate/channels/sampleRate/codec 任一即禁用拷贝走重编码。
 - 上传的临时副本保留 2 小时后自动删除。
 - Windows 上「在资源管理器中显示」用 `explorer /select,`，macOS 用 `open -R`，Linux 用 `xdg-open`（打开所在目录）。
 
