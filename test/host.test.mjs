@@ -1358,6 +1358,7 @@ assert.equal(ptcAudioTuneDone.items[0].state, 'done');
 assert.equal(ptcAudioTuneDone.items[0].result.copy, false, 'the PTC batch re-encodes for the mono ask');
 assert.match(ptcPrompt, /channels=1/, 'the prompt carries the mono target');
 assert.match(ptcPrompt, /\brate=16000/, 'the prompt carries the rate target');
+assert.match(ptcPrompt, /jpg\/webp\/avif/, 'the prompt tells the model quality also applies to avif');
 const ptcTuneOut = audioLayout(ptcAudioTuneDone.items[0].result.file);
 assert.equal(ptcTuneOut.mono, true);
 assert.equal(ptcTuneOut.rate, 16000, 'the PTC output sits at 16000 Hz');

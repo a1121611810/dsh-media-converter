@@ -1860,7 +1860,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       '规则：',
       '1. 每个文件恰好一条，id 必须与上面完全一致；不能多、不能少、不能重复。',
       '2. format 必须属于该文件 kind 的可用格式；优先用该行的 target。',
-      '3. quality 1–100，仅对视频与 jpg/webp 图片有意义，其它类型请省略。',
+      '3. quality 1–100，仅对视频与 jpg/webp/avif 图片有意义，其它类型请省略。',
       '4. bitrate 仅对 mp3/m4a/aac/opus 有效（kbps，32-320）；该行 bitrate 非空时优先用它，为空则省略。',
       '5. fps（1–30）与 width（≥16 像素）仅对 gif 目标有效，省略则用内置默认 12fps/640px；其它格式不要带。',
       '6. codec 仅对 GPU 硬编视频有效（h264/hevc），省略默认 h264；hevc 仅 mp4/mov/mkv/ts 可选。',
