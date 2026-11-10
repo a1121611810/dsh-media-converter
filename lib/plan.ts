@@ -267,6 +267,13 @@ export function supportsBitrate(kind: MediaKind, format: string): boolean {
   );
 }
 
+// Audio-encode targets: an audio file of any format, or a video file turned
+// into mp3/m4a. The channel/sample-rate controls show for exactly these; a
+// silent-picture format never is one. The client mirrors this (lib.ts).
+export function supportsAudioTune(kind: MediaKind, format: string): boolean {
+  return kind === 'audio' || (kind === 'video' && (format === 'mp3' || format === 'm4a'));
+}
+
 // The recipe's own -b:a value, the anchor for "explicitly asked for the
 // default" (keeps the copy fast path) vs "a real re-encode request".
 export function defaultBitrate(format: string): number {
@@ -482,6 +489,8 @@ export function buildArgs(
   bitrate?: number,
   fps?: number,
   width?: number,
+  channels?: number,
+  sampleRate?: number,
 ): string[] {
   const table = kind === 'audio' ? AUDIO : kind === 'image' ? IMAGE : VIDEO;
   const base = table[format];
@@ -516,6 +525,14 @@ export function buildArgs(
     const w = Number(width) > 0 ? Math.min(7680, Math.max(16, Math.round(Number(width)))) : 640;
     const at = args.indexOf('-vf');
     if (at >= 0) args[at + 1] = `fps=${f},scale='min(${w},iw)':-2:flags=lanczos`;
+  }
+  // Audio-encode targets take channel/sample-rate downsampling (the speech
+  // use case): the recipes carry no -ac/-ar of their own, so these push.
+  // Zero/absent/garbage keeps the source's own layout and rate.
+  if (supportsAudioTune(kind, format)) {
+    if (Number(channels) > 0) args.push('-ac', String(Math.min(2, Math.max(1, Math.round(Number(channels))))));
+    if (Number(sampleRate) > 0)
+      args.push('-ar', String(Math.min(96000, Math.max(8000, Math.round(Number(sampleRate))))));
   }
   return args;
 }

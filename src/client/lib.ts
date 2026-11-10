@@ -50,6 +50,8 @@ export interface ConvertRequest {
   format?: string;
   quality?: number;
   bitrate?: number;
+  channels?: number;
+  sampleRate?: number;
   fps?: number;
   width?: number;
   mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta';
@@ -281,6 +283,18 @@ export function supportsBitrate(kind: string, format: string): boolean {
     (kind === 'audio' || (kind === 'video' && (format === 'mp3' || format === 'm4a')))
   );
 }
+
+// Mirror of the Host's supportsAudioTune (lib/plan.ts): the channel/rate
+// selects show for exactly these audio-encode targets.
+export function supportsAudioTune(kind: string, format: string): boolean {
+  return kind === 'audio' || (kind === 'video' && (format === 'mp3' || format === 'm4a'));
+}
+
+// The selectable channel layouts (1 = mono, 2 = stereo) and sample rates (Hz)
+// for the audio selects; '' means the recipe default. Kept here so App and
+// QueueGroup share one list.
+export const CHANNEL_OPTIONS = [1, 2];
+export const RATE_OPTIONS = [8000, 16000, 22050, 24000, 44100, 48000];
 
 // The selectable bitrates (kbps) for the bitrate select; '' means the
 // recipe default. Kept here so App and QueueGroup share one list.

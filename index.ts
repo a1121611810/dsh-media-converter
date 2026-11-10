@@ -53,6 +53,7 @@ import {
   streamInfoOf,
   subtitlePlan,
   supportedFormats,
+  supportsAudioTune,
   supportsBitrate,
   threadArgs,
   trimArgs,
@@ -359,6 +360,10 @@ export interface RunItemInfo {
   width?: number;
   // The panel's per-row GPU codec choice ('h264' | 'hevc'); hardware only.
   codec?: string;
+  // The panel's per-row audio downmix (mono/stereo) and sample rate; audio
+  // encode targets only, 0/absent = keep the source.
+  channels?: number;
+  sampleRate?: number;
   state: RunItemState;
   percent: number | null;
   jobId: string;
@@ -408,6 +413,10 @@ interface JsonBody {
   bitrate?: number;
   fps?: number;
   width?: number;
+  // Audio downmix (mono/stereo) and sample rate; audio encode targets only,
+  // 0/absent = keep the source.
+  channels?: number;
+  sampleRate?: number;
   codec?: unknown;
   hardware?: unknown;
   name?: string;
@@ -1389,6 +1398,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               bitrate: item.bitrate,
               fps: item.fps,
               width: item.width,
+              channels: item.channels,
+              sampleRate: item.sampleRate,
               codec: item.codec,
               hardware,
             },
@@ -1512,10 +1523,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       if (files.length !== planned.length) throw new Error('文件已失效，请重新选择');
       const targets = new Map(planned.map((item) => [item.id, item.format]));
       const bitrates = new Map(planned.map((item) => [item.id, item.bitrate]));
+      const channelMap = new Map(planned.map((item) => [item.id, item.channels]));
+      const rateMap = new Map(planned.map((item) => [item.id, item.sampleRate]));
       const model = await resolvePtcModel(requested);
       run.stage = 'planning';
       const modelStart = Date.now();
-      const plan = await collectPtcPlan(files, targets, bitrates, quality, model, controller);
+      const plan = await collectPtcPlan(files, targets, bitrates, channelMap, rateMap, quality, model, controller);
       run.modelMs = Date.now() - modelStart;
       for (const row of plan) {
         const item = run.items.find((candidate) => candidate.id === row.id);
@@ -1524,6 +1537,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           // The model may omit bitrate/codec: the panel's choice stays the fallback.
           if (row.bitrate !== undefined) item.bitrate = row.bitrate;
           if (row.codec !== undefined) item.codec = row.codec;
+          if (row.channels !== undefined) item.channels = row.channels;
+          if (row.sampleRate !== undefined) item.sampleRate = row.sampleRate;
         }
       }
       run.stage = 'converting';
@@ -1546,6 +1561,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           format: row.format,
           quality: row.quality ?? quality,
           bitrate: row.bitrate ?? bitrates.get(row.id),
+          // channels/sampleRate ride along for the copy gate too: a mono ask
+          // is a re-encode, costed as a copy it would dodge nothing but lie.
+          channels: row.channels ?? channelMap.get(row.id),
+          sampleRate: row.sampleRate ?? rateMap.get(row.id),
           codec: row.codec,
           hardware,
         });
@@ -1598,6 +1617,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           format: target,
           quality: Number(a.quality ?? quality),
           bitrate: Number(a.bitrate ?? entry?.bitrate),
+          channels: Number(a.channels ?? entry?.channels),
+          sampleRate: Number(a.sampleRate ?? entry?.sampleRate),
           codec: a.codec !== undefined ? String(a.codec) : entry?.codec,
           hardware,
         });
@@ -1622,6 +1643,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                   bitrate: Number(a.bitrate ?? entry?.bitrate),
                   fps: Number(a.fps ?? entry?.fps),
                   width: Number(a.width ?? entry?.width),
+                  channels: Number(a.channels ?? entry?.channels),
+                  sampleRate: Number(a.sampleRate ?? entry?.sampleRate),
                   codec: a.codec !== undefined ? String(a.codec) : entry?.codec,
                   hardware,
                 },
@@ -1753,7 +1776,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     // The same rule for an explicit audio codec: asking for HEVC when the
     // source could just be copied is a real re-encode request.
     const codecTuned = upload.kind === 'video' && String(body.codec || '') === 'hevc';
-    if (!trim && !qualityTuned && !bitrateTuned && !codecTuned) {
+    // Downsampling channels or rate is a real re-encode request too: a mono
+    // ask must never come back as a copied stereo stream.
+    const audioTuned =
+      supportsAudioTune(upload.kind, format) && (Number(body.channels) > 0 || Number(body.sampleRate) > 0);
+    if (!trim && !qualityTuned && !bitrateTuned && !codecTuned && !audioTuned) {
       const copy = copyArgs(upload.kind, format, upload.meta);
       if (copy) return { ext: format, kind: kindByExt(format), args: copy, copy: true };
     }
@@ -1785,7 +1812,16 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     return {
       ext: format,
       kind: kindByExt(format),
-      args: buildArgs(upload.kind, format, body.quality, body.bitrate, body.fps, body.width),
+      args: buildArgs(
+        upload.kind,
+        format,
+        body.quality,
+        body.bitrate,
+        body.fps,
+        body.width,
+        body.channels,
+        body.sampleRate,
+      ),
       threads,
     };
   };
@@ -1798,12 +1834,15 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     files: Upload[],
     targets: Map<string, string>,
     bitrates: Map<string, number | undefined>,
+    channelMap: Map<string, number | undefined>,
+    rateMap: Map<string, number | undefined>,
     quality: number,
   ): string => {
     const lines = files.map(
       (f) =>
         `- id=${f.id} name=${f.name} kind=${f.kind} target=${targets.get(f.id) || ''} ` +
-        `bitrate=${bitrates.get(f.id) || ''} ` +
+        `bitrate=${bitrates.get(f.id) || ''} channels=${channelMap.get(f.id) || ''} ` +
+        `rate=${rateMap.get(f.id) || ''} ` +
         `duration=${f.duration.toFixed(2)}s video=${f.streams.video ? 'yes' : 'no'} ` +
         `audio=${f.streams.audio ? 'yes' : 'no'} size=${(f.size / 1048576).toFixed(2)}MB`,
     );
@@ -1816,7 +1855,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       `各类型的可用输出格式：video=${formatsFor('video').join(', ')}；audio=${formatsFor('audio').join(', ')}；image=${formatsFor('image').join(', ')}。`,
       '',
       '只返回一个 JSON 对象。不要代码、不要解释、不要 Markdown 代码块：',
-      '{"files":[{"id":"文件id","format":"输出格式","quality":90,"bitrate":128,"fps":12,"width":640,"codec":"h264"}]}',
+      '{"files":[{"id":"文件id","format":"输出格式","quality":90,"bitrate":128,"channels":1,"rate":22050,"fps":12,"width":640,"codec":"h264"}]}',
       '',
       '规则：',
       '1. 每个文件恰好一条，id 必须与上面完全一致；不能多、不能少、不能重复。',
@@ -1825,7 +1864,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       '4. bitrate 仅对 mp3/m4a/aac/opus 有效（kbps，32-320）；该行 bitrate 非空时优先用它，为空则省略。',
       '5. fps（1–30）与 width（≥16 像素）仅对 gif 目标有效，省略则用内置默认 12fps/640px；其它格式不要带。',
       '6. codec 仅对 GPU 硬编视频有效（h264/hevc），省略默认 h264；hevc 仅 mp4/mov/mkv/ts 可选。',
-      '7. 没有音轨的文件不要选纯音频格式。',
+      '7. channels（1=单声道，2=立体声）与 rate（采样率 Hz，8000–96000，如 22050）仅对音频编码目标有效（音频文件，或视频转 mp3/m4a），省略则保留源；该行 channels/rate 非空时优先用它们。',
+      '8. 没有音轨的文件不要选纯音频格式。',
     ].join('\n');
   };
 
@@ -1837,6 +1877,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     format: string;
     quality?: number;
     bitrate?: number;
+    channels?: number;
+    sampleRate?: number;
     fps?: number;
     width?: number;
     codec?: string;
@@ -1878,6 +1920,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         format: string;
         quality?: number;
         bitrate?: number;
+        channels?: number;
+        sampleRate?: number;
         fps?: number;
         width?: number;
         codec?: string;
@@ -1900,6 +1944,23 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           throw new Error(`模型给 ${file.id} 的码率不合法`);
         }
         out.bitrate = Math.round(value);
+      }
+      // The audio knobs ride the plan row into the convert binding; all optional.
+      const rawChannels = row.channels;
+      if (rawChannels !== undefined && rawChannels !== null) {
+        const value = Number(rawChannels);
+        if (!Number.isFinite(value) || value < 1 || value > 2) {
+          throw new Error(`模型给 ${file.id} 的 channels 不合法`);
+        }
+        out.channels = Math.round(value);
+      }
+      const rawRate = row.rate ?? row.sampleRate;
+      if (rawRate !== undefined && rawRate !== null) {
+        const value = Number(rawRate);
+        if (!Number.isFinite(value) || value < 8000 || value > 96000) {
+          throw new Error(`模型给 ${file.id} 的采样率不合法`);
+        }
+        out.sampleRate = Math.round(value);
       }
       // GIF knobs ride the plan row into the convert binding; both are optional.
       for (const key of ['fps', 'width'] as const) {
@@ -1960,11 +2021,23 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     files: Upload[],
     targets: Map<string, string>,
     bitrates: Map<string, number | undefined>,
+    channelMap: Map<string, number | undefined>,
+    rateMap: Map<string, number | undefined>,
     quality: number,
     model: { provider: string; modelId: string },
     controller: AbortController,
   ): Promise<
-    { id: string; format: string; quality?: number; bitrate?: number; fps?: number; width?: number; codec?: string }[]
+    {
+      id: string;
+      format: string;
+      quality?: number;
+      bitrate?: number;
+      channels?: number;
+      sampleRate?: number;
+      fps?: number;
+      width?: number;
+      codec?: string;
+    }[]
   > => {
     const llm = ctx.get('llm');
     if (!llm) throw new Error('模型服务不可用');
@@ -1984,7 +2057,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         provider: model.provider,
         model: model.modelId,
         messages: [
-          { role: 'user', content: [{ type: 'text', text: ptcPlanPrompt(files, targets, bitrates, quality) }] },
+          {
+            role: 'user',
+            content: [{ type: 'text', text: ptcPlanPrompt(files, targets, bitrates, channelMap, rateMap, quality) }],
+          },
         ],
         maxTokens: 6000,
         ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
@@ -2146,6 +2222,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       bitrate: Number(a.bitrate || 0),
       fps: Number(a.fps || 0),
       width: Number(a.width || 0),
+      channels: Number(a.channels || 0),
+      sampleRate: Number(a.sampleRate || 0),
       codec: a.codec !== undefined ? String(a.codec) : undefined,
       // A codec choice only means something on the GPU: asking for one opts
       // into hardware encoding (which still falls back to software where no
@@ -2218,7 +2296,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
         '③extract-audio 抽音轨、④extract-video 抽画面（不重编码）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）。' +
-        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；指定 codec（h264/hevc）即视同请求 GPU 硬编（无显卡时自动回退软件编码；hevc 仅 mp4/mov/mkv/ts 有效，体积更小）；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；视频转视频时内嵌音轨不受此参数控制）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
+        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；指定 codec（h264/hevc）即视同请求 GPU 硬编（无显卡时自动回退软件编码；hevc 仅 mp4/mov/mkv/ts 有效，体积更小）；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；视频转视频时内嵌音轨不受此参数控制）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
         properties: {
@@ -2260,6 +2338,14 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           width: {
             type: 'number',
             description: 'GIF 宽度上限（像素，≥16，等比缩放；0 或不填用默认 640）。',
+          },
+          channels: {
+            type: 'number',
+            description: '声道数（1=单声道，2=立体声；仅音频编码目标有效，0 或不填保留源）。',
+          },
+          sampleRate: {
+            type: 'number',
+            description: '采样率 Hz（8000-96000，如 22050；仅音频编码目标有效，0 或不填保留源）。',
           },
           tags: {
             type: 'object',
@@ -2871,6 +2957,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               const br = Number(row.bitrate);
               const gf = Number(row.fps);
               const gw = Number(row.width);
+              const ch = Number(row.channels);
+              const sr = Number(row.sampleRate);
               const codecRaw = String(row.codec || '');
               items.push({
                 id,
@@ -2880,6 +2968,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                 bitrate: Number.isFinite(br) && br >= 32 && br <= 320 ? Math.round(br) : undefined,
                 fps: Number.isFinite(gf) && gf >= 1 && gf <= 30 ? Math.round(gf) : undefined,
                 width: Number.isFinite(gw) && gw >= 16 && gw <= 7680 ? Math.round(gw) : undefined,
+                channels: Number.isFinite(ch) && ch >= 1 && ch <= 2 ? Math.round(ch) : undefined,
+                sampleRate: Number.isFinite(sr) && sr >= 8000 && sr <= 96000 ? Math.round(sr) : undefined,
                 codec: codecRaw === 'hevc' || codecRaw === 'h264' ? codecRaw : undefined,
                 state: skipped ? 'skipped' : 'waiting',
                 percent: null,

@@ -3,9 +3,11 @@ import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, ref, watch } f
 import type { PropType } from 'vue';
 import {
   BITRATE_OPTIONS,
+  CHANNEL_OPTIONS,
   CONVERTIBLE_KINDS,
   PLATFORM,
   PREVIEW_MAX,
+  RATE_OPTIONS,
   TAG_KEYS,
   THUMB_MAX,
   defaultTargets,
@@ -23,6 +25,7 @@ import {
   rowPlan,
   runItemPatch,
   sourceUrl,
+  supportsAudioTune,
   supportsBitrate,
   supportsQuality,
   trimWindow,
@@ -87,6 +90,8 @@ const targets = ref<Record<ConvertibleKind, string>>(defaultTargets({}));
 const rowTargets = ref<Record<string, string>>({});
 const batchQuality = ref(90);
 const batchBitrate = ref(0);
+const batchChannels = ref(0);
+const batchSampleRate = ref(0);
 const usePtc = ref(false);
 // On by default whenever the batch can use the media engine (see showGpu);
 // the user can still turn it off, after which the auto-default never overrides.
@@ -257,6 +262,8 @@ const format = ref('');
 const outputName = ref('');
 const quality = ref(90);
 const bitrate = ref(0);
+const channels = ref(0);
+const sampleRate = ref(0);
 // GIF knobs: 0 means "the recipe default" (12fps / 640px), sent as undefined.
 const gifFps = ref(0);
 const gifWidth = ref(0);
@@ -396,6 +403,7 @@ interface QueueSection {
   showTargets: boolean;
   showQuality: boolean;
   showBitrate: boolean;
+  showAudioTune: boolean;
   showGif: boolean;
   note: string;
 }
@@ -433,6 +441,11 @@ const queueGroups = computed<QueueSection[]>(() => {
           convertible &&
           operation.value === 'convert' &&
           groupItems.some((item) => supportsBitrate(convertible, effectiveTarget(item))),
+        ),
+        showAudioTune: Boolean(
+          convertible &&
+          operation.value === 'convert' &&
+          groupItems.some((item) => supportsAudioTune(convertible, effectiveTarget(item))),
         ),
         showGif: Boolean(
           convertible === 'video' &&
@@ -523,6 +536,9 @@ const usesQuality = computed(() =>
 );
 const usesBitrate = computed(() =>
   Boolean(file.value && format.value && supportsBitrate(file.value.kind, format.value)),
+);
+const usesAudioTune = computed(() =>
+  Boolean(file.value && format.value && supportsAudioTune(file.value.kind, format.value)),
 );
 // GIF is a video target with its own fps/width controls; no kind helper needed.
 const isGif = computed(() => Boolean(file.value && file.value.kind === 'video' && format.value === 'gif'));
@@ -1445,6 +1461,8 @@ async function runServerBatch(rows: Item[], ptc = false) {
       format: row.target,
       quality: supportsQuality(item.upload!.kind, row.target) ? batchQuality.value : undefined,
       bitrate: supportsBitrate(item.upload!.kind, row.target) ? batchBitrate.value || undefined : undefined,
+      channels: supportsAudioTune(item.upload!.kind, row.target) ? batchChannels.value || undefined : undefined,
+      sampleRate: supportsAudioTune(item.upload!.kind, row.target) ? batchSampleRate.value || undefined : undefined,
       fps: row.target === 'gif' && item.upload!.kind === 'video' ? batchGifFps.value || undefined : undefined,
       width: row.target === 'gif' && item.upload!.kind === 'video' ? batchGifWidth.value || undefined : undefined,
       hardware: useGpu.value || undefined,
@@ -1555,6 +1573,8 @@ function convert() {
       format: format.value,
       quality: withQuality ? quality.value : undefined,
       bitrate: usesBitrate.value ? bitrate.value || undefined : undefined,
+      channels: usesAudioTune.value ? channels.value || undefined : undefined,
+      sampleRate: usesAudioTune.value ? sampleRate.value || undefined : undefined,
       fps: isGif.value ? gifFps.value || undefined : undefined,
       width: isGif.value ? gifWidth.value || undefined : undefined,
     },
@@ -1578,6 +1598,8 @@ function applyTrim() {
       format: format.value,
       quality: file.value.kind === 'image' ? quality.value : undefined,
       bitrate: usesBitrate.value ? bitrate.value || undefined : undefined,
+      channels: usesAudioTune.value ? channels.value || undefined : undefined,
+      sampleRate: usesAudioTune.value ? sampleRate.value || undefined : undefined,
       fps: isGif.value ? gifFps.value || undefined : undefined,
       width: isGif.value ? gifWidth.value || undefined : undefined,
       trim: { start: window.start, end: window.end },
@@ -2040,6 +2062,9 @@ watch([action, panelOpen], async () => {
               :show-quality="group.showQuality"
               :bitrate="batchBitrate"
               :show-bitrate="group.showBitrate"
+              :channels="batchChannels"
+              :sample-rate="batchSampleRate"
+              :show-audio-tune="group.showAudioTune"
               :gif-fps="batchGifFps"
               :gif-width="batchGifWidth"
               :show-gif="group.showGif"
@@ -2051,6 +2076,8 @@ watch([action, panelOpen], async () => {
               @update:row-target="setRowTarget"
               @update:quality="batchQuality = $event"
               @update:bitrate="batchBitrate = $event"
+              @update:channels="batchChannels = $event"
+              @update:sample-rate="batchSampleRate = $event"
               @update:gif-fps="batchGifFps = $event"
               @update:gif-width="batchGifWidth = $event"
               @toggle="toggleChecked"
@@ -2338,6 +2365,32 @@ watch([action, panelOpen], async () => {
                 >
                   <option :value="0">{{ t('bitrate.default') }}</option>
                   <option v-for="option in BITRATE_OPTIONS" :key="option" :value="option">{{ option }} kbps</option>
+                </select>
+              </div>
+              <div v-if="usesAudioTune && currentAction.id === 'fmt:' + format" class="mc-row">
+                <span class="mc-muted">{{ t('audio.channels') }}</span>
+                <select
+                  class="mc-select"
+                  v-model.number="channels"
+                  :disabled="busy"
+                  :aria-label="t('audio.channels')"
+                  @change="resetResult"
+                >
+                  <option :value="0">{{ t('bitrate.default') }}</option>
+                  <option v-for="option in CHANNEL_OPTIONS" :key="option" :value="option">
+                    {{ option === 1 ? t('audio.mono') : t('audio.stereo') }}
+                  </option>
+                </select>
+                <span class="mc-muted">{{ t('audio.rate') }}</span>
+                <select
+                  class="mc-select"
+                  v-model.number="sampleRate"
+                  :disabled="busy"
+                  :aria-label="t('audio.rate')"
+                  @change="resetResult"
+                >
+                  <option :value="0">{{ t('bitrate.default') }}</option>
+                  <option v-for="option in RATE_OPTIONS" :key="option" :value="option">{{ option }} Hz</option>
                 </select>
               </div>
               <div v-if="isGif && currentAction.id === 'fmt:' + format" class="mc-row">

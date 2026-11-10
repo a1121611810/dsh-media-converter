@@ -22,6 +22,7 @@ import {
   progressSeconds,
   subtitlePlan,
   supportedFormats,
+  supportsAudioTune,
   supportsBitrate,
   supportsQuality,
   trimArgs,
@@ -135,6 +136,29 @@ assert.equal(bitrateAt(buildArgs('audio', 'mp3', 90, 0)), '192k'); // zero = uns
 assert.equal(bitrateAt(buildArgs('audio', 'mp3', 90, 'abc')), '192k'); // garbage ignored
 assert.equal(bitrateAt(buildArgs('audio', 'ogg', 90, 128)), undefined); // no -b:a to replace
 assert.ok(!buildArgs('audio', 'flac', 90, 128).includes('-b:a'));
+assert.deepEqual(formatEncoders('audio', 'mp3'), ['libmp3lame']); // encoder scan unaffected
+
+// Audio channel/sample-rate downsampling: audio-encode targets only, pushed
+// after the recipe (the recipes carry no -ac/-ar of their own). Zero/garbage
+// keeps the source; junk clamps into range, it never reaches ffmpeg raw.
+assert.equal(supportsAudioTune('audio', 'mp3'), true);
+assert.equal(supportsAudioTune('audio', 'wav'), true);
+assert.equal(supportsAudioTune('audio', 'flac'), true);
+assert.equal(supportsAudioTune('video', 'mp3'), true);
+assert.equal(supportsAudioTune('video', 'm4a'), true);
+assert.equal(supportsAudioTune('video', 'mp4'), false);
+assert.equal(supportsAudioTune('video', 'aac'), false);
+assert.equal(supportsAudioTune('image', 'jpg'), false);
+assert.deepEqual(buildArgs('audio', 'mp3', 90, 0, 0, 0, 1, 22050).slice(-4), ['-ac', '1', '-ar', '22050']);
+assert.deepEqual(buildArgs('video', 'm4a', 90, 0, 0, 0, 2, 48000).slice(-4), ['-ac', '2', '-ar', '48000']);
+const onlyChannels = buildArgs('audio', 'flac', 90, 0, 0, 0, 1);
+assert.deepEqual(onlyChannels.slice(-2), ['-ac', '1']);
+assert.ok(!onlyChannels.join(' ').includes('-ar'));
+assert.deepEqual(buildArgs('audio', 'mp3', 90, 0, 0, 0, 9, 500000).slice(-4), ['-ac', '2', '-ar', '96000']); // clamped
+assert.ok(!buildArgs('audio', 'mp3').join(' ').includes('-ac')); // default untouched
+assert.ok(!buildArgs('audio', 'mp3', 90, 0, 0, 0, 0, 0).join(' ').includes('-ar')); // zero keeps source
+assert.ok(!buildArgs('audio', 'mp3', 90, 0, 0, 0, 'x', 'y').join(' ').includes('-ac')); // garbage ignored
+assert.ok(!buildArgs('video', 'mp4', 90, 0, 0, 0, 1, 22050).join(' ').includes('-ac')); // non-audio target ignores
 assert.deepEqual(formatEncoders('audio', 'mp3'), ['libmp3lame']); // encoder scan unaffected
 
 // Format support follows the encoders the recipe needs; homebrew ffmpeg 9

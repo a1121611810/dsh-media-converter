@@ -18,6 +18,7 @@ import {
   withoutKnownUploads,
   unavailableTarget,
   sourceUrl,
+  supportsAudioTune,
   supportsBitrate,
   supportsQuality,
   removeUploadRow,
@@ -56,6 +57,16 @@ assert.equal(supportsBitrate('video', 'm4a'), true);
 assert.equal(supportsBitrate('video', 'aac'), false);
 assert.equal(supportsBitrate('video', 'mp4'), false);
 assert.equal(supportsBitrate('image', 'jpg'), false);
+
+// Mirror of the Host's supportsAudioTune: the channel/rate selects show for
+// exactly these audio-encode targets.
+assert.equal(supportsAudioTune('audio', 'mp3'), true);
+assert.equal(supportsAudioTune('audio', 'wav'), true);
+assert.equal(supportsAudioTune('video', 'mp3'), true);
+assert.equal(supportsAudioTune('video', 'm4a'), true);
+assert.equal(supportsAudioTune('video', 'mp4'), false);
+assert.equal(supportsAudioTune('video', 'aac'), false);
+assert.equal(supportsAudioTune('image', 'jpg'), false);
 
 // removeUploadRow: the async core of 移除. The race case is the point — two
 // overlapping clicks, the later one resolving after the first was applied,

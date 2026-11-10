@@ -298,18 +298,20 @@ const llm = {
     }
     // One plan row per file the prompt lists, picking each file's own target so
     // videos, audio and images all get a format the Host accepts.
-    const rows = [...ptcPrompt.matchAll(/id=(\S+) name=[^\n]*? kind=(\S+) target=(\S*) bitrate=(\S*)/g)].map(
-      ([, id, kind, target, bitrate]) => ({
-        id,
-        format: target || (kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : 'jpg'),
-        quality: 60,
-        // Echo the per-row bitrate target like a model following the prompt
-        // rule; rows without one stay without one.
-        ...(bitrate ? { bitrate: Number(bitrate) } : {}),
-        // Propose GIF knobs for gif targets, like a model following rule 5.
-        ...(target === 'gif' ? { fps: 6, width: 40 } : {}),
-      }),
-    );
+    const rows = [
+      ...ptcPrompt.matchAll(/id=(\S+) name=[^\n]*? kind=(\S+) target=(\S*) bitrate=(\S*) channels=(\S*) rate=(\S*)/g),
+    ].map(([, id, kind, target, bitrate, channels, rate]) => ({
+      id,
+      format: target || (kind === 'video' ? 'mp4' : kind === 'audio' ? 'mp3' : 'jpg'),
+      quality: 60,
+      // Echo the per-row targets like a model following the prompt rules;
+      // rows without one stay without one.
+      ...(bitrate ? { bitrate: Number(bitrate) } : {}),
+      ...(channels ? { channels: Number(channels) } : {}),
+      ...(rate ? { sampleRate: Number(rate) } : {}),
+      // Propose GIF knobs for gif targets, like a model following rule 5.
+      ...(target === 'gif' ? { fps: 6, width: 40 } : {}),
+    }));
     yield { type: 'text-delta', index: 0, text: JSON.stringify({ files: rows }) };
     yield { type: 'finish', reason: { kind: 'stop' } };
   },
@@ -1202,6 +1204,135 @@ assert.ok(
   `the PTC output sits at ~96k (${audioKbps(ptcVideoBitrateDone.items[0].result.file)})`,
 );
 
+// --- audio channels/sample rate: mono downsampling across all channels ------
+// The output file itself is the assertion: a mono ask that silently kept the
+// stereo copy would still pass every unit test in this file.
+const stereoTone = path.join(outDir, 'stereo-tone.mp3');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'sine=frequency=440',
+  '-ac',
+  '2',
+  '-c:a',
+  'libmp3lame',
+  '-b:a',
+  '192k',
+  stereoTone,
+]);
+const stereoUpload = await call('upload?name=stereo-tone.mp3', { method: 'POST', body: fs.readFileSync(stereoTone) });
+assert.equal(stereoUpload.data.kind, 'audio');
+assert.equal(stereoUpload.data.streams.audioCodec, 'mp3');
+
+const audioLayout = (file) => {
+  const probe = spawnSync(ffmpeg, ['-hide_banner', '-i', file], { encoding: 'utf8' }).stderr;
+  const rate = /(\d+)\s*Hz/.exec(probe);
+  return { rate: rate ? Number(rate[1]) : 0, mono: /\bmono\b/.test(probe) };
+};
+
+// The copy-trap probe: a mono ask on an mp3 source must re-encode, not copy.
+const stereoCopy = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: stereoUpload.data.id, format: 'mp3' }),
+});
+assert.equal(stereoCopy.data.job.copy, true, 'mp3->mp3 still copies by default');
+const monoAsk = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: stereoUpload.data.id, format: 'mp3', channels: 1 }),
+});
+assert.equal(monoAsk.data.job.copy, false, 'a mono ask re-encodes instead of copying stereo');
+const monoJob = await waitJob(monoAsk.data.job);
+const monoOut = audioLayout(monoJob.out);
+assert.equal(monoOut.mono, true, 'the output really is mono');
+assert.equal(monoOut.rate, 44100, 'an untouched rate rides along');
+
+// Single convert with everything at once: mono + 22050 Hz + 64k + trim.
+const tunedAudio = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({
+    id: clipUpload.data.id,
+    format: 'mp3',
+    channels: 1,
+    sampleRate: 22050,
+    bitrate: 64,
+    trim: { start: 0.5, end: 1.5 },
+  }),
+});
+assert.equal(tunedAudio.data.job.copy, false);
+const tunedAudioJob = await waitJob(tunedAudio.data.job);
+const tunedOut = audioLayout(tunedAudioJob.out);
+assert.equal(tunedOut.mono, true, 'a video-derived mp3 downsamples to mono');
+assert.equal(tunedOut.rate, 22050, 'the sample rate reaches the encoder');
+assert.ok(Math.abs(audioKbps(tunedAudioJob.out) - 64) <= 8, 'the bitrate rides along too');
+
+// Fixed-rule batch: the per-row knobs reach the encoder without the model.
+const fixedAudioTune = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: stereoUpload.data.id, format: 'mp3', channels: 1, sampleRate: 24000 }] }),
+});
+assert.equal(fixedAudioTune.data.ok, true, JSON.stringify(fixedAudioTune.data));
+const fixedAudioTuneDone = await waitRun(fixedAudioTune.data.run);
+assert.equal(fixedAudioTuneDone.items[0].state, 'done');
+assert.equal(fixedAudioTuneDone.items[0].result.copy, false, 'the fixed batch re-encodes for the mono ask');
+const fixedTuneOut = audioLayout(fixedAudioTuneDone.items[0].result.file);
+assert.equal(fixedTuneOut.mono, true);
+assert.equal(fixedTuneOut.rate, 24000, 'the batch output sits at 24000 Hz');
+
+// A junk row value is dropped at the route, not clamped into a surprise.
+const junkAudioTune = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: stereoUpload.data.id, format: 'mp3', channels: 3, sampleRate: 1234 }] }),
+});
+const junkAudioTuneDone = await waitRun(junkAudioTune.data.run);
+assert.equal(junkAudioTuneDone.items[0].state, 'done', JSON.stringify(junkAudioTuneDone.items[0]));
+assert.equal(junkAudioTuneDone.items[0].result.copy, true, 'a dropped junk ask keeps the copy path');
+const junkTuneOut = audioLayout(junkAudioTuneDone.items[0].result.file);
+assert.equal(junkTuneOut.mono, false, 'junk values fall back to the source layout');
+assert.equal(junkTuneOut.rate, 44100, 'junk values fall back to the source rate');
+
+// PTC batch: the prompt carries channels/rate and the mock echoes them back.
+const ptcAudioTune = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [{ id: stereoUpload.data.id, format: 'mp3', channels: 1, sampleRate: 16000 }],
+    ptc: true,
+  }),
+});
+assert.equal(ptcAudioTune.data.ok, true, JSON.stringify(ptcAudioTune.data));
+const ptcAudioTuneDone = await waitRun(ptcAudioTune.data.run);
+assert.equal(ptcAudioTuneDone.items[0].state, 'done');
+assert.equal(ptcAudioTuneDone.items[0].result.copy, false, 'the PTC batch re-encodes for the mono ask');
+assert.match(ptcPrompt, /channels=1/, 'the prompt carries the mono target');
+assert.match(ptcPrompt, /\brate=16000/, 'the prompt carries the rate target');
+const ptcTuneOut = audioLayout(ptcAudioTuneDone.items[0].result.file);
+assert.equal(ptcTuneOut.mono, true);
+assert.equal(ptcTuneOut.rate, 16000, 'the PTC output sits at 16000 Hz');
+
+// A model plan with an out-of-range rate is refused, not clamped silently.
+const realTuneStream = llm.stream;
+llm.stream = async function* () {
+  yield {
+    type: 'text-delta',
+    index: 0,
+    text: JSON.stringify({ files: [{ id: stereoUpload.data.id, format: 'mp3', rate: 97000 }] }),
+  };
+  yield { type: 'finish', reason: { kind: 'stop' } };
+};
+const ptcBadTune = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: stereoUpload.data.id, format: 'mp3' }], ptc: true }),
+});
+const ptcBadTuneDone = await waitRun(ptcBadTune.data.run);
+assert.equal(ptcBadTuneDone.state, 'error');
+assert.match(ptcBadTuneDone.error, /采样率不合法/);
+llm.stream = realTuneStream;
+
 const audioOnly = await call('convert', {
   method: 'POST',
   body: JSON.stringify({ id: clipUpload.data.id, mode: 'extract-audio' }),
@@ -1856,6 +1987,15 @@ assert.ok(
   Math.abs(audioKbps(toolVideoBitrate.file) - 112) <= 8,
   `the tool's video-derived mp3 sits at ~112k (${audioKbps(toolVideoBitrate.file)})`,
 );
+
+// The audio knobs reach the encoder through the tool too.
+const toolMono = await media.execute(
+  { path: stereoTone, action: 'convert', format: 'mp3', channels: 1, sampleRate: 8000 },
+  exec,
+);
+const toolMonoOut = audioLayout(toolMono.file);
+assert.equal(toolMonoOut.mono, true, "the tool's mono ask reaches the encoder");
+assert.equal(toolMonoOut.rate, 8000, "the tool's rate ask reaches the encoder");
 
 const trimmedByTool = await media.execute(
   { path: clip, action: 'convert', format: 'mp4', trim: { start: 0.5, end: 1.5 } },

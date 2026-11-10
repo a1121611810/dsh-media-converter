@@ -4,7 +4,7 @@
 import { computed, ref, watch } from 'vue';
 import FileQueue from './FileQueue.vue';
 import type { QueueRow } from '../lib.js';
-import { BITRATE_OPTIONS } from '../lib.js';
+import { BITRATE_OPTIONS, CHANNEL_OPTIONS, RATE_OPTIONS } from '../lib.js';
 import type { MediaKind } from '../../../lib/plan.js';
 
 const props = defineProps<{
@@ -22,6 +22,9 @@ const props = defineProps<{
   showQuality: boolean;
   bitrate: number;
   showBitrate: boolean;
+  channels: number;
+  sampleRate: number;
+  showAudioTune: boolean;
   gifFps: number;
   gifWidth: number;
   showGif: boolean;
@@ -35,6 +38,8 @@ const emit = defineEmits<{
   'update:target': [value: string];
   'update:quality': [value: number];
   'update:bitrate': [value: number];
+  'update:channels': [value: number];
+  'update:sampleRate': [value: number];
   'update:gifFps': [value: number];
   'update:gifWidth': [value: number];
   toggle: [key: string];
@@ -59,6 +64,8 @@ const setTarget = (event: Event) => emit('update:target', (event.target as HTMLS
 const setRowTarget = (key: string, value: string) => emit('update:row-target', key, value);
 const setQuality = (event: Event) => emit('update:quality', Number((event.target as HTMLInputElement).value));
 const setBitrate = (event: Event) => emit('update:bitrate', Number((event.target as HTMLSelectElement).value));
+const setChannels = (event: Event) => emit('update:channels', Number((event.target as HTMLSelectElement).value));
+const setSampleRate = (event: Event) => emit('update:sampleRate', Number((event.target as HTMLSelectElement).value));
 const setGifFps = (event: Event) => emit('update:gifFps', Number((event.target as HTMLInputElement).value) || 0);
 const setGifWidth = (event: Event) => emit('update:gifWidth', Number((event.target as HTMLInputElement).value) || 0);
 </script>
@@ -110,6 +117,32 @@ const setGifWidth = (event: Event) => emit('update:gifWidth', Number((event.targ
         >
           <option :value="0">{{ t('bitrate.default') }}</option>
           <option v-for="option in BITRATE_OPTIONS" :key="option" :value="option">{{ option }} kbps</option>
+        </select>
+      </label>
+      <label v-if="showAudioTune" class="mc-field mc-audio-tune">
+        <span>{{ t('batch.channels') }}</span>
+        <select
+          class="mc-select"
+          :value="channels"
+          :disabled="disabled"
+          :aria-label="t('batch.channels')"
+          @change="setChannels"
+        >
+          <option :value="0">{{ t('bitrate.default') }}</option>
+          <option v-for="option in CHANNEL_OPTIONS" :key="option" :value="option">
+            {{ option === 1 ? t('audio.mono') : t('audio.stereo') }}
+          </option>
+        </select>
+        <span>{{ t('batch.rate') }}</span>
+        <select
+          class="mc-select"
+          :value="sampleRate"
+          :disabled="disabled"
+          :aria-label="t('batch.rate')"
+          @change="setSampleRate"
+        >
+          <option :value="0">{{ t('bitrate.default') }}</option>
+          <option v-for="option in RATE_OPTIONS" :key="option" :value="option">{{ option }} Hz</option>
         </select>
       </label>
       <label v-if="showGif" class="mc-field mc-gif">
