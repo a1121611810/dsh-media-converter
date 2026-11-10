@@ -571,6 +571,54 @@ assert.equal(ranged.body.length, 10);
 const sourceGone = await fetchBinary('source?id=unope');
 assert.equal(sourceGone.status, 404, 'an expired or unknown upload is reported');
 
+// --- AVIF quality: one source, three quality levels, sizes must fall --------
+// Pure-noise input separates CRF levels widely; identical bytes in, identical
+// comparison. Sizes are the assertion — args alone would stay green with a
+// broken encode. Skipped where this ffmpeg lacks libaom (homebrew 9 drops it):
+// the empty defaults keep the tool assertion below a no-op there too.
+let avifSrc = '';
+let avifDefaultSize = 0;
+if (status.data.formats.image.includes('avif')) {
+  avifSrc = path.join(outDir, 'avif-src.png');
+  execFileSync(ffmpeg, [
+    '-y',
+    '-loglevel',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    'noise=size=320x240',
+    '-frames:v',
+    '1',
+    avifSrc,
+  ]);
+  const avifUpload = await call('upload?name=avif-src.png', { method: 'POST', body: fs.readFileSync(avifSrc) });
+  assert.equal(avifUpload.data.kind, 'image');
+  const avifAt = async (quality) => {
+    const started = await call('convert', {
+      method: 'POST',
+      body: JSON.stringify({ id: avifUpload.data.id, format: 'avif', ...(quality ? { quality } : {}) }),
+    });
+    assert.equal(started.data.ok, true, JSON.stringify(started.data));
+    const job = await waitJob(started.data.job);
+    return { out: job.out, size: fs.statSync(job.out).size };
+  };
+  const avifBest = await avifAt(100); // crf 27
+  const avifDefault = await avifAt(0); // the recipe's 30
+  const avifWorst = await avifAt(1); // crf 45
+  avifDefaultSize = avifDefault.size;
+  assert.ok(
+    avifBest.size > avifDefault.size,
+    `quality 100 (crf 27) beats the default 30 (${avifBest.size} > ${avifDefault.size})`,
+  );
+  assert.ok(
+    avifDefault.size > avifWorst.size,
+    `quality 1 (crf 45) is smaller than the default (${avifDefault.size} > ${avifWorst.size})`,
+  );
+  const avifProbe = spawnSync(ffmpeg, ['-hide_banner', '-i', avifWorst.out], { encoding: 'utf8' }).stderr;
+  assert.match(avifProbe, /Video: av1/, 'the output really is AV1');
+}
+
 // --- video: GIF fps/width reach the real encoder ----------------------------
 // The output itself is the assertion: the produced GIF is read back with this
 // same ffmpeg, so a Host that drops the knobs cannot fake these numbers.
@@ -1996,6 +2044,16 @@ const toolMono = await media.execute(
 const toolMonoOut = audioLayout(toolMono.file);
 assert.equal(toolMonoOut.mono, true, "the tool's mono ask reaches the encoder");
 assert.equal(toolMonoOut.rate, 8000, "the tool's rate ask reaches the encoder");
+
+// AVIF quality through the tool: the low-quality ask lands a smaller file
+// than the default-quality convert of the same source above.
+if (avifSrc) {
+  const toolAvif = await media.execute({ path: avifSrc, action: 'convert', format: 'avif', quality: 1 }, exec);
+  assert.ok(
+    toolAvif.sizeBytes < avifDefaultSize,
+    `the tool's quality-1 avif (${toolAvif.sizeBytes}) is smaller than the default (${avifDefaultSize})`,
+  );
+}
 
 const trimmedByTool = await media.execute(
   { path: clip, action: 'convert', format: 'mp4', trim: { start: 0.5, end: 1.5 } },

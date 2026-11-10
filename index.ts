@@ -1851,7 +1851,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       `文件（共 ${files.length} 个，每行已有该文件的 target）：`,
       ...lines,
       '',
-      `质量默认：${quality}（1-100，90=默认）。对软件编码的视频映射为该编码的质量参数（x264/vp9 为 CRF，avi/wmv/ogv 为 qscale），对 GPU 硬编视频映射为目标码率倍率，对 jpg/webp 图片生效；quality 不是 90 时已强制重编码（不会走拷贝）。`,
+      `质量默认：${quality}（1-100，90=默认）。对软件编码的视频映射为该编码的质量参数（x264/vp9 为 CRF，avi/wmv/ogv 为 qscale），对 GPU 硬编视频映射为目标码率倍率，对 jpg/webp/avif 图片生效；quality 不是 90 时已强制重编码（不会走拷贝）。`,
       `各类型的可用输出格式：video=${formatsFor('video').join(', ')}；audio=${formatsFor('audio').join(', ')}；image=${formatsFor('image').join(', ')}。`,
       '',
       '只返回一个 JSON 对象。不要代码、不要解释、不要 Markdown 代码块：',
@@ -2318,7 +2318,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           quality: {
             type: 'number',
             description:
-              '质量 1-100（90=默认）：软件编码视频映射该编码的质量参数（mp4/mov/mkv/flv/ts 为 CRF，webm 为 vp9 CRF，avi/wmv/ogv 为 qscale），GPU 硬编映射码率倍率，jpg/webp 图片有效。',
+              '质量 1-100（90=默认）：软件编码视频映射该编码的质量参数（mp4/mov/mkv/flv/ts 为 CRF，webm 为 vp9 CRF，avi/wmv/ogv 为 qscale），GPU 硬编映射码率倍率，jpg/webp/avif 图片有效。',
           },
           codec: {
             type: 'string',

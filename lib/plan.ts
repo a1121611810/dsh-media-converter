@@ -249,10 +249,11 @@ const IMAGE: Record<string, string[]> = {
 
 // Lossy formats only: the UI shows its quality control for exactly these.
 // Video: the X264 containers take quality as CRF; webm as VP9 CRF; avi/wmv/ogv
-// as codec qscale. The client mirrors this (lib.ts); the two must stay in sync.
+// as codec qscale. Images: jpg/webp take their own scale, avif as AV1 CRF.
+// The client mirrors this (lib.ts); the two must stay in sync.
 export function supportsQuality(kind: MediaKind, format: string): boolean {
   return (
-    (kind === 'image' && (format === 'jpg' || format === 'webp')) ||
+    (kind === 'image' && ['jpg', 'webp', 'avif'].includes(format)) ||
     (kind === 'video' && ['mp4', 'mov', 'mkv', 'flv', 'ts', 'webm', 'avi', 'wmv', 'ogv'].includes(format))
   );
 }
@@ -475,6 +476,13 @@ function theoraQscale(quality: number): number {
   return Math.min(10, Math.max(0, Math.round(6 + (90 - quality) * 0.06)));
 }
 
+// 1..100 user quality -> libaom AV1 CRF: 90 keeps the recipe's 30. AV1
+// tolerates much higher CRFs than x264 before falling apart, hence the wider
+// clamp. libaom has no -quality option, so this rides -crf like the videos.
+function avifCrfOf(quality: number): number {
+  return Math.min(45, Math.max(20, Math.round(30 + (90 - quality) * 0.3)));
+}
+
 // Hardware encoders have no CRF (a probe of h264_videotoolbox shows no
 // quality option at all), so quality scales the bitrate the plan derives
 // from the source file: 90 (the default) leaves it unchanged.
@@ -507,6 +515,10 @@ export function buildArgs(
         const atq = args.indexOf('-q:v');
         if (atq >= 0) args[atq + 1] = String(format === 'ogv' ? theoraQscale(q) : jpegQscale(q));
       }
+    } else if (format === 'avif') {
+      // libaom has no -quality option: quality rides the recipe's -crf.
+      const at = args.indexOf('-crf');
+      if (at >= 0) args[at + 1] = String(avifCrfOf(q));
     } else {
       args.push(...(format === 'jpg' ? ['-q:v', jpegQscale(q)] : ['-quality', String(q)]));
     }

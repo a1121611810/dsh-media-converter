@@ -269,7 +269,7 @@ export function unavailableTarget(file: UploadResponse | null, target: string): 
 // shows for exactly these lossy targets, so the two must stay in sync.
 export function supportsQuality(kind: string, format: string): boolean {
   return (
-    (kind === 'image' && (format === 'jpg' || format === 'webp')) ||
+    (kind === 'image' && ['jpg', 'webp', 'avif'].includes(format)) ||
     (kind === 'video' && ['mp4', 'mov', 'mkv', 'flv', 'ts', 'webm', 'avi', 'wmv', 'ogv'].includes(format))
   );
 }

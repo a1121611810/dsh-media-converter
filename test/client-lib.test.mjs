@@ -35,6 +35,7 @@ assert.equal(previewMime('gif'), 'image/png');
 // these lossy targets.
 assert.equal(supportsQuality('image', 'jpg'), true);
 assert.equal(supportsQuality('image', 'webp'), true);
+assert.equal(supportsQuality('image', 'avif'), true);
 assert.equal(supportsQuality('image', 'png'), false);
 assert.equal(supportsQuality('video', 'mp4'), true);
 assert.equal(supportsQuality('video', 'mkv'), true);

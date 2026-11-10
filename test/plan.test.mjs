@@ -103,6 +103,15 @@ assert.deepEqual(buildArgs('image', 'jpg', 100), ['-frames:v', '1', '-q:v', '2']
 assert.equal(buildArgs('image', 'jpg', 50).at(-1), '17'); // 31 - 50*0.29 = 16.5 -> 17
 assert.equal(buildArgs('image', 'jpg', 10).at(-1), '28');
 assert.deepEqual(buildArgs('image', 'jpg', 500), ['-frames:v', '1', '-q:v', '2']); // clamped
+// AVIF takes quality as libaom CRF (the codec has no -quality option): 90
+// keeps the recipe's 30, higher is better, clamped to the sane band.
+assert.equal(supportsQuality('image', 'avif'), true);
+assert.equal(crfAt(buildArgs('image', 'avif')), '30'); // default unchanged
+assert.equal(crfAt(buildArgs('image', 'avif', 90)), '30');
+assert.equal(crfAt(buildArgs('image', 'avif', 100)), '27');
+assert.equal(crfAt(buildArgs('image', 'avif', 1)), '45'); // clamped
+assert.ok(!buildArgs('image', 'avif', 50).join(' ').includes('-quality'));
+assert.deepEqual(formatEncoders('image', 'avif'), ['libaom-av1']); // encoder scan unaffected
 
 // Audio bitrate: the four -b:a recipes take it; ogg (vorbis -q:a) and the
 // lossless formats ignore it. A video file's mp3/m4a target is an audio
