@@ -50,6 +50,8 @@ export interface ConvertRequest {
   format?: string;
   quality?: number;
   bitrate?: number;
+  fps?: number;
+  width?: number;
   mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta';
   stream?: number;
   tags?: Record<string, string>;

@@ -443,7 +443,14 @@ function hwFactorOf(quality: number): number {
   return Math.min(1.6, Math.max(0.4, 1 + (quality - 90) * 0.01));
 }
 
-export function buildArgs(kind: MediaKind, format: string, quality = 90, bitrate?: number): string[] {
+export function buildArgs(
+  kind: MediaKind,
+  format: string,
+  quality = 90,
+  bitrate?: number,
+  fps?: number,
+  width?: number,
+): string[] {
   const table = kind === 'audio' ? AUDIO : kind === 'image' ? IMAGE : VIDEO;
   const base = table[format];
   if (!base) throw new Error(`不支持的输出格式: ${format}`);
@@ -463,6 +470,14 @@ export function buildArgs(kind: MediaKind, format: string, quality = 90, bitrate
   if (supportsBitrate(kind, format) && Number.isFinite(Number(bitrate)) && Number(bitrate) > 0) {
     const at = args.indexOf('-b:a');
     if (at >= 0) args[at + 1] = String(Math.min(320, Math.max(32, Math.round(Number(bitrate))))) + 'k';
+  }
+  // GIF is the one recipe with a tunable filter chain: an explicit fps/width
+  // rebuilds the -vf value, absent/zero/garbage keeps the recipe's 12fps/640px.
+  if (format === 'gif' && (Number(fps) > 0 || Number(width) > 0)) {
+    const f = Number(fps) > 0 ? Math.min(30, Math.max(1, Math.round(Number(fps)))) : 12;
+    const w = Number(width) > 0 ? Math.min(7680, Math.max(16, Math.round(Number(width)))) : 640;
+    const at = args.indexOf('-vf');
+    if (at >= 0) args[at + 1] = `fps=${f},scale='min(${w},iw)':-2:flags=lanczos`;
   }
   return args;
 }
@@ -854,15 +869,18 @@ export function extractPlan(streams: StreamInfo, which: 'audio' | 'video'): Conv
   return { ext, kind: 'video', args: ['-map', '0:v:0', '-an', '-c:v', 'copy'] };
 }
 
-// Embedded subtitle track -> plain .srt; the language code keeps multi-track
-// exports distinguishable in the output folder.
-export function subtitlePlan(streams: StreamInfo, ordinal: number | string | undefined): ConvertPlan {
+// Embedded subtitle track -> plain text; the language code keeps multi-track
+// exports distinguishable in the output folder. srt/ass/vtt are compiled into
+// every ffmpeg build, so no encoder probing applies here.
+const SUBTITLE_FORMATS = ['srt', 'ass', 'vtt'];
+export function subtitlePlan(streams: StreamInfo, ordinal: number | string | undefined, format = 'srt'): ConvertPlan {
   const track = streams && streams.subtitles ? streams.subtitles[Number(ordinal)] : null;
   if (!track) throw new Error('这条字幕轨不存在');
+  if (!SUBTITLE_FORMATS.includes(format)) throw new Error(`不支持的字幕格式: ${format}`);
   return {
-    ext: 'srt',
+    ext: format,
     kind: 'text',
-    args: ['-map', `0:s:${Number(ordinal)}`, '-c:s', 'srt'],
+    args: ['-map', `0:s:${Number(ordinal)}`, '-c:s', format === 'vtt' ? 'webvtt' : format],
     stemSuffix: track.language ? '.' + track.language : '',
   };
 }

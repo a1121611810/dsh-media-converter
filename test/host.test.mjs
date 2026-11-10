@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import { apply, inject, probeFfmpeg, pruneUploads, resolveGroups, runJobAttempts } from '../dist/index.js';
-import { formatEncoders, parseDuration } from '../dist/lib/plan.js';
+import { formatEncoders, parseDuration, parseMeta } from '../dist/lib/plan.js';
 
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-out-'));
 // Every apply() below captures the ledger path at apply time, so the override
@@ -297,6 +297,8 @@ const llm = {
         // Echo the per-row bitrate target like a model following the prompt
         // rule; rows without one stay without one.
         ...(bitrate ? { bitrate: Number(bitrate) } : {}),
+        // Propose GIF knobs for gif targets, like a model following rule 5.
+        ...(target === 'gif' ? { fps: 6, width: 40 } : {}),
       }),
     );
     yield { type: 'text-delta', index: 0, text: JSON.stringify({ files: rows }) };
@@ -558,6 +560,124 @@ assert.equal(ranged.body.length, 10);
 const sourceGone = await fetchBinary('source?id=unope');
 assert.equal(sourceGone.status, 404, 'an expired or unknown upload is reported');
 
+// --- video: GIF fps/width reach the real encoder ----------------------------
+// The output itself is the assertion: the produced GIF is read back with this
+// same ffmpeg, so a Host that drops the knobs cannot fake these numbers.
+const gifClip = path.join(outDir, 'gif-src.mp4');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-i',
+  'testsrc=size=64x64:rate=10:duration=1',
+  '-pix_fmt',
+  'yuv420p',
+  gifClip,
+]);
+const gifClipUpload = await call('upload?name=gif-src.mp4', { method: 'POST', body: fs.readFileSync(gifClip) });
+assert.equal(gifClipUpload.data.ok, true, JSON.stringify(gifClipUpload.data));
+assert.equal(gifClipUpload.data.kind, 'video');
+
+const gifProbe = (out) => parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', out], { encoding: 'utf8' }).stderr);
+
+const tunedGifStart = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: gifClipUpload.data.id, format: 'gif', fps: 5, width: 32 }),
+});
+assert.equal(tunedGifStart.data.ok, true, JSON.stringify(tunedGifStart.data));
+const tunedGif = await waitJob(tunedGifStart.data.job);
+const tunedMeta = gifProbe(tunedGif.out);
+assert.equal(tunedMeta.video.width, 32, 'the width knob reached the encoder');
+assert.ok(Math.abs(tunedMeta.video.fps - 5) < 0.6, `gif fps is 5, read back as ${tunedMeta.video.fps}`);
+
+const defaultGifStart = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: gifClipUpload.data.id, format: 'gif' }),
+});
+assert.equal(defaultGifStart.data.ok, true, JSON.stringify(defaultGifStart.data));
+const defaultGif = await waitJob(defaultGifStart.data.job);
+const defaultMeta = gifProbe(defaultGif.out);
+assert.equal(defaultMeta.video.width, 64, 'no width knob leaves the source size alone');
+assert.ok(Math.abs(defaultMeta.video.fps - 12) < 0.6, `default gif stays 12fps, read back as ${defaultMeta.video.fps}`);
+
+// A fixed-rules batch row carries the knobs the same way the single route does.
+const batchGifStart = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: gifClipUpload.data.id, format: 'gif', fps: 6, width: 40 }] }),
+});
+assert.equal(batchGifStart.data.ok, true, JSON.stringify(batchGifStart.data));
+assert.equal(batchGifStart.data.run.kind, 'plain');
+const batchGifDone = await waitRun(batchGifStart.data.run);
+assert.equal(batchGifDone.items[0].state, 'done', batchGifDone.items[0].error);
+const batchGifMeta = gifProbe(batchGifDone.items[0].result.file);
+assert.equal(batchGifMeta.video.width, 40, 'the batch row width reached the encoder');
+assert.ok(Math.abs(batchGifMeta.video.fps - 6) < 0.6, `batch gif fps is 6, read back as ${batchGifMeta.video.fps}`);
+
+// --- subtitle export formats (real mux with an embedded track) --------------
+const subsText = '1\n00:00:00,000 --> 00:00:01,000\n你好世界\n';
+const subsFile = path.join(outDir, 'subs.srt');
+fs.writeFileSync(subsFile, subsText);
+const mkv = path.join(outDir, 'with-subs.mkv');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-i',
+  'testsrc=size=64x64:rate=10:duration=1',
+  '-i',
+  subsFile,
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  '-c:s',
+  'srt',
+  '-shortest',
+  mkv,
+]);
+const subsUpload = await call('upload?name=with-subs.mkv', { method: 'POST', body: fs.readFileSync(mkv) });
+assert.equal(subsUpload.data.ok, true, JSON.stringify(subsUpload.data));
+assert.equal(subsUpload.data.streams.subtitles.length, 1, 'the embedded subtitle track is detected');
+
+const vttStart = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: subsUpload.data.id, mode: 'subtitle', stream: 0, format: 'vtt' }),
+});
+assert.equal(vttStart.data.ok, true, JSON.stringify(vttStart.data));
+const vttJob = await waitJob(vttStart.data.job);
+assert.equal(vttJob.out.endsWith('.vtt'), true, 'the export takes the asked extension');
+const vttText = fs.readFileSync(vttJob.out, 'utf8');
+assert.ok(vttText.startsWith('WEBVTT'), 'the vtt export carries the WebVTT header');
+assert.match(vttText, /你好世界/, 'the subtitle text survives the export');
+
+const assStart = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: subsUpload.data.id, mode: 'subtitle', stream: 0, format: 'ass' }),
+});
+assert.equal(assStart.data.ok, true, JSON.stringify(assStart.data));
+const assJob = await waitJob(assStart.data.job);
+assert.match(fs.readFileSync(assJob.out, 'utf8'), /\[Script Info\]/, 'the ass export is a real ASS script');
+
+const srtStart = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: subsUpload.data.id, mode: 'subtitle', stream: 0 }),
+});
+assert.equal(srtStart.data.ok, true, JSON.stringify(srtStart.data));
+const srtJob = await waitJob(srtStart.data.job);
+assert.equal(srtJob.out.endsWith('.srt'), true, 'no format keeps the srt default');
+assert.match(fs.readFileSync(srtJob.out, 'utf8'), /00:00:00,000 --> 00:00:01,000/);
+
+const badSub = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: subsUpload.data.id, mode: 'subtitle', stream: 0, format: 'ssa' }),
+});
+assert.equal(badSub.data.ok, false);
+assert.match(badSub.data.error, /不支持的字幕格式/);
+
 // --- adding files by path (no browser upload) -----------------------------
 // The Host can read the disk itself: the panel browses a directory and
 // registers absolute paths, so a few hundred files never pass through the
@@ -669,7 +789,22 @@ assert.ok(Number(waveMatch[1]) >= 4 && Number(waveMatch[1]) <= 32, `wave ${waveM
 assert.match(ptcPrompt, /JSON/);
 assert.match(ptcPrompt, /每个文件恰好一条/);
 assert.match(ptcPrompt, new RegExp('id=' + upload.data.id));
+assert.match(ptcPrompt, /fps（1–30）与 width（≥16 像素）仅对 gif 目标有效/, 'the prompt offers the gif knobs');
 assert.equal(ptcReasoning, 'low', 'the lowest reasoning effort is requested');
+
+// A gif row planned by the model carries fps/width into the real encoder: the
+// PTC channel is the third and last path the knobs travel.
+const ptcGifStart = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: gifClipUpload.data.id, format: 'gif' }], ptc: true }),
+});
+assert.equal(ptcGifStart.data.ok, true, JSON.stringify(ptcGifStart.data));
+const ptcGifDone = await waitRun(ptcGifStart.data.run);
+assert.equal(ptcGifDone.state, 'done');
+assert.equal(ptcGifDone.items[0].state, 'done', ptcGifDone.items[0].error);
+const ptcGifMeta = gifProbe(ptcGifDone.items[0].result.file);
+assert.equal(ptcGifMeta.video.width, 40, 'the planned width reached the encoder');
+assert.ok(Math.abs(ptcGifMeta.video.fps - 6) < 0.6, `ptc gif fps is 6, read back as ${ptcGifMeta.video.fps}`);
 
 // A skipped row never reaches the model; the plan covers only real work and
 // the skipped row keeps its reason after the run.

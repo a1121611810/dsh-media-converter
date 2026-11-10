@@ -317,17 +317,101 @@ const MUTANTS = [
         s,
         `                  quality: Number(a.quality ?? quality),
                   bitrate: Number(a.bitrate ?? entry?.bitrate),
-                  hardware,
-                },
-                threads,`,
+                  fps: Number(a.fps ?? entry?.fps),`,
         `                  quality: Number(a.quality ?? quality),
                   bitrate: Number(a.bitrate ?? entry?.bitrate) * 0,
-                  hardware,
-                },
-                threads,`,
+                  fps: Number(a.fps ?? entry?.fps),`,
       ),
     distAnchor: 'Number(a.bitrate ?? entry?.bitrate) * 0',
     expect: 'PTC 计划里的码率必须作用到产物，突变后输出为拷贝/默认码率 → 测试红',
+  },
+  {
+    id: 'C1',
+    name: 'GIF fps/width 被旁路（buildArgs 恒写配方默认）',
+    // false && 仍读取 fps/width，不会 TS6133；条件永假后 -vf 永不重建。
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "if (format === 'gif' && (Number(fps) > 0 || Number(width) > 0)) {",
+        "if (format === 'gif' && false && (Number(fps) > 0 || Number(width) > 0)) {",
+      ),
+    distAnchor: "format === 'gif' && false",
+    expect: '显式 fps/width 必须重建 gif 的 -vf，突变后恒为 12fps/640px → 测试红',
+  },
+  {
+    id: 'C2',
+    name: '字幕导出格式被旁路（恒写 srt 编码器）',
+    // format 仍用于 ext 与白名单校验，不会 TS6133；编码器名恒 srt 后
+    // vtt/ass 导出名对实不对。
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "args: ['-map', `0:s:${Number(ordinal)}`, '-c:s', format === 'vtt' ? 'webvtt' : format],",
+        "args: ['-map', `0:s:${Number(ordinal)}`, '-c:s', 'srt'],",
+      ),
+    distAnchor: "'-c:s', 'srt'",
+    expect: 'vtt 导出必须用 webvtt 编码器、ass 用 ass，突变后全写成 srt → 测试红',
+  },
+  {
+    id: 'C3',
+    name: '/run 行级 GIF 参数不再进 items（固定批量丢失）',
+    // gf/gw 仍被读取使用，不会 TS6133；恒 0 越不过 >= 1 / >= 16 的闸。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'const gf = Number(row.fps);\n              const gw = Number(row.width);',
+        'const gf = Number(row.fps) * 0;\n              const gw = Number(row.width) * 0;',
+      ),
+    distAnchor: 'Number(row.fps) * 0',
+    expect: '固定规则批量的行级 fps/width 必须到达 planFor，突变后批量产物回默认 12/640 → 测试红',
+  },
+  {
+    id: 'C4',
+    name: 'PTC convert 绑定丢弃 GIF 参数（计划带了也白搭）',
+    // 正式 planFor 的 fps/width 恒 NaN（被忽略），estimate 那处本就不传。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        `                  fps: Number(a.fps ?? entry?.fps),
+                  width: Number(a.width ?? entry?.width),`,
+        `                  fps: Number(a.fps ?? entry?.fps) * 0,
+                  width: Number(a.width ?? entry?.width) * 0,`,
+      ),
+    distAnchor: 'Number(a.fps ?? entry?.fps) * 0',
+    expect: 'PTC 计划里的 gif 参数必须作用到产物，突变后输出回默认 12fps/640px → 测试红',
+  },
+  {
+    id: 'C5',
+    name: '单任务 /convert 的 GIF 参数不进 buildArgs',
+    // body.fps/width 仍被 /run 路由与 PTC 绑定读取，不会 TS6133；只有
+    // planFor 这条汇流点被掐断。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'args: buildArgs(upload.kind, format, body.quality, body.bitrate, body.fps, body.width),',
+        'args: buildArgs(upload.kind, format, body.quality, body.bitrate, 0, 0),',
+      ),
+    distAnchor: 'body.bitrate, 0, 0',
+    expect: '单任务转换的 fps/width 必须到达 ffmpeg 参数，突变后产物回默认 12/640 → 测试红',
+  },
+  {
+    id: 'C6',
+    name: '字幕导出丢面板选的格式（恒默认 srt）',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        `if (mode === 'subtitle')
+      return subtitlePlan(upload.streams, body.stream, body.format ? String(body.format) : undefined);`,
+        `if (mode === 'subtitle') return subtitlePlan(upload.streams, body.stream);`,
+      ),
+    distAnchor: 'subtitlePlan(upload.streams, body.stream)',
+    expect: '面板/工具选的 vtt/ass 必须到达 subtitlePlan，突变后全部导成 srt → 测试红',
   },
 ];
 

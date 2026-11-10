@@ -257,6 +257,12 @@ const format = ref('');
 const outputName = ref('');
 const quality = ref(90);
 const bitrate = ref(0);
+// GIF knobs: 0 means "the recipe default" (12fps / 640px), sent as undefined.
+const gifFps = ref(0);
+const gifWidth = ref(0);
+const subtitleFormat = ref('srt');
+const batchGifFps = ref(0);
+const batchGifWidth = ref(0);
 const trimStart = ref('');
 const trimEnd = ref('');
 const metaTags = ref<Record<string, string>>({});
@@ -384,6 +390,7 @@ interface QueueSection {
   showTargets: boolean;
   showQuality: boolean;
   showBitrate: boolean;
+  showGif: boolean;
   note: string;
 }
 const queueGroups = computed<QueueSection[]>(() => {
@@ -420,6 +427,11 @@ const queueGroups = computed<QueueSection[]>(() => {
           convertible &&
           operation.value === 'convert' &&
           groupItems.some((item) => supportsBitrate(convertible, effectiveTarget(item))),
+        ),
+        showGif: Boolean(
+          convertible === 'video' &&
+          operation.value === 'convert' &&
+          groupItems.some((item) => effectiveTarget(item) === 'gif'),
         ),
         note: key === 'pending' ? t('queue.pendingNote') : key === 'text' ? t('queue.textNoBatch') : '',
       },
@@ -506,6 +518,8 @@ const usesQuality = computed(() =>
 const usesBitrate = computed(() =>
   Boolean(file.value && format.value && supportsBitrate(file.value.kind, format.value)),
 );
+// GIF is a video target with its own fps/width controls; no kind helper needed.
+const isGif = computed(() => Boolean(file.value && file.value.kind === 'video' && format.value === 'gif'));
 const canExtractAudio = computed(() =>
   Boolean(file.value && file.value.kind === 'video' && file.value.streams && file.value.streams.audio),
 );
@@ -1311,6 +1325,9 @@ function initDetail(item: Item) {
   outputName.value = (item.upload?.name || item.file?.name || 'output').replace(/\.[^.]*$/, '');
   trimStart.value = '';
   trimEnd.value = '';
+  gifFps.value = 0;
+  gifWidth.value = 0;
+  subtitleFormat.value = 'srt';
   metaTags.value = Object.fromEntries(
     TAG_KEYS.map((key) => [key, (item.upload?.meta?.tags && item.upload.meta.tags[key]) || '']),
   );
@@ -1422,6 +1439,8 @@ async function runServerBatch(rows: Item[], ptc = false) {
       format: row.target,
       quality: supportsQuality(item.upload!.kind, row.target) ? batchQuality.value : undefined,
       bitrate: supportsBitrate(item.upload!.kind, row.target) ? batchBitrate.value || undefined : undefined,
+      fps: row.target === 'gif' && item.upload!.kind === 'video' ? batchGifFps.value || undefined : undefined,
+      width: row.target === 'gif' && item.upload!.kind === 'video' ? batchGifWidth.value || undefined : undefined,
       hardware: useGpu.value || undefined,
     };
   });
@@ -1529,6 +1548,8 @@ function convert() {
       format: format.value,
       quality: withQuality ? quality.value : undefined,
       bitrate: usesBitrate.value ? bitrate.value || undefined : undefined,
+      fps: isGif.value ? gifFps.value || undefined : undefined,
+      width: isGif.value ? gifWidth.value || undefined : undefined,
     },
     'fmt:' + format.value,
   );
@@ -1550,6 +1571,8 @@ function applyTrim() {
       format: format.value,
       quality: file.value.kind === 'image' ? quality.value : undefined,
       bitrate: usesBitrate.value ? bitrate.value || undefined : undefined,
+      fps: isGif.value ? gifFps.value || undefined : undefined,
+      width: isGif.value ? gifWidth.value || undefined : undefined,
       trim: { start: window.start, end: window.end },
     },
     'trim',
@@ -2008,6 +2031,9 @@ watch([action, panelOpen], async () => {
               :show-quality="group.showQuality"
               :bitrate="batchBitrate"
               :show-bitrate="group.showBitrate"
+              :gif-fps="batchGifFps"
+              :gif-width="batchGifWidth"
+              :show-gif="group.showGif"
               :note="group.note"
               :disabled="busy"
               :t="t"
@@ -2016,6 +2042,8 @@ watch([action, panelOpen], async () => {
               @update:row-target="setRowTarget"
               @update:quality="batchQuality = $event"
               @update:bitrate="batchBitrate = $event"
+              @update:gif-fps="batchGifFps = $event"
+              @update:gif-width="batchGifWidth = $event"
               @toggle="toggleChecked"
               @open="openDetail"
               @reveal="reveal"
@@ -2303,6 +2331,34 @@ watch([action, panelOpen], async () => {
                   <option v-for="option in BITRATE_OPTIONS" :key="option" :value="option">{{ option }} kbps</option>
                 </select>
               </div>
+              <div v-if="isGif && currentAction.id === 'fmt:' + format" class="mc-row">
+                <span class="mc-muted">{{ t('gif.fps') }}</span>
+                <input
+                  class="mc-name-input"
+                  style="width: 64px"
+                  type="number"
+                  min="1"
+                  max="30"
+                  v-model.number="gifFps"
+                  :disabled="busy"
+                  :placeholder="'12'"
+                  :aria-label="t('gif.fps')"
+                  @input="resetResult"
+                />
+                <span class="mc-muted">{{ t('gif.width') }}</span>
+                <input
+                  class="mc-name-input"
+                  style="width: 72px"
+                  type="number"
+                  min="16"
+                  v-model.number="gifWidth"
+                  :disabled="busy"
+                  :placeholder="'640'"
+                  :aria-label="t('gif.width')"
+                  @input="resetResult"
+                />
+                <span class="mc-muted">{{ t('gif.hint') }}</span>
+              </div>
               <div class="mc-row">
                 <button
                   class="mc-btn mc-btn-primary"
@@ -2433,6 +2489,14 @@ watch([action, panelOpen], async () => {
             </template>
 
             <template v-else-if="currentAction.id === 'subs'">
+              <div class="mc-row">
+                <span class="mc-muted">{{ t('subs.format') }}</span>
+                <select class="mc-select" v-model="subtitleFormat" :disabled="busy" :aria-label="t('subs.format')">
+                  <option v-for="option in ['srt', 'ass', 'vtt']" :key="option" :value="option">
+                    {{ option.toUpperCase() }}
+                  </option>
+                </select>
+              </div>
               <div v-for="(track, index) in meta!.subtitles" :key="index" class="mc-row">
                 <span>
                   #{{ track.index }} · {{ track.language || '?' }} · {{ track.codec
@@ -2442,7 +2506,7 @@ watch([action, panelOpen], async () => {
                   class="mc-btn mc-btn-ghost"
                   style="margin-left: auto"
                   :disabled="busy"
-                  @click="runCurrent({ mode: 'subtitle', stream: index }, 'subs')"
+                  @click="runCurrent({ mode: 'subtitle', stream: index, format: subtitleFormat }, 'subs')"
                 >
                   {{ t('sub.extract') }}
                 </button>

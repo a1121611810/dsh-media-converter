@@ -22,6 +22,9 @@ const props = defineProps<{
   showQuality: boolean;
   bitrate: number;
   showBitrate: boolean;
+  gifFps: number;
+  gifWidth: number;
+  showGif: boolean;
   note: string;
   disabled: boolean;
   t: (key: string) => string;
@@ -32,6 +35,8 @@ const emit = defineEmits<{
   'update:target': [value: string];
   'update:quality': [value: number];
   'update:bitrate': [value: number];
+  'update:gifFps': [value: number];
+  'update:gifWidth': [value: number];
   toggle: [key: string];
   open: [key: string];
   reveal: [file: string];
@@ -54,6 +59,8 @@ const setTarget = (event: Event) => emit('update:target', (event.target as HTMLS
 const setRowTarget = (key: string, value: string) => emit('update:row-target', key, value);
 const setQuality = (event: Event) => emit('update:quality', Number((event.target as HTMLInputElement).value));
 const setBitrate = (event: Event) => emit('update:bitrate', Number((event.target as HTMLSelectElement).value));
+const setGifFps = (event: Event) => emit('update:gifFps', Number((event.target as HTMLInputElement).value) || 0);
+const setGifWidth = (event: Event) => emit('update:gifWidth', Number((event.target as HTMLInputElement).value) || 0);
 </script>
 
 <template>
@@ -104,6 +111,29 @@ const setBitrate = (event: Event) => emit('update:bitrate', Number((event.target
           <option :value="0">{{ t('bitrate.default') }}</option>
           <option v-for="option in BITRATE_OPTIONS" :key="option" :value="option">{{ option }} kbps</option>
         </select>
+      </label>
+      <label v-if="showGif" class="mc-field mc-gif">
+        <span>{{ t('gif.fps') }}</span>
+        <input
+          type="number"
+          min="1"
+          max="30"
+          :value="gifFps || ''"
+          :placeholder="'12'"
+          :disabled="disabled"
+          :aria-label="t('gif.fps')"
+          @input="setGifFps"
+        />
+        <span>{{ t('gif.width') }}</span>
+        <input
+          type="number"
+          min="16"
+          :value="gifWidth || ''"
+          :placeholder="'640'"
+          :disabled="disabled"
+          :aria-label="t('gif.width')"
+          @input="setGifWidth"
+        />
       </label>
       <span v-if="!selectable" class="mc-hint">{{ note }}</span>
     </div>

@@ -11,6 +11,7 @@ import {
   extractPlan,
   kindOf,
   metaArgs,
+  mimeOf,
   normalizeStderr,
   normalizeTrim,
   parseDuration,
@@ -68,6 +69,20 @@ assert.equal(crfAt(buildArgs('video', 'mp4', 500)), '22'); // clamped
 assert.equal(crfAt(buildArgs('video', 'mov', 50)), '27');
 assert.equal(crfAt(buildArgs('video', 'webm', 50)), '32'); // vp9 recipe untouched
 assert.ok(!buildArgs('video', 'gif', 50).includes('-crf'));
+
+// GIF fps/width: the filter chain is rebuilt only when one knob is given
+// explicitly; absent/zero/garbage keeps the recipe's 12fps/640px.
+const gifFilter = (args) => args[args.indexOf('-vf') + 1];
+const GIF_VF = "fps=12,scale='min(640,iw)':-2:flags=lanczos";
+assert.equal(gifFilter(buildArgs('video', 'gif')), GIF_VF); // default unchanged
+assert.equal(gifFilter(buildArgs('video', 'gif', 90, 0, 15)), "fps=15,scale='min(640,iw)':-2:flags=lanczos");
+assert.equal(gifFilter(buildArgs('video', 'gif', 90, 0, 15, 480)), "fps=15,scale='min(480,iw)':-2:flags=lanczos");
+assert.equal(gifFilter(buildArgs('video', 'gif', 90, 0, 0, 480)), "fps=12,scale='min(480,iw)':-2:flags=lanczos");
+assert.equal(gifFilter(buildArgs('video', 'gif', 90, 0, 100)), "fps=30,scale='min(640,iw)':-2:flags=lanczos"); // clamped
+assert.equal(gifFilter(buildArgs('video', 'gif', 90, 0, 'abc')), GIF_VF); // garbage ignored
+assert.equal(gifFilter(buildArgs('video', 'gif', 90, 0, 5, 1)), "fps=5,scale='min(16,iw)':-2:flags=lanczos"); // width floor
+assert.ok(!buildArgs('video', 'mp4', 90, 0, 15).includes('-vf')); // non-gif ignores the knobs
+assert.ok(!buildArgs('video', 'gif', 90, 0, 15, 480).includes('-crf'));
 assert.deepEqual(buildArgs('image', 'webp', 80), ['-frames:v', '1', '-c:v', 'libwebp', '-quality', '80']);
 assert.deepEqual(buildArgs('image', 'jpg', 100), ['-frames:v', '1', '-q:v', '2']);
 assert.equal(buildArgs('image', 'jpg', 50).at(-1), '17'); // 31 - 50*0.29 = 16.5 -> 17
@@ -264,6 +279,22 @@ assert.deepEqual(subtitlePlan(parsed, 1), {
 });
 assert.equal(subtitlePlan(parsed, 0).stemSuffix, '.eng');
 assert.throws(() => subtitlePlan(parsed, 9), /这条字幕轨不存在/);
+// Export format: srt is the default; ass/vtt map to their ffmpeg encoders.
+assert.deepEqual(subtitlePlan(parsed, 0, 'ass'), {
+  ext: 'ass',
+  kind: 'text',
+  args: ['-map', '0:s:0', '-c:s', 'ass'],
+  stemSuffix: '.eng',
+});
+assert.deepEqual(subtitlePlan(parsed, 0, 'vtt'), {
+  ext: 'vtt',
+  kind: 'text',
+  args: ['-map', '0:s:0', '-c:s', 'webvtt'],
+  stemSuffix: '.eng',
+});
+assert.throws(() => subtitlePlan(parsed, 0, 'ssa'), /不支持的字幕格式/);
+assert.equal(mimeOf('clip.vtt'), 'text/plain; charset=utf-8');
+assert.equal(mimeOf('clip.ass'), 'text/plain; charset=utf-8');
 
 assert.deepEqual(metaArgs({ title: '标题', artist: '  ', album: '专辑' }), [
   '-map',
