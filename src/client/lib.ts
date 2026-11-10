@@ -273,9 +273,13 @@ export function supportsQuality(kind: string, format: string): boolean {
 }
 
 // Mirror of the Host's supportsBitrate (lib/plan.ts): the bitrate select
-// shows for exactly these lossy audio targets, so the two must stay in sync.
+// shows for exactly these lossy audio targets, a video file's mp3/m4a target
+// included, so the two must stay in sync.
 export function supportsBitrate(kind: string, format: string): boolean {
-  return kind === 'audio' && ['mp3', 'm4a', 'aac', 'opus'].includes(format);
+  return (
+    ['mp3', 'm4a', 'aac', 'opus'].includes(format) &&
+    (kind === 'audio' || (kind === 'video' && (format === 'mp3' || format === 'm4a')))
+  );
 }
 
 // The selectable bitrates (kbps) for the bitrate select; '' means the

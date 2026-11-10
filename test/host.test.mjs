@@ -658,7 +658,7 @@ const vttStart = await call('convert', {
 });
 assert.equal(vttStart.data.ok, true, JSON.stringify(vttStart.data));
 const vttJob = await waitJob(vttStart.data.job);
-assert.equal(vttJob.out.endsWith('.vtt'), true, 'the export takes the asked extension');
+assert.equal(vttJob.out.endsWith('.vtt'), true, `the export takes the asked extension (out=${vttJob.out})`);
 const vttText = fs.readFileSync(vttJob.out, 'utf8');
 assert.ok(vttText.startsWith('WEBVTT'), 'the vtt export carries the WebVTT header');
 assert.match(vttText, /你好世界/, 'the subtitle text survives the export');
@@ -1107,6 +1107,100 @@ const ptcBadBitrateDone = await waitRun(ptcBadBitrate.data.run);
 assert.equal(ptcBadBitrateDone.state, 'error');
 assert.match(ptcBadBitrateDone.error, /码率不合法/);
 llm.stream = realStream;
+
+// --- video -> mp3/m4a bitrate: the embedded audio track is tunable too -------
+// The mp3-audio source is the copy-trap probe: without the tuned gate its mp3
+// target would be a stream copy and the bitrate would die silently.
+const clipMp3 = path.join(outDir, 'clip-mp3.mp4');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'testsrc=size=64x64:rate=10',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'sine=frequency=440',
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  '-c:a',
+  'libmp3lame',
+  '-b:a',
+  '192k',
+  '-shortest',
+  clipMp3,
+]);
+const clipMp3Upload = await call('upload?name=clip-mp3.mp4', { method: 'POST', body: fs.readFileSync(clipMp3) });
+assert.equal(clipMp3Upload.data.kind, 'video');
+assert.equal(clipMp3Upload.data.streams.audioCodec, 'mp3');
+
+const videoAudioDefault = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipMp3Upload.data.id, format: 'mp3', bitrate: 192 }),
+});
+assert.equal(videoAudioDefault.data.job.copy, true, 'the recipe-default bitrate keeps the mp3 audio copy');
+const videoAudioReenc = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipMp3Upload.data.id, format: 'mp3', bitrate: 128 }),
+});
+assert.equal(videoAudioReenc.data.job.copy, false, 'an explicit bitrate re-encodes the embedded audio');
+const videoAudioJob = await waitJob(videoAudioReenc.data.job);
+assert.ok(
+  Math.abs(audioKbps(videoAudioJob.out) - 128) <= 8,
+  `the video-derived mp3 sits at ~128k (${audioKbps(videoAudioJob.out)})`,
+);
+
+// The aac source cannot copy to mp3; the m4a target is the copy probe for it:
+// a tuned bitrate re-encodes, and the output file really carries the rate.
+const videoM4a = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'm4a', bitrate: 96 }),
+});
+assert.equal(videoM4a.data.job.copy, false, 'a tuned m4a bitrate re-encodes the embedded aac');
+const videoM4aJob = await waitJob(videoM4a.data.job);
+assert.ok(
+  Math.abs(audioKbps(videoM4aJob.out) - 96) <= 8,
+  `the video-derived m4a sits at ~96k (${audioKbps(videoM4aJob.out)})`,
+);
+
+// Fixed-rule batch: the per-row bitrate reaches the encoder without the model.
+const fixedVideoBitrate = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: clipUpload.data.id, format: 'mp3', bitrate: 160 }] }),
+});
+assert.equal(fixedVideoBitrate.data.ok, true, JSON.stringify(fixedVideoBitrate.data));
+const fixedVideoBitrateDone = await waitRun(fixedVideoBitrate.data.run);
+assert.equal(fixedVideoBitrateDone.items[0].state, 'done');
+assert.equal(fixedVideoBitrateDone.items[0].result.copy, false, 'the fixed batch re-encodes the embedded audio');
+assert.ok(
+  Math.abs(audioKbps(fixedVideoBitrateDone.items[0].result.file) - 160) <= 8,
+  `the fixed-batch output sits at ~160k (${audioKbps(fixedVideoBitrateDone.items[0].result.file)})`,
+);
+
+// PTC batch: the prompt carries the video row's bitrate and the mock echoes it
+// back like a well-behaved model, so the whole chain is exercised.
+const ptcVideoBitrate = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: clipUpload.data.id, format: 'mp3', bitrate: 96 }], ptc: true }),
+});
+assert.equal(ptcVideoBitrate.data.ok, true, JSON.stringify(ptcVideoBitrate.data));
+const ptcVideoBitrateDone = await waitRun(ptcVideoBitrate.data.run);
+assert.equal(ptcVideoBitrateDone.items[0].state, 'done');
+assert.equal(ptcVideoBitrateDone.items[0].result.copy, false, 'the PTC batch re-encodes the embedded audio');
+assert.match(ptcPrompt, /bitrate=96/, 'the prompt carries the video row bitrate target');
+assert.ok(
+  Math.abs(audioKbps(ptcVideoBitrateDone.items[0].result.file) - 96) <= 8,
+  `the PTC output sits at ~96k (${audioKbps(ptcVideoBitrateDone.items[0].result.file)})`,
+);
 
 const audioOnly = await call('convert', {
   method: 'POST',
@@ -1756,6 +1850,13 @@ assert.ok(fs.existsSync(convertedByTool.file), 'the tool wrote its output');
 assert.equal(path.extname(convertedByTool.file), '.mp3');
 assert.ok(convertedByTool.sizeBytes > 0);
 
+// A bitrate on a video file reaches the encoder: the output itself carries it.
+const toolVideoBitrate = await media.execute({ path: clipMp3, action: 'convert', format: 'mp3', bitrate: 112 }, exec);
+assert.ok(
+  Math.abs(audioKbps(toolVideoBitrate.file) - 112) <= 8,
+  `the tool's video-derived mp3 sits at ~112k (${audioKbps(toolVideoBitrate.file)})`,
+);
+
 const trimmedByTool = await media.execute(
   { path: clip, action: 'convert', format: 'mp4', trim: { start: 0.5, end: 1.5 } },
   exec,
@@ -2214,7 +2315,7 @@ fs.writeFileSync(
   ].join('\n') + '\n',
 );
 const histPage = await histCall('history');
-assert.equal(histPage.data.ok, true);
+assert.equal(histPage.data.ok, true, JSON.stringify(histPage.data));
 assert.equal(histPage.data.total, 3, 'the torn line is skipped, not fatal');
 assert.deepEqual(
   histPage.data.items.map((item) => item.out),

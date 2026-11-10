@@ -104,14 +104,20 @@ assert.equal(buildArgs('image', 'jpg', 10).at(-1), '28');
 assert.deepEqual(buildArgs('image', 'jpg', 500), ['-frames:v', '1', '-q:v', '2']); // clamped
 
 // Audio bitrate: the four -b:a recipes take it; ogg (vorbis -q:a) and the
-// lossless formats ignore it. Absent/zero/garbage keeps the recipe default.
+// lossless formats ignore it. A video file's mp3/m4a target is an audio
+// encode, so it takes the bitrate too; other video targets do not.
+// Absent/zero/garbage keeps the recipe default.
 assert.equal(supportsBitrate('audio', 'mp3'), true);
 assert.equal(supportsBitrate('audio', 'm4a'), true);
 assert.equal(supportsBitrate('audio', 'aac'), true);
 assert.equal(supportsBitrate('audio', 'opus'), true);
 assert.equal(supportsBitrate('audio', 'ogg'), false);
 assert.equal(supportsBitrate('audio', 'flac'), false);
-assert.equal(supportsBitrate('video', 'mp3'), false);
+assert.equal(supportsBitrate('video', 'mp3'), true);
+assert.equal(supportsBitrate('video', 'm4a'), true);
+assert.equal(supportsBitrate('video', 'aac'), false);
+assert.equal(supportsBitrate('video', 'opus'), false);
+assert.equal(supportsBitrate('video', 'mp4'), false);
 const bitrateAt = (args) => {
   const at = args.indexOf('-b:a');
   return at >= 0 ? args[at + 1] : undefined;
@@ -121,6 +127,9 @@ assert.equal(bitrateAt(buildArgs('audio', 'mp3', 90, 128)), '128k');
 assert.equal(bitrateAt(buildArgs('audio', 'm4a', 90, 96)), '96k');
 assert.equal(bitrateAt(buildArgs('audio', 'opus', 90, 64)), '64k');
 assert.equal(bitrateAt(buildArgs('audio', 'opus')), '128k'); // opus default
+assert.equal(bitrateAt(buildArgs('video', 'mp3', 90, 128)), '128k'); // video->audio takes it
+assert.equal(bitrateAt(buildArgs('video', 'm4a', 90, 64)), '64k');
+assert.equal(bitrateAt(buildArgs('video', 'mp3')), '192k'); // default unchanged
 assert.equal(bitrateAt(buildArgs('audio', 'mp3', 90, 1000)), '320k'); // clamped
 assert.equal(bitrateAt(buildArgs('audio', 'mp3', 90, 0)), '192k'); // zero = unset
 assert.equal(bitrateAt(buildArgs('audio', 'mp3', 90, 'abc')), '192k'); // garbage ignored

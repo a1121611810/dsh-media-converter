@@ -257,10 +257,14 @@ export function supportsQuality(kind: MediaKind, format: string): boolean {
   );
 }
 
-// Lossy audio formats only: the bitrate control shows for exactly these. The
+// Lossy audio formats only: the bitrate control shows for exactly these,
+// including a video file turned into mp3/m4a (an audio-encode target). The
 // client mirrors this (lib.ts); the two must stay in sync.
 export function supportsBitrate(kind: MediaKind, format: string): boolean {
-  return kind === 'audio' && ['mp3', 'm4a', 'aac', 'opus'].includes(format);
+  return (
+    ['mp3', 'm4a', 'aac', 'opus'].includes(format) &&
+    (kind === 'audio' || (kind === 'video' && (format === 'mp3' || format === 'm4a')))
+  );
 }
 
 // The recipe's own -b:a value, the anchor for "explicitly asked for the

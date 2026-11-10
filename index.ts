@@ -1747,11 +1747,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     // source could just be copied is a real re-encode request. Compared against
     // the recipe's own default, so asking for 192 keeps the copy fast path.
     const bitrateTuned =
-      upload.kind === 'audio' &&
       supportsBitrate(upload.kind, format) &&
       Number(body.bitrate) > 0 &&
       Math.round(Number(body.bitrate)) !== defaultBitrate(format);
-    // The same rule for an explicit GPU codec: asking for HEVC when the
+    // The same rule for an explicit audio codec: asking for HEVC when the
     // source could just be copied is a real re-encode request.
     const codecTuned = upload.kind === 'video' && String(body.codec || '') === 'hevc';
     if (!trim && !qualityTuned && !bitrateTuned && !codecTuned) {
@@ -2219,7 +2218,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
         '③extract-audio 抽音轨、④extract-video 抽画面（不重编码）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）。' +
-        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；指定 codec（h264/hevc）即视同请求 GPU 硬编（无显卡时自动回退软件编码；hevc 仅 mp4/mov/mkv/ts 有效，体积更小）；音频文件转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；视频文件内嵌音轨的码率不受此参数控制）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
+        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；指定 codec（h264/hevc）即视同请求 GPU 硬编（无显卡时自动回退软件编码；hevc 仅 mp4/mov/mkv/ts 有效，体积更小）；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；视频转视频时内嵌音轨不受此参数控制）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
         properties: {
@@ -2251,7 +2250,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           },
           bitrate: {
             type: 'number',
-            description: '音频码率 kbps（32-320，仅音频文件转 mp3/m4a/aac/opus；0 或不填用配方默认 192/128）。',
+            description:
+              '音频码率 kbps（32-320，仅音频编码目标 mp3/m4a/aac/opus：音频文件直转，或视频转 mp3/m4a；0 或不填用配方默认 192/128）。',
           },
           fps: {
             type: 'number',

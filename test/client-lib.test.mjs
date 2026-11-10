@@ -45,13 +45,16 @@ assert.equal(supportsQuality('video', 'gif'), false);
 assert.equal(supportsQuality('audio', 'mp3'), false);
 
 // Mirror of the Host's supportsBitrate: the bitrate select shows for exactly
-// these lossy audio targets.
+// these lossy audio targets, a video file's mp3/m4a target included.
 assert.equal(supportsBitrate('audio', 'mp3'), true);
 assert.equal(supportsBitrate('audio', 'm4a'), true);
 assert.equal(supportsBitrate('audio', 'opus'), true);
 assert.equal(supportsBitrate('audio', 'ogg'), false);
 assert.equal(supportsBitrate('audio', 'flac'), false);
-assert.equal(supportsBitrate('video', 'mp3'), false);
+assert.equal(supportsBitrate('video', 'mp3'), true);
+assert.equal(supportsBitrate('video', 'm4a'), true);
+assert.equal(supportsBitrate('video', 'aac'), false);
+assert.equal(supportsBitrate('video', 'mp4'), false);
 assert.equal(supportsBitrate('image', 'jpg'), false);
 
 // removeUploadRow: the async core of 移除. The race case is the point — two
