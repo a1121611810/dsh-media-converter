@@ -572,10 +572,14 @@ const sourceGone = await fetchBinary('source?id=unope');
 assert.equal(sourceGone.status, 404, 'an expired or unknown upload is reported');
 
 // --- AVIF quality: one source, three quality levels, sizes must fall --------
-// Pure-noise input separates CRF levels widely; identical bytes in, identical
-// comparison. Sizes are the assertion — args alone would stay green with a
-// broken encode. Skipped where this ffmpeg lacks libaom (homebrew 9 drops it):
-// the empty defaults keep the tool assertion below a no-op there too.
+// Pure noise separates CRF levels by an order of magnitude (53 KB / 46 KB /
+// 8 KB at crf 27/30/45 on the reference build), so the ordering cannot flip
+// across libaom versions. The noise rides the `noise` FILTER (options stable
+// since 2015), not the noise lavfi source (ffmpeg 9 dropped its size option —
+// that incompatibility is what killed the v1.11.0 CI run). Sizes are the
+// assertion — args alone would stay green with a broken encode. Skipped where
+// this ffmpeg lacks libaom (homebrew 9 drops it): the empty defaults keep the
+// tool assertion below a no-op there too.
 let avifSrc = '';
 let avifDefaultSize = 0;
 if (status.data.formats.image.includes('avif')) {
@@ -587,7 +591,9 @@ if (status.data.formats.image.includes('avif')) {
     '-f',
     'lavfi',
     '-i',
-    'noise=size=320x240',
+    'color=black:size=320x240:rate=10',
+    '-vf',
+    'noise=alls=25:allf=t',
     '-frames:v',
     '1',
     avifSrc,
