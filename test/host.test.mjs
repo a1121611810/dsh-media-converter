@@ -2420,13 +2420,12 @@ await call('config', { method: 'POST', body: JSON.stringify({ extensions: preset
 const probeOut = (out) => parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', out], { encoding: 'utf8' }).stderr);
 
 // A macro is the convert action with fixed params: the webp comes out re-encoded.
-const macroJob = (
-  await call('convert', {
-    method: 'POST',
-    body: JSON.stringify({ id: upload.data.id, preset: 'x:wechat-image/wx-webp' }),
-  })
-).data.job;
-const macroDone = await waitJob(macroJob);
+const macroRes = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: upload.data.id, preset: 'x:wechat-image/wx-webp' }),
+});
+assert.equal(macroRes.data.ok, true, JSON.stringify(macroRes.data));
+const macroDone = await waitJob(macroRes.data.job);
 assert.ok(macroDone.out.endsWith('.' + macroFormat), 'a macro lands on the pack format');
 assert.equal(
   probeOut(macroDone.out).video.codec,
@@ -2435,13 +2434,12 @@ assert.equal(
 );
 
 // A recipe overrides the built-in mp4 recipe: h264/aac would otherwise copy.
-const recipeJob = (
-  await call('convert', {
-    method: 'POST',
-    body: JSON.stringify({ id: clipUpload.data.id, preset: 'x:slow-mp4/x265', quality: 100 }),
-  })
-).data.job;
-const recipeDone = await waitJob(recipeJob);
+const recipeRes = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, preset: 'x:slow-mp4/x265', quality: 100 }),
+});
+assert.equal(recipeRes.data.ok, true, JSON.stringify(recipeRes.data));
+const recipeDone = await waitJob(recipeRes.data.job);
 assert.equal(recipeDone.copy, false, 'a recipe always re-encodes, never copies');
 assert.equal(probeOut(recipeDone.out).video.codec, 'hevc', 'the override recipe replaces the built-in x264 one');
 
@@ -2454,10 +2452,12 @@ assert.equal(ghost.data.error, '扩展预设不存在：x:slow-mp4/ghost');
 
 // Clearing the packs restores the built-in behaviour: mp4 copies h264 again.
 await call('config', { method: 'POST', body: JSON.stringify({ extensions: '' }) });
-const plainJob = (
-  await call('convert', { method: 'POST', body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4' }) })
-).data.job;
-const plainDone = await waitJob(plainJob);
+const plainRes = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4' }),
+});
+assert.equal(plainRes.data.ok, true, JSON.stringify(plainRes.data));
+const plainDone = await waitJob(plainRes.data.job);
 assert.equal(plainDone.copy, true, 'the copy fast path returns once the override is gone');
 assert.equal(probeOut(plainDone.out).video.codec, 'h264', 'the built-in mp4 recipe is back');
 
