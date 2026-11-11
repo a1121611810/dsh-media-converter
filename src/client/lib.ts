@@ -55,6 +55,9 @@ export interface ConvertRequest {
   sampleRate?: number;
   fps?: number;
   width?: number;
+  // Track ordinals within the type (1 = second track); 0/absent = source default.
+  videoTrack?: number;
+  audioTrack?: number;
   mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta';
   stream?: number;
   tags?: Record<string, string>;

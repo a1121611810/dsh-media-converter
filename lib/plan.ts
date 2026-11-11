@@ -813,10 +813,14 @@ export function parseStreams(stderr: string) {
 
 // The parseStreams() shape built straight from a parsed meta, so the ffprobe
 // route can produce the identical structure without re-parsing stderr.
+// The per-type counts drive track selection (convert) and the PTC prompt:
+// an ordinal ask is validated against them before it reaches an ffmpeg arg.
 export function streamInfoOf(meta: MediaMeta) {
   return {
     video: Boolean(meta.video),
     audio: Boolean(meta.audio),
+    videoCount: meta.streams.filter((item) => item.type === 'video').length,
+    audioCount: meta.streams.filter((item) => item.type === 'audio').length,
     videoCodec: meta.video ? meta.video.codec : '',
     audioCodec: meta.audio ? meta.audio.codec : '',
     subtitles: meta.subtitles,
@@ -965,16 +969,25 @@ const VIDEO_CONTAINER: Record<string, string> = {
 };
 
 // Stream copy: separating the tracks costs a container rewrite, not an encode.
-export function extractPlan(streams: StreamInfo, which: 'audio' | 'video'): ConvertPlan {
+// `ordinal` picks within the type (0 = first = historical default), so a
+// second audio track can be lifted without re-encoding.
+export function extractPlan(streams: StreamInfo, which: 'audio' | 'video', ordinal = 0): ConvertPlan {
+  const at = Math.max(0, Math.round(Number(ordinal) || 0));
   if (which === 'audio') {
     if (!streams || !streams.audio) throw new Error('该文件没有音轨');
+    if ((streams.audioCount || 0) > 0 && at >= (streams.audioCount || 0)) {
+      throw new Error(`音轨序号 ${at} 不存在（共 ${streams.audioCount} 条）`);
+    }
     const codec = streams.audioCodec || '';
     const ext = AUDIO_CONTAINER[codec] || (codec.startsWith('pcm_') ? 'wav' : 'm4a');
-    return { ext, kind: 'audio', args: ['-map', '0:a:0', '-vn', '-c:a', 'copy'] };
+    return { ext, kind: 'audio', args: ['-map', `0:a:${at}`, '-vn', '-c:a', 'copy'] };
   }
   if (!streams || !streams.video) throw new Error('该文件没有画面');
+  if ((streams.videoCount || 0) > 0 && at >= (streams.videoCount || 0)) {
+    throw new Error(`画面轨序号 ${at} 不存在（共 ${streams.videoCount} 条）`);
+  }
   const ext = VIDEO_CONTAINER[streams.videoCodec] || 'mkv';
-  return { ext, kind: 'video', args: ['-map', '0:v:0', '-an', '-c:v', 'copy'] };
+  return { ext, kind: 'video', args: ['-map', `0:v:${at}`, '-an', '-c:v', 'copy'] };
 }
 
 // Embedded subtitle track -> plain text; the language code keeps multi-track

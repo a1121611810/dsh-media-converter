@@ -10,7 +10,7 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 
 | 动作 | 说明 |
 | --- | --- |
-| 转成 X | 视频 12 种（mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif/mp3/m4a）、音频 8 种（mp3/m4a/aac/wav/flac/ogg/opus/aiff）、图片 7 种（png/jpg/webp/gif/bmp/tiff/avif）；按本机 ffmpeg 实际具备的编码器过滤——如 homebrew ffmpeg 9 缺 libtheora/libvorbis/libaom/libwebp，则不显示 ogv/ogg/avif/webp |
+| 转成 X | 视频 12 种（mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif/mp3/m4a）、音频 8 种（mp3/m4a/aac/wav/flac/ogg/opus/aiff）、图片 7 种（png/jpg/webp/gif/bmp/tiff/avif）；按本机 ffmpeg 实际具备的编码器过滤——如 homebrew ffmpeg 9 缺 libtheora/libvorbis/libaom/libwebp，则不显示 ogv/ogg/avif/webp；多轨文件可选轨：视频转视频选画面轨、带音频输出选音轨（详情页下拉，第 2 条起，显式选轨将禁用直接拷贝） |
 | 裁一段 | 从播放器取起点/终点，或手填 `分:秒`；裁剪与转换一次完成 |
 | 提取音频 / 提取画面 | 直接拷贝轨道，不重编码 |
 | 提取字幕 | 内嵌字幕轨导出 `.srt`/`.ass`/`.vtt`（可选），文件名带语言码（如 `clip.chi.srt`） |
@@ -57,8 +57,8 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | action | 作用 |
 | --- | --- |
 | `probe` | 读时长、分辨率、编码、音轨、字幕轨、标签 |
-| `convert` | 转格式（可带 `trim` 裁剪；`quality` 1-100：软件编码视频映射各编码质量参数——mp4/mov/mkv/flv/ts 为 CRF、webm 为 vp9 CRF、avi/wmv/ogv 为 qscale——GPU 硬编映射目标码率倍率，图片 jpg/webp/avif 有效；转 mp3/m4a/aac/opus 可带 `bitrate` kbps 32-320，音频编码目标可带 `channels` 1/2 与 `sampleRate` Hz 8000-96000——GPU 硬编时这三个音轨参数对 mp4/mov/mkv/flv/ts 的输出音轨同样生效；指定 `codec`（h264/hevc）即视同请求 GPU 硬编，hevc 仅 mp4/mov/mkv/ts） |
-| `extract-audio` / `extract-video` | 抽音轨 / 抽画面，不重编码 |
+| `convert` | 转格式（可带 `trim` 裁剪；`quality` 1-100：软件编码视频映射各编码质量参数——mp4/mov/mkv/flv/ts 为 CRF、webm 为 vp9 CRF、avi/wmv/ogv 为 qscale——GPU 硬编映射目标码率倍率，图片 jpg/webp/avif 有效；转 mp3/m4a/aac/opus 可带 `bitrate` kbps 32-320，音频编码目标可带 `channels` 1/2 与 `sampleRate` Hz 8000-96000——GPU 硬编时这三个音轨参数对 mp4/mov/mkv/flv/ts 的输出音轨同样生效；指定 `codec`（h264/hevc）即视同请求 GPU 硬编，hevc 仅 mp4/mov/mkv/ts；多轨文件可带 `videoTrack`/`audioTrack` 选类型内第几条画面/音轨，1=第二条，0 或不填走默认轨，显式选轨将禁用直接拷贝） |
+| `extract-audio` / `extract-video` | 抽音轨 / 抽画面，不重编码（多轨文件可带 `stream` 选类型内第几条，0=第一条） |
 | `subtitle` | 导出内嵌字幕为 `.srt`/`.ass`/`.vtt`（`format` 选格式，默认 srt） |
 | `rewrite-tags` | 改写标题/作者/专辑/备注/日期/流派 |
 
@@ -216,6 +216,7 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位。`t` 由平台按槽�
 - 扩展：每包 ≤16 动作、合计 ≤32、一包单一 kind；配方只许白名单内的输出侧 ffmpeg 参数（禁 `-i`/`-filter_complex`/lavfi/路径），不支持新格式名；宏只在匹配 kind 的文件上出现。
 - 上传单文件上限 2048 MB（`maxUploadMb` 可调）。
 - 裁剪区间必须落在文件时长内；区间无效时按钮不可用。
+- 选轨（`videoTrack`/`audioTrack`/`stream`）是类型内序号，1=第二条，0/不填=默认轨；越界或误用（如给图片输出选音轨）直接报错；显式选轨禁用直接拷贝；批量转换不支持选轨，PTC 计划可带 `vtrack`/`atrack`（模型只能选探测到的范围）。
 - 视频转 GIF 默认缩到宽 640、12 fps；普通视频转换也可选输出宽度上限与帧率（等比不放大，留空保持源分辨率/帧率）。
 - 批量按类型分组：视频/音频/图片各自一个目标；文本单独一段、不参与转换；读取中/未识别不可批量。
 - 批量提取只处理视频；不适用或没有音轨的行标「跳过」，不算失败。

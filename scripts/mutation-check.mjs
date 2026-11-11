@@ -533,12 +533,12 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        `      body.fps,
-      body.width,
-      body.channels,`,
-        `      0,
-      0,
-      body.channels,`,
+        `        body.fps,
+        body.width,
+        body.channels,`,
+        `        0,
+        0,
+        body.channels,`,
       ),
     distAnchor: 'body.bitrate, 0, 0',
     expect: '单任务转换的 fps/width 必须到达 ffmpeg 参数，突变后产物回默认 12/640 → 测试红',
@@ -914,6 +914,39 @@ const MUTANTS = [
       replaceOnce(s, 'preset: a.preset !== undefined ? String(a.preset) : undefined,', 'preset: undefined,'),
     distAnchor: 'preset: undefined,',
     expect: '工具的 preset 参数必须到达 planFor，突变后按普通 convert 跑默认格式 → host 工具预设断言红',
+  },
+  // --- T 家族：选轨（R1，source/test/dist 都在注册表层）-----------------------
+  {
+    id: 'T1',
+    name: '选画面轨的 map 被写成音轨',
+    source: 'lib/actions.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/actions.js',
+    apply: (s) => replaceOnce(s, "trackMaps.push('-map', `0:v:${vtrack}`)", "trackMaps.push('-map', `0:a:${vtrack}`)"),
+    distAnchor: "trackMaps.push('-map', `0:a:${vtrack}`)",
+    expect: 'videoTrack=1 必须注入 0:v:1，突变后写成 0:a:1 → plan 选轨断言红',
+  },
+  {
+    id: 'T2',
+    name: '选音轨的 map 被写成画面轨',
+    source: 'lib/actions.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/actions.js',
+    apply: (s) => replaceOnce(s, "trackMaps.push('-map', `0:a:${atrack}`)", "trackMaps.push('-map', `0:v:${atrack}`)"),
+    distAnchor: "trackMaps.push('-map', `0:v:${atrack}`)",
+    expect: 'audioTrack=1 必须注入 0:a:1，突变后写成 0:v:1 → plan 选轨断言红',
+  },
+  {
+    id: 'T3',
+    name: '选轨 copy 门禁被反转（不选轨也禁拷贝）',
+    // 不能删 `&& !trackTuned`：那是 trackTuned 的唯一使用点，删除即 TS6133
+    // 构建失败（假红）。反转成“必须选轨才给拷贝”：未选轨的直拷贝被堵死。
+    source: 'lib/actions.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/actions.js',
+    apply: (s) => replaceOnce(s, '!trackTuned &&', '!!trackTuned &&'),
+    distAnchor: '!!trackTuned &&',
+    expect: '未选轨的 mp4 直拷贝必须保留，突变后永不拷贝 → plan copy 断言红',
   },
 ];
 

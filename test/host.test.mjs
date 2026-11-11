@@ -1014,6 +1014,8 @@ assert.ok(Math.abs(clipUpload.data.duration - 2) < 0.3, `duration ${clipUpload.d
 assert.deepEqual(clipUpload.data.streams, {
   video: true,
   audio: true,
+  videoCount: 1,
+  audioCount: 1,
   videoCodec: 'h264',
   audioCodec: 'aac',
   subtitles: [],
@@ -1063,6 +1065,96 @@ const reencodeQ50 = await call('convert', {
 assert.equal(reencodeQ50.data.job.copy, false, 'an explicit quality forces the re-encode');
 const reencodeJob = await waitJob(reencodeQ50.data.job);
 assert.ok(fs.existsSync(reencodeJob.out), 'the re-encoded output lands on disk');
+
+// --- track selection (R1): an explicit pick maps that track; out-of-range is
+// refused. The .3gp name keeps the fake ffprobe away (no answer for that
+// extension), so this upload is probed for real and carries two audio
+// streams with language tags — the language is what the read-back asserts
+// against: state=done alone would be a fake green, a wrong-track output
+// "finishes" just as happily.
+const dual = path.join(outDir, 'dual.3gp');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-i',
+  'testsrc=duration=2:size=320x240:rate=10',
+  '-f',
+  'lavfi',
+  '-i',
+  'sine=frequency=440:duration=2',
+  '-f',
+  'lavfi',
+  '-i',
+  'sine=frequency=880:duration=2',
+  '-map',
+  '0:v',
+  '-map',
+  '1:a',
+  '-map',
+  '2:a',
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  '-c:a',
+  'aac',
+  '-metadata:s:a:0',
+  'language=chi',
+  '-metadata:s:a:1',
+  'language=eng',
+  '-shortest',
+  dual,
+]);
+const dualUpload = await call('upload?name=dual.3gp', { method: 'POST', body: fs.readFileSync(dual) });
+assert.equal(dualUpload.data.ok, true, JSON.stringify(dualUpload.data));
+assert.equal(dualUpload.data.streams.audioCount, 2, 'real probing sees both audio tracks');
+
+const pickedAudio = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: dualUpload.data.id, format: 'mp4', audioTrack: 1 }),
+});
+assert.equal(pickedAudio.data.ok, true, JSON.stringify(pickedAudio.data));
+assert.equal(pickedAudio.data.job.copy, false, 'an explicit track pick forces the re-encode');
+const pickedDone = await waitJob(pickedAudio.data.job);
+const pickedMeta = parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', pickedDone.out], { encoding: 'utf8' }).stderr);
+assert.equal(
+  pickedMeta.streams.filter((stream) => stream.type === 'audio').length,
+  1,
+  'the output carries exactly one audio stream',
+);
+assert.equal(pickedMeta.audio.language, 'eng', 'the picked (second) track is the one in the output');
+
+const defaultAudio = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: dualUpload.data.id, format: 'mp4' }),
+});
+const defaultDone = await waitJob(defaultAudio.data.job);
+const defaultPickMeta = parseMeta(
+  spawnSync(ffmpeg, ['-hide_banner', '-i', defaultDone.out], { encoding: 'utf8' }).stderr,
+);
+assert.equal(defaultPickMeta.audio.language, 'chi', 'without a pick the first track stays the default');
+
+const badPick = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: dualUpload.data.id, format: 'mp4', audioTrack: 9 }),
+});
+assert.equal(badPick.data.ok, false, 'an out-of-range track ordinal is refused');
+assert.match(badPick.data.error, /音轨序号 9 不存在/);
+
+// extract honors the per-type ordinal too.
+const pickedExtract = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: dualUpload.data.id, mode: 'extract-audio', stream: 1 }),
+});
+assert.equal(pickedExtract.data.ok, true, JSON.stringify(pickedExtract.data));
+const pickedExtractDone = await waitJob(pickedExtract.data.job);
+const extractMeta = parseMeta(
+  spawnSync(ffmpeg, ['-hide_banner', '-i', pickedExtractDone.out], { encoding: 'utf8' }).stderr,
+);
+assert.equal(extractMeta.audio.language, 'eng', 'extract with stream:1 lifts the second track');
 
 // --- audio bitrate: an explicit kbps re-encodes, the default keeps the copy --
 const tone = path.join(outDir, 'tone.mp3');
@@ -1144,6 +1236,7 @@ const ptcBitrateDone = await waitRun(ptcBitrate.data.run);
 assert.equal(ptcBitrateDone.items[0].state, 'done');
 assert.equal(ptcBitrateDone.items[0].result.copy, false, 'the PTC batch re-encodes for the bitrate');
 assert.match(ptcPrompt, /bitrate=96/, 'the prompt carries the per-row bitrate target');
+assert.match(ptcPrompt, /vtracks=\d+ atracks=\d+/, 'the prompt carries the per-type track counts');
 assert.ok(
   Math.abs(audioKbps(ptcBitrateDone.items[0].result.file) - 96) <= 8,
   `the PTC output sits at ~96k (${audioKbps(ptcBitrateDone.items[0].result.file)})`,
@@ -1166,6 +1259,24 @@ const ptcBadBitrate = await call('run', {
 const ptcBadBitrateDone = await waitRun(ptcBadBitrate.data.run);
 assert.equal(ptcBadBitrateDone.state, 'error');
 assert.match(ptcBadBitrateDone.error, /码率不合法/);
+llm.stream = realStream;
+
+// A model plan naming a track the file does not have is refused, not clamped.
+llm.stream = async function* () {
+  yield {
+    type: 'text-delta',
+    index: 0,
+    text: JSON.stringify({ files: [{ id: toneUpload.data.id, format: 'mp3', atrack: 9 }] }),
+  };
+  yield { type: 'finish', reason: { kind: 'stop' } };
+};
+const ptcBadTrack = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: toneUpload.data.id, format: 'mp3', bitrate: 96 }], ptc: true }),
+});
+const ptcBadTrackDone = await waitRun(ptcBadTrack.data.run);
+assert.equal(ptcBadTrackDone.state, 'error');
+assert.match(ptcBadTrackDone.error, /atrack 不合法/);
 llm.stream = realStream;
 
 // --- video -> mp3/m4a bitrate: the embedded audio track is tunable too -------

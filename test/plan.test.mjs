@@ -251,10 +251,20 @@ const stderr = [
   '  Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz, mono, fltp, 110 kb/s',
 ].join('\n');
 const streams = parseStreams(stderr);
-assert.deepEqual(streams, { video: true, audio: true, videoCodec: 'h264', audioCodec: 'aac', subtitles: [] });
+assert.deepEqual(streams, {
+  video: true,
+  audio: true,
+  videoCount: 1,
+  audioCount: 1,
+  videoCodec: 'h264',
+  audioCodec: 'aac',
+  subtitles: [],
+});
 assert.deepEqual(parseStreams('Stream #0:0: Video: png, rgb24'), {
   video: true,
   audio: false,
+  videoCount: 1,
+  audioCount: 0,
   videoCodec: 'png',
   audioCodec: '',
   subtitles: [],
@@ -413,9 +423,13 @@ const coverOnly = parseMeta(coverStderr);
 assert.equal(coverOnly.video, null, 'cover art is not the picture track');
 assert.equal(coverOnly.audio.index, 0);
 assert.deepEqual(coverOnly.streams[1].flags, ['attached_pic']);
+// The counts are raw stream-list counts: cover art is a video-typed stream
+// (so videoCount 1) without being the picture track (video stays false).
 assert.deepEqual(parseStreams(coverStderr), {
   video: false,
   audio: true,
+  videoCount: 1,
+  audioCount: 1,
   videoCodec: '',
   audioCodec: 'aac',
   subtitles: [],
@@ -733,3 +747,101 @@ assert.deepEqual(ptcFormats('video', ['convert']), FORMATS.video);
 assert.deepEqual(ptcFormats('video', ['extract-audio']), []);
 
 console.log('plan.test.mjs: ok');
+
+// --- 选轨（R1）：convert 的 videoTrack/audioTrack ------------------------------
+// 注册表驱动：显式选轨注入 -map 并禁用直接拷贝；越界与误用即报错，绝不静默
+// 丢进 ffmpeg。extract 的类型内序号同理（0=第一条=历史默认）。
+const trackStream = (index, type, codec, language = '') => ({
+  index,
+  type,
+  codec,
+  profile: '',
+  tag: '',
+  language,
+  flags: [],
+  tags: {},
+});
+const trackMetaOf = (streams) => ({
+  format: 'mov,mp4,m4a,3gp,3g2,mj2',
+  duration: 6,
+  start: 0,
+  bitrate: 200000,
+  streams,
+  chapters: [],
+  tags: {},
+  video: streams.find((s) => s.type === 'video') || null,
+  audio: streams.find((s) => s.type === 'audio') || null,
+  subtitles: [],
+});
+const trackUpload = (audioN, videoN = 1) => {
+  const streams = [];
+  for (let i = 0; i < videoN; i += 1) streams.push(trackStream(streams.length, 'video', 'h264'));
+  for (let i = 0; i < audioN; i += 1) streams.push(trackStream(streams.length, 'audio', 'aac', i ? 'eng' : 'chi'));
+  return {
+    id: 'u1',
+    name: 'clip.mp4',
+    path: '/tmp/clip.mp4',
+    owned: false,
+    kind: videoN ? 'video' : audioN ? 'audio' : 'image',
+    duration: 6,
+    size: 1000000,
+    at: 0,
+    streams: {
+      video: videoN > 0,
+      audio: audioN > 0,
+      videoCount: videoN,
+      audioCount: audioN,
+      videoCodec: videoN ? 'h264' : '',
+      audioCodec: audioN ? 'aac' : '',
+      subtitles: [],
+    },
+    meta: trackMetaOf(streams),
+  };
+};
+const convertEntry = ACTIONS.find((entry) => entry.id === 'convert');
+
+// h264+aac → mp4 本来直接拷贝；显式选轨必须是重编码并注入对应 -map。
+const copyPlan = convertEntry.plan(trackUpload(1), { format: 'mp4' }, 0, null);
+assert.equal(copyPlan.copy, true, '未选轨时保留直接拷贝');
+const picked = convertEntry.plan(trackUpload(2), { format: 'mp4', audioTrack: 1 }, 0, null);
+assert.ok(!picked.copy, '显式选轨禁用直接拷贝');
+assert.deepEqual(picked.args.slice(0, 2), ['-map', '0:a:1'], '选轨注入 0:a:1');
+const dualVideo = convertEntry.plan(trackUpload(1, 2), { format: 'mp4', videoTrack: 1 }, 0, null);
+assert.deepEqual(dualVideo.args.slice(0, 2), ['-map', '0:v:1'], '选画面轨注入 0:v:1');
+const oneSide = convertEntry.plan(trackUpload(2), { format: 'mp4', audioTrack: 1 }, 0, null);
+assert.ok(!oneSide.args.includes('0:v:0'), '只选音轨时不注入画面 map（保持默认选择）');
+
+// 越界与误用：报错而不是静默忽略或丢给 ffmpeg。
+assert.throws(
+  () => convertEntry.plan(trackUpload(2), { format: 'mp4', audioTrack: 5 }, 0, null),
+  /音轨序号 5 不存在（共 2 条）/,
+);
+assert.throws(
+  () => convertEntry.plan(trackUpload(1), { format: 'mp4', videoTrack: 1 }, 0, null),
+  /画面轨序号 1 不存在/,
+);
+assert.throws(
+  () => convertEntry.plan(trackUpload(1, 0), { format: 'mp3', videoTrack: 1 }, 0, null),
+  /videoTrack 仅对视频转视频目标有效/,
+);
+assert.throws(
+  () => convertEntry.plan(trackUpload(0, 0), { format: 'png', audioTrack: 1 }, 0, null),
+  /audioTrack 不适用于图片输出/,
+);
+
+// extract 的类型内序号：map 跟着序号走，越界报错。
+const twoAudio = {
+  video: true,
+  audio: true,
+  videoCount: 1,
+  audioCount: 2,
+  videoCodec: 'h264',
+  audioCodec: 'aac',
+  subtitles: [],
+};
+assert.deepEqual(extractPlan(twoAudio, 'audio', 1).args, ['-map', '0:a:1', '-vn', '-c:a', 'copy']);
+assert.deepEqual(extractPlan(twoAudio, 'audio').args, ['-map', '0:a:0', '-vn', '-c:a', 'copy'], '缺省仍是第一条');
+assert.throws(() => extractPlan(twoAudio, 'audio', 2), /音轨序号 2 不存在/);
+assert.throws(() => extractPlan(twoAudio, 'video', 1), /画面轨序号 1 不存在/);
+
+console.log('plan: 选轨用例 ok');

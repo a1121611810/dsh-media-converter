@@ -48,6 +48,25 @@ function convertPlan(
     throw new Error(`不支持的输出格式: ${format}`);
   }
   const trim = normalizeTrim(body.trim, upload.duration);
+  // Track selection rides the same idiom as fps/width: 0/absent keeps the
+  // source default, a positive ordinal picks within the type. The ordinals
+  // are validated against the probed stream list before they can reach an
+  // ffmpeg arg, and misdirected asks fail instead of being silently dropped.
+  const vtrack = Math.max(0, Math.round(Number(body.videoTrack) || 0));
+  const atrack = Math.max(0, Math.round(Number(body.audioTrack) || 0));
+  if (vtrack > 0) {
+    if (upload.kind !== 'video' || kindByExt(format) !== 'video') {
+      throw new Error('videoTrack 仅对视频转视频目标有效');
+    }
+    const count = upload.meta.streams.filter((item) => item.type === 'video').length;
+    if (vtrack >= count) throw new Error(`画面轨序号 ${vtrack} 不存在（共 ${count} 条）`);
+  }
+  if (atrack > 0) {
+    if (kindByExt(format) === 'image') throw new Error('audioTrack 不适用于图片输出');
+    const count = upload.meta.streams.filter((item) => item.type === 'audio').length;
+    if (count === 0) throw new Error('该文件没有音轨');
+    if (atrack >= count) throw new Error(`音轨序号 ${atrack} 不存在（共 ${count} 条）`);
+  }
   // An explicit quality choice means "re-encode to this quality": a container
   // copy would silently drop it. Rounded, so 89.6/90.4 (which buildArgs rounds
   // to the 90 default) do not force a pointless re-encode.
@@ -69,6 +88,10 @@ function convertPlan(
   // An explicit output size or frame rate is a real re-encode request: a
   // copied stream would silently keep the source's.
   const videoTuneTuned = supportsVideoTune(upload.kind, format) && (Number(body.fps) > 0 || Number(body.width) > 0);
+  // An explicit track pick is a real re-encode request as well: the copy
+  // path only ever carries the default streams, so a picked track would be
+  // silently dropped.
+  const trackTuned = vtrack > 0 || atrack > 0;
   // The same rule on the GPU path: an explicit audio ask (bitrate,
   // channels, rate) for a container the hardware plan re-encodes audio for
   // must reach the hardware branch, not come back as a copied stream. The
@@ -80,10 +103,25 @@ function convertPlan(
     upload.kind === 'video' &&
     supportsHardwareAudio(format) &&
     (Number(body.bitrate) > 0 || Number(body.channels) > 0 || Number(body.sampleRate) > 0);
-  if (!trim && !qualityTuned && !bitrateTuned && !codecTuned && !audioTuned && !videoTuneTuned && !hwAudioTuned) {
+  if (
+    !trim &&
+    !qualityTuned &&
+    !bitrateTuned &&
+    !codecTuned &&
+    !audioTuned &&
+    !videoTuneTuned &&
+    !trackTuned &&
+    !hwAudioTuned
+  ) {
     const copy = copyArgs(upload.kind, format, upload.meta);
     if (copy) return { ext: format, kind: kindByExt(format), args: copy, copy: true };
   }
+  // The picked tracks become explicit maps on every re-encoding path (the
+  // copy path is unreachable: an explicit pick disabled it above). Only the
+  // picked side is mapped; the other side keeps ffmpeg's default selection.
+  const trackMaps: string[] = [];
+  if (vtrack > 0) trackMaps.push('-map', `0:v:${vtrack}`);
+  if (atrack > 0) trackMaps.push('-map', `0:a:${atrack}`);
   // The hardware path is vendor specific and only exists where the probe
   // found a backend this machine can really run; elsewhere the hardware ask
   // silently gets the software plan instead of a doomed ffmpeg command. A
@@ -108,7 +146,7 @@ function convertPlan(
       return {
         ext: format,
         kind: kindByExt(format),
-        args: hw.args,
+        args: [...trackMaps, ...hw.args],
         inputArgs: hw.inputArgs,
         hardware: true,
       };
@@ -117,16 +155,19 @@ function convertPlan(
   return {
     ext: format,
     kind: kindByExt(format),
-    args: buildArgs(
-      upload.kind,
-      format,
-      body.quality,
-      body.bitrate,
-      body.fps,
-      body.width,
-      body.channels,
-      body.sampleRate,
-    ),
+    args: [
+      ...trackMaps,
+      ...buildArgs(
+        upload.kind,
+        format,
+        body.quality,
+        body.bitrate,
+        body.fps,
+        body.width,
+        body.channels,
+        body.sampleRate,
+      ),
+    ],
     threads,
   };
 }
@@ -138,12 +179,12 @@ export const ACTIONS: ActionEntry[] = [
   {
     id: 'extract-audio',
     tool: 'extract-audio',
-    plan: (upload) => extractPlan(upload.streams, 'audio'),
+    plan: (upload, body) => extractPlan(upload.streams, 'audio', Number(body.stream) || 0),
   },
   {
     id: 'extract-video',
     tool: 'extract-video',
-    plan: (upload) => extractPlan(upload.streams, 'video'),
+    plan: (upload, body) => extractPlan(upload.streams, 'video', Number(body.stream) || 0),
   },
   {
     id: 'subtitle',

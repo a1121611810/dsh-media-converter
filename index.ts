@@ -420,6 +420,10 @@ export interface JsonBody {
   sampleRate?: number;
   codec?: unknown;
   hardware?: unknown;
+  // Track ordinals within the type (1 = second track); 0/absent = ffmpeg's
+  // default selection. An explicit pick disables the container-copy fast path.
+  videoTrack?: unknown;
+  audioTrack?: unknown;
   // An extension preset reference ('x:<manifest>/<action>'); when set, the
   // plan comes from the extension table instead of the built-in recipe.
   preset?: unknown;
@@ -1591,6 +1595,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           // is a re-encode, costed as a copy it would dodge nothing but lie.
           channels: row.channels ?? channelMap.get(row.id),
           sampleRate: row.sampleRate ?? rateMap.get(row.id),
+          // A track pick flips the copy gate exactly like quality does; a
+          // copy-classified picked job would cost 200x and blow its group.
+          videoTrack: row.vtrack ?? 0,
+          audioTrack: row.atrack ?? 0,
           codec: row.codec,
           hardware,
         });
@@ -1647,6 +1655,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           channels: Number(a.channels ?? entry?.channels),
           sampleRate: Number(a.sampleRate ?? entry?.sampleRate),
           codec: a.codec !== undefined ? String(a.codec) : entry?.codec,
+          // Track picks change the output streams, which flips the copy gate;
+          // they belong in the estimate exactly like quality does.
+          videoTrack: Number(a.vtrack || 0),
+          audioTrack: Number(a.atrack || 0),
           preset: presetRef,
           hardware,
         });
@@ -1674,6 +1686,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                   channels: Number(a.channels ?? entry?.channels),
                   sampleRate: Number(a.sampleRate ?? entry?.sampleRate),
                   codec: a.codec !== undefined ? String(a.codec) : entry?.codec,
+                  videoTrack: Number(a.vtrack || 0),
+                  audioTrack: Number(a.atrack || 0),
                   preset: presetRef,
                   hardware,
                 },
@@ -1828,11 +1842,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         `bitrate=${bitrates.get(f.id) || ''} channels=${channelMap.get(f.id) || ''} ` +
         `rate=${rateMap.get(f.id) || ''} ` +
         `duration=${f.duration.toFixed(2)}s video=${f.streams.video ? 'yes' : 'no'} ` +
-        `audio=${f.streams.audio ? 'yes' : 'no'} size=${(f.size / 1048576).toFixed(2)}MB`,
+        `audio=${f.streams.audio ? 'yes' : 'no'} vtracks=${f.streams.videoCount || 0} ` +
+        `atracks=${f.streams.audioCount || 0} size=${(f.size / 1048576).toFixed(2)}MB`,
     );
     return [
       '你在为本地媒体工具箱调度一批转换任务。',
-      `文件（共 ${files.length} 个，每行已有该文件的 target）：`,
+      `文件（共 ${files.length} 个，每行已有该文件的 target，vtracks/atracks 是该文件探测到的画面/音轨条数）：`,
       ...lines,
       '',
       `质量默认：${quality}（1-100，90=默认）。对软件编码的视频映射为该编码的质量参数（x264/vp9 为 CRF，avi/wmv/ogv 为 qscale），对 GPU 硬编视频映射为目标码率倍率，对 jpg/webp/avif 图片生效；quality 不是 90 时已强制重编码（不会走拷贝）。`,
@@ -1844,7 +1859,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         : []),
       '',
       '只返回一个 JSON 对象。不要代码、不要解释、不要 Markdown 代码块：',
-      '{"files":[{"id":"文件id","format":"输出格式","quality":90,"bitrate":128,"channels":1,"rate":22050,"fps":12,"width":640,"codec":"h264"}]}',
+      '{"files":[{"id":"文件id","format":"输出格式","quality":90,"bitrate":128,"channels":1,"rate":22050,"fps":12,"width":640,"codec":"h264","vtrack":0,"atrack":0}]}',
       '',
       '规则：',
       '1. 每个文件恰好一条，id 必须与上面完全一致；不能多、不能少、不能重复。',
@@ -1856,6 +1871,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       '7. channels（1=单声道，2=立体声）与 rate（采样率 Hz，8000–96000，如 22050）仅对音频编码目标有效（音频文件，或视频转 mp3/m4a），省略则保留源；该行 channels/rate 非空时优先用它们。',
       '8. 没有音轨的文件不要选纯音频格式。',
       '9. 批次走 GPU 硬编时，bitrate/channels/rate 对 mp4/mov/mkv/flv/ts 的输出音轨同样生效（不限于音频编码目标）。',
+      '10. vtrack/atrack 是类型内轨序号（1=第二条，0 或省略=不选轨，走默认）；仅当该行 vtracks/atracks 大于 1 时才可指定对应值，超出范围的计划会被拒绝。',
     ].join('\n');
   };
 
@@ -1872,6 +1888,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     fps?: number;
     width?: number;
     codec?: string;
+    vtrack?: number;
+    atrack?: number;
   }[] => {
     const clean = text
       .trim()
@@ -1920,6 +1938,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         fps?: number;
         width?: number;
         codec?: string;
+        vtrack?: number;
+        atrack?: number;
       } = {
         id: file.id,
         format,
@@ -1977,6 +1997,19 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         }
         out.codec = value;
       }
+      // Track ordinals ride the plan row into the convert binding; both
+      // optional. 0/1 select within the probed per-type count, so a plan can
+      // never name a track the file does not have.
+      for (const key of ['vtrack', 'atrack'] as const) {
+        const raw = row[key];
+        if (raw === undefined || raw === null) continue;
+        const value = Number(raw);
+        const count = key === 'vtrack' ? file.streams.videoCount || 0 : file.streams.audioCount || 0;
+        if (!Number.isInteger(value) || value < 0 || value >= Math.max(1, count)) {
+          throw new Error(`模型给 ${file.id} 的 ${key} 不合法（该文件共 ${count} 条）`);
+        }
+        if (value > 0) out[key] = value;
+      }
       return out;
     });
   };
@@ -2032,6 +2065,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       fps?: number;
       width?: number;
       codec?: string;
+      vtrack?: number;
+      atrack?: number;
     }[]
   > => {
     const llm = ctx.get('llm');
@@ -2229,6 +2264,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       // An extension preset reference ('x:<manifest>/<action>'): when set it
       // supersedes format/quality, like the panel's preset tiles.
       preset: a.preset !== undefined ? String(a.preset) : undefined,
+      // Track picks within the type (1 = second track); 0/absent = ffmpeg's
+      // default. An explicit pick forces a re-encode (never a container copy).
+      videoTrack: Number(a.videoTrack || 0),
+      audioTrack: Number(a.audioTrack || 0),
       stream: Number(a.stream || 0),
       tags: (a.tags || {}) as Record<string, string>,
       trim: a.trim as { start?: unknown; end?: unknown } | undefined,
@@ -2299,8 +2338,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       name: 'media_toolbox',
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
-        '③extract-audio 抽音轨、④extract-video 抽画面（不重编码）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）。' +
-        'convert 可带 trim（秒，{start,end}）裁剪；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；指定 codec（h264/hevc）即视同请求 GPU 硬编（无显卡时自动回退软件编码；hevc 仅 mp4/mov/mkv/ts 有效，体积更小）；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
+        '③extract-audio 抽音轨、④extract-video 抽画面（不重编码，可带 stream 选类型内第几条轨）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）。' +
+        'convert 可带 trim（秒，{start,end}）裁剪；视频转视频可带 videoTrack、带音频的输出可带 audioTrack（类型内轨序号，1=第二条，0 或不填走默认轨；显式选轨将禁用直接拷贝）；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；指定 codec（h264/hevc）即视同请求 GPU 硬编（无显卡时自动回退软件编码；hevc 仅 mp4/mov/mkv/ts 有效，体积更小）；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
         properties: {
@@ -2356,6 +2395,16 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             type: 'number',
             description: '采样率 Hz（8000-96000，如 22050；仅音频编码目标有效，0 或不填保留源）。',
           },
+          videoTrack: {
+            type: 'number',
+            description:
+              '画面轨序号（1=第二条，0 或不填走默认轨）：视频转视频选源画面轨；超出该文件画面轨数报错，显式选择将禁用直接拷贝。',
+          },
+          audioTrack: {
+            type: 'number',
+            description:
+              '音轨序号（1=第二条，0 或不填走默认轨）：视频输出选源音轨，音频编码目标（mp3/m4a/aac/opus）选被编码的那条；超出范围报错，显式选择将禁用直接拷贝。',
+          },
           tags: {
             type: 'object',
             properties: {
@@ -2368,7 +2417,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             },
             description: 'rewrite-tags 要写入的标签，空值不会清空原标签。',
           },
-          stream: { type: 'number', description: 'subtitle 的字幕轨序号，默认 0。' },
+          stream: {
+            type: 'number',
+            description:
+              '轨序号（1=第二条，默认 0=第一条）：subtitle 选字幕轨；extract-audio/extract-video 选类型内第几条音轨/画面轨（超出范围报错）。',
+          },
         },
         required: ['path'],
       },

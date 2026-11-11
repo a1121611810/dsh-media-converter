@@ -273,6 +273,10 @@ const gifWidth = ref(0);
 const subtitleFormat = ref('srt');
 const batchGifFps = ref(0);
 const batchGifWidth = ref(0);
+// Track picks: the host reads 0 as "source default" and a positive value as
+// the 0-based ordinal within the type, so the dropdowns offer 默认 + #2..#N.
+const videoTrack = ref(0);
+const audioTrack = ref(0);
 const trimStart = ref('');
 const trimEnd = ref('');
 const metaTags = ref<Record<string, string>>({});
@@ -601,6 +605,33 @@ const describeStream = (stream: StreamMeta) =>
     stream.tags && stream.tags.title ? '“' + stream.tags.title + '”' : '',
     ...(stream.flags || []),
   ]);
+// Track-pick dropdown options: 1-based labels for humans, 0-based ordinals as
+// values matching the host's videoTrack/audioTrack (0 = 默认, sent as absent).
+// The first track is reachable through 默认, which is also what keeps the
+// container-copy fast path available.
+const videoTrackOptions = computed(() =>
+  meta.value
+    ? meta.value.streams
+        .filter((stream) => stream.type === 'video')
+        .slice(1)
+        .map((stream, index) => ({ value: index + 1, label: '#' + (index + 2) + ' ' + describeStream(stream) }))
+    : [],
+);
+const audioTrackOptions = computed(() =>
+  meta.value
+    ? meta.value.streams
+        .filter((stream) => stream.type === 'audio')
+        .slice(1)
+        .map((stream, index) => ({ value: index + 1, label: '#' + (index + 2) + ' ' + describeStream(stream) }))
+    : [],
+);
+// A new file's stream list invalidates a sticky pick from the previous one:
+// without the reset an out-of-range ordinal would error, a valid one could
+// silently mean a different track.
+watch(meta, () => {
+  videoTrack.value = 0;
+  audioTrack.value = 0;
+});
 
 const containerRows = computed(() =>
   meta.value
@@ -1626,6 +1657,13 @@ function convert() {
       sampleRate: usesAudioTune.value ? sampleRate.value || undefined : undefined,
       fps: usesVideoTune.value ? gifFps.value || undefined : undefined,
       width: usesVideoTune.value ? gifWidth.value || undefined : undefined,
+      // mp3/m4a targets drop the picture: a video-track pick would be a misuse
+      // the host rejects, so the client never sends one there.
+      videoTrack:
+        file.value.kind === 'video' && format.value !== 'mp3' && format.value !== 'm4a'
+          ? videoTrack.value || undefined
+          : undefined,
+      audioTrack: file.value.kind === 'image' ? undefined : audioTrack.value || undefined,
     },
     'fmt:' + format.value,
   );
@@ -1656,6 +1694,11 @@ function applyTrim() {
       sampleRate: usesAudioTune.value ? sampleRate.value || undefined : undefined,
       fps: usesVideoTune.value ? gifFps.value || undefined : undefined,
       width: usesVideoTune.value ? gifWidth.value || undefined : undefined,
+      videoTrack:
+        file.value.kind === 'video' && format.value !== 'mp3' && format.value !== 'm4a'
+          ? videoTrack.value || undefined
+          : undefined,
+      audioTrack: file.value.kind === 'image' ? undefined : audioTrack.value || undefined,
       trim: { start: window.start, end: window.end },
     },
     'trim',
@@ -1664,7 +1707,10 @@ function applyTrim() {
 
 function extract(which: 'audio' | 'video') {
   if (!file.value) return;
-  runCurrent({ mode: which === 'audio' ? 'extract-audio' : 'extract-video' }, 'extract-' + which);
+  // The shared track dropdowns double as the extract ordinal (0/absent =
+  // first track, the historical default).
+  const stream = (which === 'audio' ? audioTrack.value : videoTrack.value) || undefined;
+  runCurrent({ mode: which === 'audio' ? 'extract-audio' : 'extract-video', stream }, 'extract-' + which);
 }
 
 function resetResult() {
@@ -2448,6 +2494,43 @@ watch([action, panelOpen], async () => {
                   <option :value="0">{{ t('bitrate.default') }}</option>
                   <option v-for="option in RATE_OPTIONS" :key="option" :value="option">{{ option }} Hz</option>
                 </select>
+              </div>
+              <div
+                v-if="currentAction.id === 'fmt:' + format && (videoTrackOptions.length || audioTrackOptions.length)"
+                class="mc-row"
+              >
+                <template
+                  v-if="file.kind === 'video' && format !== 'mp3' && format !== 'm4a' && videoTrackOptions.length"
+                >
+                  <span class="mc-muted">{{ t('track.video') }}</span>
+                  <select
+                    class="mc-select"
+                    v-model.number="videoTrack"
+                    :disabled="busy"
+                    :aria-label="t('track.video')"
+                    @change="resetResult"
+                  >
+                    <option :value="0">{{ t('track.auto') }}</option>
+                    <option v-for="option in videoTrackOptions" :key="option.value" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </template>
+                <template v-if="file.kind !== 'image' && format !== 'gif' && audioTrackOptions.length">
+                  <span class="mc-muted">{{ t('track.audio') }}</span>
+                  <select
+                    class="mc-select"
+                    v-model.number="audioTrack"
+                    :disabled="busy"
+                    :aria-label="t('track.audio')"
+                    @change="resetResult"
+                  >
+                    <option :value="0">{{ t('track.auto') }}</option>
+                    <option v-for="option in audioTrackOptions" :key="option.value" :value="option.value">
+                      {{ option.label }}
+                    </option>
+                  </select>
+                </template>
               </div>
               <div v-if="usesVideoTune && currentAction.id === 'fmt:' + format" class="mc-row">
                 <span class="mc-muted">{{ t('gif.fps') }}</span>
