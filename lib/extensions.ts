@@ -24,6 +24,9 @@ export interface MacroParams {
   sampleRate?: number;
   fps?: number;
   width?: number;
+  // Software encoder pick ('h264' | 'hevc' | 'av1'), video macros only; an
+  // unsupported container combination falls back to the default recipe.
+  codec?: string;
 }
 
 interface ActionBase {
@@ -132,8 +135,15 @@ function checkMacroParams(raw: unknown, kind: ConvertKind, what: string): MacroP
   if (raw.fps !== undefined) params.fps = raw.fps as number;
   if (raw.width !== undefined && !int(raw.width, 16, 7680)) return `${what}：width 必须是 16-7680 的整数`;
   if (raw.width !== undefined) params.width = raw.width as number;
+  if (raw.codec !== undefined) {
+    const codec = String(raw.codec);
+    if (codec !== 'h264' && codec !== 'hevc' && codec !== 'av1') {
+      return `${what}：codec 必须是 h264/hevc/av1`;
+    }
+    params.codec = codec;
+  }
   const extra = Object.keys(raw).filter(
-    (k) => !['format', 'quality', 'bitrate', 'channels', 'sampleRate', 'fps', 'width'].includes(k),
+    (k) => !['format', 'quality', 'bitrate', 'channels', 'sampleRate', 'fps', 'width', 'codec'].includes(k),
   );
   if (extra.length) return `${what}：params 有未知字段 ${extra.join(', ')}`;
   return params;

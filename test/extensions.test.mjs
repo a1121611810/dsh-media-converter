@@ -305,3 +305,52 @@ bad(
 }
 
 console.log(`extensions: ${passed} 项断言全绿`);
+
+// --- macro 的软件编码参数（R2）------------------------------------------------
+good(
+  [
+    {
+      version: 1,
+      id: 'codec-pack',
+      name: { zh: '编码包', en: 'Codec pack' },
+      actions: [
+        {
+          id: 'hevc-mp4',
+          type: 'macro',
+          kind: 'video',
+          label: { zh: 'HEVC', en: 'HEVC' },
+          params: { format: 'mp4', codec: 'hevc' },
+        },
+        {
+          id: 'av1-mkv',
+          type: 'macro',
+          kind: 'video',
+          label: { zh: 'AV1', en: 'AV1' },
+          params: { format: 'mkv', codec: 'av1', quality: 85 },
+        },
+      ],
+    },
+  ],
+  '宏可携带软件编码选择',
+);
+bad(
+  [
+    {
+      version: 1,
+      id: 'codec-pack-bad',
+      name: { zh: '编码包', en: 'Codec pack' },
+      actions: [
+        {
+          id: 'x',
+          type: 'macro',
+          kind: 'video',
+          label: { zh: 'x', en: 'x' },
+          params: { format: 'mp4', codec: 'vp9' },
+        },
+      ],
+    },
+  ],
+  'manifests[0]：actions[0]：codec 必须是 h264/hevc/av1',
+  '宏的非法 codec 被拒',
+);
+console.log('extensions: 宏 codec 用例 ok');

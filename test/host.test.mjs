@@ -1156,6 +1156,42 @@ const extractMeta = parseMeta(
 );
 assert.equal(extractMeta.audio.language, 'eng', 'extract with stream:1 lifts the second track');
 
+// --- software codec (R2): an explicit pick re-encodes; detection gates the
+// advertised variants. Gated per the fake-green rule: this machine's ffmpeg
+// decides which branch really runs, and both branches assert.
+const encodersText = spawnSync(ffmpeg, ['-hide_banner', '-encoders'], { encoding: 'utf8' }).stdout || '';
+const hasX265 = /\blibx265\b/.test(encodersText);
+const statusForSw = await call('status');
+assert.equal(statusForSw.data.ok, true);
+const advertised = statusForSw.data.softwareCodecs?.mp4 || [];
+if (hasX265) {
+  assert.ok(advertised.includes('hevc'), '/status advertises hevc when libx265 exists');
+  const swHevc = await call('convert', {
+    method: 'POST',
+    body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', codec: 'hevc' }),
+  });
+  assert.equal(swHevc.data.ok, true, JSON.stringify(swHevc.data));
+  assert.equal(swHevc.data.job.copy, false, 'an explicit software codec forces the re-encode');
+  const swHevcDone = await waitJob(swHevc.data.job);
+  const swHevcMeta = parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', swHevcDone.out], { encoding: 'utf8' }).stderr);
+  assert.equal(swHevcMeta.video.codec, 'hevc', 'the output really is hevc, not a mislabeled x264');
+  // 工具路径：显式 hardware=false + codec 走软件编码。
+  const mediaTool = tools.get('media_toolbox');
+  const toolHevc = await mediaTool.execute(
+    { path: clip, action: 'convert', format: 'mp4', codec: 'hevc', hardware: false },
+    { signal: new AbortController().signal },
+  );
+  const toolHevcMeta = parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', toolHevc.file], { encoding: 'utf8' }).stderr);
+  assert.equal(toolHevcMeta.video.codec, 'hevc', 'the tool path honors software codec too');
+} else {
+  assert.ok(!advertised.includes('hevc'), '/status hides hevc without libx265');
+  const swHevc = await call('convert', {
+    method: 'POST',
+    body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', codec: 'hevc' }),
+  });
+  assert.equal(swHevc.data.job.copy, false, 'an explicit codec still disables the copy path');
+}
+
 // --- audio bitrate: an explicit kbps re-encodes, the default keeps the copy --
 const tone = path.join(outDir, 'tone.mp3');
 execFileSync(ffmpeg, [
@@ -3103,8 +3139,8 @@ assert.equal(settled.hardware.hevc, realPlatformProbe.info.hevc, 'status reports
 
 // --- the HEVC codec choice through the PTC channel ---------------------------
 // An invalid codec in the model's plan fails the run loudly instead of being
-// silently ignored.
-ptcFakePlanOverride = { files: [{ id: gifClipUpload.data.id, format: 'mp4', codec: 'av1' }] };
+// silently ignored. ('vp9': h264/hevc/av1 are all legal since software codec.)
+ptcFakePlanOverride = { files: [{ id: gifClipUpload.data.id, format: 'mp4', codec: 'vp9' }] };
 const ptcBadCodec = await call('run', {
   method: 'POST',
   body: JSON.stringify({ items: [{ id: gifClipUpload.data.id, format: 'mp4' }], ptc: true }),

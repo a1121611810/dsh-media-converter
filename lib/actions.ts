@@ -78,9 +78,10 @@ function convertPlan(
     supportsBitrate(upload.kind, format) &&
     Number(body.bitrate) > 0 &&
     Math.round(Number(body.bitrate)) !== defaultBitrate(format);
-  // The same rule for an explicit audio codec: asking for HEVC when the
-  // source could just be copied is a real re-encode request.
-  const codecTuned = upload.kind === 'video' && String(body.codec || '') === 'hevc';
+  // The same rule for an explicit software codec: asking for HEVC/AV1 when
+  // the source could just be copied is a real re-encode request.
+  const codecTuned =
+    upload.kind === 'video' && (String(body.codec || '') === 'hevc' || String(body.codec || '') === 'av1');
   // Downsampling channels or rate is a real re-encode request too: a mono
   // ask must never come back as a copied stereo stream.
   const audioTuned =
@@ -166,6 +167,7 @@ function convertPlan(
         body.width,
         body.channels,
         body.sampleRate,
+        body.codec,
       ),
     ],
     threads,

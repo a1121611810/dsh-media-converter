@@ -247,6 +247,54 @@ const IMAGE: Record<string, string[]> = {
   avif: ['-frames:v', '1', '-c:v', 'libaom-av1', '-crf', '30', '-cpu-used', '8', '-row-mt', '1', '-still-picture', '1'],
 };
 
+// Software codec variants for containers that can hold more than one
+// mainstream encoder. The built-in recipe stays libx264; an explicit pick
+// swaps the encoder and its quality curve. Like the hardware path, a pick
+// the container cannot honor (e.g. hevc-in-webm) quietly falls back to the
+// default recipe instead of a doomed ffmpeg command.
+const SW_CODECS: Record<string, Record<string, string[]>> = {
+  mp4: {
+    hevc: [
+      '-c:v',
+      'libx265',
+      '-crf',
+      '28',
+      '-preset',
+      'medium',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '192k',
+      '-tag:v',
+      'hvc1',
+      '-movflags',
+      '+faststart',
+    ],
+    av1: ['-c:v', 'libsvtav1', '-crf', '32', '-preset', '6', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'],
+  },
+  mov: {
+    hevc: ['-c:v', 'libx265', '-crf', '28', '-preset', 'medium', '-c:a', 'aac', '-b:a', '192k', '-tag:v', 'hvc1'],
+    av1: ['-c:v', 'libsvtav1', '-crf', '32', '-preset', '6', '-c:a', 'aac', '-b:a', '192k'],
+  },
+  mkv: {
+    hevc: ['-c:v', 'libx265', '-crf', '28', '-preset', 'medium', '-c:a', 'aac', '-b:a', '192k'],
+    av1: ['-c:v', 'libsvtav1', '-crf', '32', '-preset', '6', '-c:a', 'aac', '-b:a', '192k'],
+  },
+};
+
+// 1..100 user quality -> x265 CRF: 90 (the default) keeps the recipe's 28.
+// shortcut: 常用文献值，未经 VMAF 实测；上线后补实测再校准。
+function x265CrfOf(quality: number): number {
+  return Math.min(34, Math.max(22, Math.round(28 + (90 - quality) * 0.12)));
+}
+
+// 1..100 user quality -> SVT-AV1 CRF: 90 keeps the recipe's 32. AV1 tolerates
+// much higher CRFs than x264 before falling apart, hence the wider clamp.
+// shortcut: 常用文献值，未经 VMAF 实测；上线后补实测再校准。
+function svtCrfOf(quality: number): number {
+  return Math.min(45, Math.max(20, Math.round(32 + (90 - quality) * 0.3)));
+}
+
 // Lossy formats only: the UI shows its quality control for exactly these.
 // Video: the X264 containers take quality as CRF; webm as VP9 CRF; avi/wmv/ogv
 // as codec qscale. Images: jpg/webp take their own scale, avif as AV1 CRF.
@@ -537,19 +585,28 @@ export function buildArgs(
   width?: number,
   channels?: number,
   sampleRate?: number,
+  codec?: unknown,
 ): string[] {
   const table = kind === 'audio' ? AUDIO : kind === 'image' ? IMAGE : VIDEO;
-  const base = table[format];
+  // An explicit software pick swaps the recipe; an unsupported combination
+  // (hevc-in-webm) falls back to the default, mirroring the hardware path.
+  const pick = kind === 'video' ? String(codec || '') : '';
+  const variant = pick && pick !== 'h264' ? SW_CODECS[format]?.[pick] : undefined;
+  const base = variant ?? table[format];
   if (!base) throw new Error(`不支持的输出格式: ${format}`);
   const args = base.slice();
   if (supportsQuality(kind, format)) {
     const q = Math.min(100, Math.max(1, Math.round(Number(quality) || 90)));
     if (kind === 'video') {
-      // The CRF recipes (x264 containers, webm) rewrite -crf; the qscale
-      // recipes (avi/wmv mpeg4-family, ogv theora) rewrite -q:v instead.
+      // The CRF recipes (x264 containers, webm, software variants) rewrite
+      // -crf; the qscale recipes (avi/wmv mpeg4-family, ogv theora) rewrite
+      // -q:v instead.
       const at = args.indexOf('-crf');
-      if (at >= 0) args[at + 1] = String(format === 'webm' ? vp9CrfOf(q) : crfOf(q));
-      else {
+      if (at >= 0) {
+        const value =
+          pick === 'hevc' ? x265CrfOf(q) : pick === 'av1' ? svtCrfOf(q) : format === 'webm' ? vp9CrfOf(q) : crfOf(q);
+        args[at + 1] = String(value);
+      } else {
         const atq = args.indexOf('-q:v');
         if (atq >= 0) args[atq + 1] = String(format === 'ogv' ? theoraQscale(q) : jpegQscale(q));
       }
@@ -588,6 +645,29 @@ export function buildArgs(
     }
   }
   return args;
+}
+
+// Which software encoders beyond the h264 default this ffmpeg build can run
+// for a format, e.g. ['hevc', 'av1'] for mp4. Mirrors supportedFormats' role
+// for the codec dimension: the panel hides picks the machine cannot honor.
+export function softwareCodecsFor(kind: ConvertKind, format: string, encoders: Iterable<string>): string[] {
+  if (kind !== 'video' || !SW_CODECS[format]) return [];
+  const have = new Set(encoders);
+  const out: string[] = [];
+  if (have.has('libx265')) out.push('hevc');
+  if (have.has('libsvtav1')) out.push('av1');
+  return out;
+}
+
+// /status ships this: format -> available software codecs, only for formats
+// that actually have variants. An empty object means "probed nothing extra".
+export function softwareCodecTable(encoders: Iterable<string>): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const format of FORMATS.video) {
+    const codecs = softwareCodecsFor('video', format, encoders);
+    if (codecs.length) out[format] = codecs;
+  }
+  return out;
 }
 
 // The encoders one output format's recipe needs, read from the recipe itself

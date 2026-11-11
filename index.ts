@@ -47,6 +47,7 @@ import {
   parseStreams,
   percentOf,
   progressSeconds,
+  softwareCodecTable,
   streamInfoOf,
   supportedFormats,
   threadArgs,
@@ -655,6 +656,7 @@ const statusPayload = (
   hardware: HardwareInfo,
   probeMode: 'ffprobe' | 'ffmpeg',
   formats: FormatTable,
+  softwareCodecs: Record<string, string[]>,
   extensions: ReturnType<typeof statusOf>,
 ) => ({
   ok: true as const,
@@ -671,6 +673,7 @@ const statusPayload = (
   hardware,
   probeMode,
   formats,
+  softwareCodecs,
   extensions,
 });
 export type StatusResponse = ReturnType<typeof statusPayload>;
@@ -1867,7 +1870,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       '3. quality 1–100，仅对视频与 jpg/webp/avif 图片有意义，其它类型请省略。',
       '4. bitrate 仅对 mp3/m4a/aac/opus 有效（kbps，32-320）；该行 bitrate 非空时优先用它，为空则省略。',
       '5. fps（1–30）与 width（≥16 像素）对视频目标有效（gif 及普通视频容器；mp3/m4a 无画面不要带）：gif 省略用内置默认 12fps/640px，其它容器省略则保持源分辨率/帧率。',
-      '6. codec 仅对 GPU 硬编视频有效（h264/hevc），省略默认 h264；hevc 仅 mp4/mov/mkv/ts 可选。',
+      '6. codec 选编码器：h264/hevc/av1。批次开 GPU 硬编时等同 hardware 路径（hevc 仅 mp4/mov/mkv/ts）；未开 GPU 走软件编码（hevc=libx265、av1=libsvtav1，仅 mp4/mov/mkv 有效，缺编码器的文件该行会报错），省略默认 h264。',
       '7. channels（1=单声道，2=立体声）与 rate（采样率 Hz，8000–96000，如 22050）仅对音频编码目标有效（音频文件，或视频转 mp3/m4a），省略则保留源；该行 channels/rate 非空时优先用它们。',
       '8. 没有音轨的文件不要选纯音频格式。',
       '9. 批次走 GPU 硬编时，bitrate/channels/rate 对 mp4/mov/mkv/flv/ts 的输出音轨同样生效（不限于音频编码目标）。',
@@ -1992,7 +1995,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       const rawCodec = row.codec;
       if (rawCodec !== undefined && rawCodec !== null) {
         const value = String(rawCodec);
-        if (value !== 'h264' && value !== 'hevc') {
+        if (value !== 'h264' && value !== 'hevc' && value !== 'av1') {
           throw new Error(`模型给 ${file.id} 的 codec 不合法`);
         }
         out.codec = value;
@@ -2257,10 +2260,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       channels: Number(a.channels || 0),
       sampleRate: Number(a.sampleRate || 0),
       codec: a.codec !== undefined ? String(a.codec) : undefined,
-      // A codec choice only means something on the GPU: asking for one opts
-      // into hardware encoding (which still falls back to software where no
-      // backend was probed).
-      hardware: a.codec !== undefined ? true : undefined,
+      // An explicit hardware boolean wins; without one, a codec ask keeps
+      // its historical meaning of opting into the GPU. Software codec picks
+      // travel with hardware: false.
+      hardware: a.hardware !== undefined ? Boolean(a.hardware) : a.codec !== undefined ? true : undefined,
       // An extension preset reference ('x:<manifest>/<action>'): when set it
       // supersedes format/quality, like the panel's preset tiles.
       preset: a.preset !== undefined ? String(a.preset) : undefined,
@@ -2339,7 +2342,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
         '③extract-audio 抽音轨、④extract-video 抽画面（不重编码，可带 stream 选类型内第几条轨）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）。' +
-        'convert 可带 trim（秒，{start,end}）裁剪；视频转视频可带 videoTrack、带音频的输出可带 audioTrack（类型内轨序号，1=第二条，0 或不填走默认轨；显式选轨将禁用直接拷贝）；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；指定 codec（h264/hevc）即视同请求 GPU 硬编（无显卡时自动回退软件编码；hevc 仅 mp4/mov/mkv/ts 有效，体积更小）；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
+        'convert 可带 trim（秒，{start,end}）裁剪；视频转视频可带 videoTrack、带音频的输出可带 audioTrack（类型内轨序号，1=第二条，0 或不填走默认轨；显式选轨将禁用直接拷贝）；软件编码可选 codec（hevc=libx265、av1=libsvtav1，仅 mp4/mov/mkv，配 hardware=false 或缺省；缺编码器时任务报错，其它容器回退 H.264），指定 codec 而不填 hardware 视同请求 GPU 硬编（h264/hevc，hevc 限 mp4/mov/mkv/ts）；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale，x265/svt-av1 映射各自 CRF）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
         properties: {
@@ -2370,9 +2373,14 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           },
           codec: {
             type: 'string',
-            enum: ['h264', 'hevc'],
+            enum: ['h264', 'hevc', 'av1'],
             description:
-              'GPU 编码器（h264/hevc）；指定即视同请求 GPU 硬编（无显卡时自动回退软件编码）。hevc 体积更小，仅 mp4/mov/mkv/ts 有效，预览播放取决于系统解码。',
+              '输出编码器。软件编码（默认路径）：hevc=libx265、av1=libsvtav1，仅 mp4/mov/mkv 有效，本机缺对应编码器时任务报错，其它容器回退 H.264；GPU 硬编（hardware=true）：h264/hevc，hevc 仅 mp4/mov/mkv/ts。不填=H.264。',
+          },
+          hardware: {
+            type: 'boolean',
+            description:
+              'true=请求 GPU 硬编（无显卡时自动回退软件编码）；false=强制软件编码（配 codec 使用 libx265/libsvtav1）。不填且指定 codec 时视同 true（历史行为）。',
           },
           bitrate: {
             type: 'number',
@@ -2546,6 +2554,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               // An ffmpeg that cannot even list its encoders must not empty
               // the panel's format table: the built-in one is the fallback.
               build?.encoders.length ? supportedFormats(build.encoders) : FORMATS,
+              // The codec dimension hides instead of falling back: an
+              // unverifiable build advertises no software variants.
+              build?.encoders.length ? softwareCodecTable(build.encoders) : {},
               statusOf(extensionManifests),
             ),
           );

@@ -615,10 +615,10 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        "if (value !== 'h264' && value !== 'hevc') {",
-        "if (value !== 'h264' && value !== 'hevc' && false) {",
+        "if (value !== 'h264' && value !== 'hevc' && value !== 'av1') {",
+        "if (value !== 'h264' && value !== 'hevc' && value !== 'av1' && false) {",
       ),
-    distAnchor: "value !== 'hevc' && false",
+    distAnchor: "value !== 'av1' && false",
     expect: '模型计划的非法 codec 必须让整批报错，突变后静默按 h264 跑 → 测试红',
   },
   {
@@ -658,8 +658,13 @@ const MUTANTS = [
     // 被静默吞掉。copy===false 断言在无显卡机器上同样红（走软件重编码）。
     source: 'lib/actions.ts',
     dist: 'dist/lib/actions.js',
-    apply: (s) => replaceOnce(s, "String(body.codec || '') === 'hevc';", "String(body.codec || '') !== 'hevc';"),
-    distAnchor: "String(body.codec || '') !== 'hevc';",
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "upload.kind === 'video' && (String(body.codec || '') === 'hevc' ||",
+        "upload.kind === 'video' && (String(body.codec || '') === 'vp9' ||",
+      ),
+    distAnchor: "String(body.codec || '') === 'vp9'",
     expect: 'codec=hevc 必须禁用 copy 走真实重编码，突变后拿到原样拷贝 → 测试红',
   },
   {
@@ -686,8 +691,8 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        "args[at + 1] = String(format === 'webm' ? vp9CrfOf(q) : crfOf(q));",
-        "args[at + 1] = String(format === 'webm' ? crfOf(q) : vp9CrfOf(q));",
+        "pick === 'av1' ? svtCrfOf(q) : format === 'webm' ? vp9CrfOf(q) : crfOf(q);",
+        "pick === 'av1' ? svtCrfOf(q) : format === 'webm' ? crfOf(q) : vp9CrfOf(q);",
       ),
     distAnchor: "format === 'webm' ? crfOf(q) : vp9CrfOf(q)",
     expect: 'webm 必须用 vp9CrfOf、x264 容器用 crfOf，突变后两边互换 → 测试红',
@@ -947,6 +952,43 @@ const MUTANTS = [
     apply: (s) => replaceOnce(s, '!trackTuned &&', '!!trackTuned &&'),
     distAnchor: '!!trackTuned &&',
     expect: '未选轨的 mp4 直拷贝必须保留，突变后永不拷贝 → plan copy 断言红',
+  },
+  // --- U 家族：软件编码 codec（R2）--------------------------------------------
+  {
+    id: 'U1',
+    name: '软件 codec 参数不进 buildArgs（hevc 请求回退 x264）',
+    // body.codec 在 codecTuned 与 hardwareFor 调用里仍被读取，删这行不会 TS6133。
+    source: 'lib/actions.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/actions.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        `        body.sampleRate,
+        body.codec,
+      ),`,
+        `        body.sampleRate,
+      ),`,
+      ),
+    distAnchor: 'body.channels, body.sampleRate)',
+    expect: 'codec=hevc 必须产出 libx265 配方，突变后回退默认 x264 → plan 断言红',
+  },
+  {
+    id: 'U2',
+    name: 'x265 质量曲线被 x264 曲线替换',
+    // x265CrfOf 只有这一个调用点，直接换成 crfOf 会让它 TS6133 构建失败
+    // （假红）；保活读取：x265 结果乘 0 加进 crfOf，语义等同替换。
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "pick === 'hevc' ? x265CrfOf(q) :",
+        "pick === 'hevc' ? Math.round(x265CrfOf(q) * 0 + crfOf(q)) :",
+      ),
+    distAnchor: 'x265CrfOf(q) * 0 + crfOf(q)',
+    expect: 'hevc 质量 100 必须映射 x265 CRF 27，突变后走 x264 曲线得 22 → 断言红',
   },
 ];
 

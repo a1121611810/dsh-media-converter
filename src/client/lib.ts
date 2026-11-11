@@ -58,6 +58,8 @@ export interface ConvertRequest {
   // Track ordinals within the type (1 = second track); 0/absent = source default.
   videoTrack?: number;
   audioTrack?: number;
+  // Software encoder pick ('h264' | 'hevc' | 'av1'); absent = default recipe.
+  codec?: string;
   mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta';
   stream?: number;
   tags?: Record<string, string>;
@@ -474,4 +476,72 @@ export function rowPlan(
     const noAudio = row.kind === 'video' && AUDIO_TARGETS.includes(target) && !row.streams?.audio;
     return { key: row.key, target, error: noAudio ? 'hint.noAudio' : '' };
   });
+}
+
+// --- save-current-as-preset --------------------------------------------------
+// The panel's save-as-preset writes into a reserved per-kind manifest
+// ('user-presets-<kind>') so user saves and imported packs never mix. Pure
+// merge of the /status raw texts; the Host re-validates everything on save.
+export interface PresetParams {
+  format: string;
+  quality?: number;
+  bitrate?: number;
+  channels?: number;
+  sampleRate?: number;
+  fps?: number;
+  width?: number;
+  codec?: string;
+}
+export type PresetSaveResult = { ok: true; packs: unknown[]; ref: string } | { ok: false; error: string };
+
+const PRESET_KIND_LABEL: Record<string, ExtensionLabel> = {
+  video: { zh: '用户预设（视频）', en: 'User presets (video)' },
+  audio: { zh: '用户预设（音频）', en: 'User presets (audio)' },
+  image: { zh: '用户预设（图片）', en: 'User presets (image)' },
+};
+
+export function upsertPresetPack(
+  rawPacks: string[],
+  kind: string,
+  name: string,
+  params: PresetParams,
+): PresetSaveResult {
+  const kindLabel = PRESET_KIND_LABEL[kind];
+  if (!kindLabel) return { ok: false, error: `该类型不支持预设：${kind}` };
+  const trimmed = name.trim();
+  if (!trimmed) return { ok: false, error: '预设名不能为空' };
+  const packs: unknown[] = [];
+  for (const raw of rawPacks) {
+    try {
+      packs.push(JSON.parse(raw));
+    } catch {
+      return { ok: false, error: '扩展开源数据损坏，请先在设置页检查扩展包' };
+    }
+  }
+  // ASCII slug; CJK names slug to empty, hence the stable unique fallback.
+  const slug =
+    trimmed
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 24) || 'p' + Date.now().toString(36);
+  const manifestId = `user-presets-${kind}`;
+  const action = { id: slug, type: 'macro', kind, label: { zh: trimmed, en: trimmed }, params };
+  const manifest = packs.find(
+    (pack) => typeof pack === 'object' && pack !== null && (pack as { id?: unknown }).id === manifestId,
+  ) as { id: string; actions: unknown[] } | undefined;
+  if (manifest && Array.isArray(manifest.actions)) {
+    const at = manifest.actions.findIndex(
+      (item) => typeof item === 'object' && item !== null && (item as { id?: unknown }).id === slug,
+    );
+    if (at >= 0) manifest.actions[at] = action;
+    else {
+      // 与 lib/extensions.ts LIMITS.MAX_ACTIONS_PER_MANIFEST 保持一致。
+      if (manifest.actions.length >= 16) return { ok: false, error: '该类型的用户预设已满（16），请先删除' };
+      manifest.actions.push(action);
+    }
+  } else {
+    packs.push({ version: 1, id: manifestId, name: kindLabel, actions: [action] });
+  }
+  return { ok: true, packs, ref: `x:${manifestId}/${slug}` };
 }

@@ -20,6 +20,8 @@ import {
   parseStreams,
   percentOf,
   progressSeconds,
+  softwareCodecTable,
+  softwareCodecsFor,
   subtitlePlan,
   supportedFormats,
   supportsAudioTune,
@@ -845,3 +847,43 @@ assert.throws(() => extractPlan(twoAudio, 'audio', 2), /音轨序号 2 不存在
 assert.throws(() => extractPlan(twoAudio, 'video', 1), /画面轨序号 1 不存在/);
 
 console.log('plan: 选轨用例 ok');
+
+// --- 软件编码 codec（R2）：变体配方 / 质量曲线 / 探测 --------------------------
+const SW_ENCODERS = ['libx264', 'aac', 'libx265', 'libsvtav1'];
+const hevcArgs = buildArgs('video', 'mp4', 90, 0, 0, 0, 0, 0, 'hevc');
+assert.ok(hevcArgs.includes('libx265'), 'mp4+hevc 用 libx265');
+assert.ok(hevcArgs.includes('hvc1'), 'mp4+hevc 补 hvc1 标签');
+assert.ok(!hevcArgs.includes('libx264'), '变体替换默认 x264 配方');
+const av1Mkv = buildArgs('video', 'mkv', 90, 0, 0, 0, 0, 0, 'av1');
+assert.ok(av1Mkv.includes('libsvtav1'), 'mkv+av1 用 libsvtav1');
+assert.ok(!av1Mkv.includes('-tag:v'), 'mkv+av1 无 hvc1 标签');
+// 质量曲线：90 锚定配方值（28/32），100 走向更好（27/29），1 撞 clamp。
+const hevcQ100 = buildArgs('video', 'mp4', 100, 0, 0, 0, 0, 0, 'hevc');
+assert.equal(hevcQ100[hevcQ100.indexOf('-crf') + 1], '27', 'x265 质量 100 → CRF 27');
+const hevcQ1 = buildArgs('video', 'mp4', 1, 0, 0, 0, 0, 0, 'hevc');
+assert.equal(hevcQ1[hevcQ1.indexOf('-crf') + 1], '34', 'x265 质量 1 → CRF clamp 34');
+const av1Q100 = buildArgs('video', 'mp4', 100, 0, 0, 0, 0, 0, 'av1');
+assert.equal(av1Q100[av1Q100.indexOf('-crf') + 1], '29', 'svt-av1 质量 100 → CRF 29');
+// 不支持的组合回退默认配方（与 GPU 路径同一策略）。
+const webmHevc = buildArgs('video', 'webm', 90, 0, 0, 0, 0, 0, 'hevc');
+assert.ok(webmHevc.includes('libvpx-vp9'), 'webm+hevc 回退 vp9 默认配方');
+// h264 显式即默认；音频/图片目标忽略 codec。
+assert.deepEqual(buildArgs('video', 'mp4', 90, 0, 0, 0, 0, 0, 'h264'), buildArgs('video', 'mp4'));
+assert.deepEqual(buildArgs('audio', 'mp3', 90, 0, 0, 0, 0, 0, 'hevc'), buildArgs('audio', 'mp3'));
+// 探测：按编码器集合开/关，无变体的格式不进表。
+assert.deepEqual(softwareCodecsFor('video', 'mp4', SW_ENCODERS), ['hevc', 'av1']);
+assert.deepEqual(softwareCodecsFor('video', 'mp4', ['libx264', 'aac']), [], '缺编码器返回空');
+assert.deepEqual(softwareCodecsFor('video', 'webm', SW_ENCODERS), [], 'webm 无软件变体');
+assert.deepEqual(softwareCodecsFor('audio', 'mp3', SW_ENCODERS), [], '音频无软件变体');
+const swTable = softwareCodecTable(SW_ENCODERS);
+assert.deepEqual(swTable.mp4, ['hevc', 'av1']);
+assert.ok(!('webm' in swTable), '无变体的格式不进 /status 表');
+// 注册表层：显式 hevc/av1 是重编码请求（禁用拷贝），h264 显式保留拷贝。
+const convertSw = ACTIONS.find((entry) => entry.id === 'convert');
+const hevcPlan = convertSw.plan(trackUpload(1), { format: 'mp4', codec: 'hevc' }, 0, null);
+assert.ok(!hevcPlan.copy && hevcPlan.args.includes('libx265'), '软件 hevc 走变体重编码');
+const av1Plan = convertSw.plan(trackUpload(1), { format: 'mkv', codec: 'av1' }, 0, null);
+assert.ok(av1Plan.args.includes('libsvtav1'));
+const h264Plan = convertSw.plan(trackUpload(1), { format: 'mp4', codec: 'h264' }, 0, null);
+assert.equal(h264Plan.copy, true, '显式 h264 不破坏拷贝快路径');
+console.log('plan: 软件编码用例 ok');

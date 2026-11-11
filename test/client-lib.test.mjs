@@ -24,6 +24,7 @@ import {
   removeUploadRow,
   extensionActionItems,
   presetTargetsFor,
+  upsertPresetPack,
 } from '../dist/src/client/lib.js';
 
 // --- extension packs: pure projections of the /status payload -----------------
@@ -464,3 +465,68 @@ assert.deepEqual(runItemPatch(runItem({ state: 'cancelled' })), {
 });
 
 console.log('client-lib.test.mjs: ok');
+
+// --- save-as-preset: reserved per-kind manifest merge (R2) -------------------
+const savedFirst = upsertPresetPack([], 'video', 'web-compress', { format: 'webp', quality: 60, width: 1080 });
+assert.equal(savedFirst.ok, true);
+if (savedFirst.ok) {
+  assert.equal(savedFirst.ref, 'x:user-presets-video/web-compress');
+  assert.equal(savedFirst.packs.length, 1);
+  const manifest = savedFirst.packs[0];
+  assert.equal(manifest.version, 1);
+  assert.equal(manifest.id, 'user-presets-video');
+  assert.equal(manifest.actions.length, 1);
+  assert.deepEqual(manifest.actions[0].params, { format: 'webp', quality: 60, width: 1080 });
+}
+// CJK 名生成稳定 id（p+base36），ref 形态不变。
+const savedCjk = upsertPresetPack([], 'video', '网页压缩', { format: 'mp4' });
+assert.equal(savedCjk.ok, true);
+if (savedCjk.ok) {
+  assert.match(savedCjk.ref, /^x:user-presets-video\/p[0-9a-z]+$/);
+  assert.equal(savedCjk.packs[0].actions[0].label.zh, '网页压缩');
+}
+// 同名再存 = 覆盖而不是追加；异名追加到同一 manifest。
+const rawOf = (result) => (result.ok ? result.packs.map((pack) => JSON.stringify(pack)) : []);
+const overwrite = upsertPresetPack(rawOf(savedFirst), 'video', 'web-compress', { format: 'jpg', quality: 70 });
+assert.equal(overwrite.ok, true);
+if (overwrite.ok) {
+  const manifest = overwrite.packs.find((pack) => pack.id === 'user-presets-video');
+  assert.equal(manifest.actions.length, 1, '同名覆盖不追加');
+  assert.equal(manifest.actions[0].params.format, 'jpg');
+}
+const appendMore = upsertPresetPack(rawOf(overwrite), 'video', 'archive', { format: 'mkv', codec: 'hevc' });
+assert.equal(appendMore.ok, true);
+if (appendMore.ok) {
+  const manifest = appendMore.packs.find((pack) => pack.id === 'user-presets-video');
+  assert.equal(manifest.actions.length, 2);
+  assert.equal(manifest.actions[1].params.codec, 'hevc', '宏携带软件编码选择');
+}
+// 类型分库：音频预设进自己的 manifest。
+const audioSaved = upsertPresetPack(rawOf(appendMore), 'audio', 'voice-mono', {
+  format: 'mp3',
+  channels: 1,
+  sampleRate: 22050,
+});
+assert.equal(audioSaved.ok, true);
+if (audioSaved.ok) {
+  assert.equal(audioSaved.packs.length, 2, '音频预设另起 manifest');
+  assert.ok(audioSaved.packs.some((pack) => pack.id === 'user-presets-audio'));
+}
+// 负形态：坏 JSON、空名、非法类型、满员。
+const broken = upsertPresetPack(['{"version":1'], 'video', 'x', { format: 'mp4' });
+assert.equal(broken.ok, false);
+assert.match(broken.error, /扩展开源数据损坏/);
+assert.equal(upsertPresetPack([], 'video', '   ', { format: 'mp4' }).ok, false, '空名拒绝');
+assert.equal(upsertPresetPack([], 'text', 'x', { format: 'mp4' }).ok, false, '非媒体类型拒绝');
+const full = Array.from({ length: 16 }, (_, i) => ({
+  id: `p${i}`,
+  type: 'macro',
+  kind: 'image',
+  label: { zh: `p${i}`, en: `p${i}` },
+  params: { format: 'jpg' },
+}));
+const fullRaw = [JSON.stringify({ version: 1, id: 'user-presets-image', name: { zh: 'x', en: 'x' }, actions: full })];
+const tooMany = upsertPresetPack(fullRaw, 'image', 'one-more', { format: 'jpg' });
+assert.equal(tooMany.ok, false, '满 16 拒绝追加');
+assert.match(tooMany.error, /已满/);
+console.log('client-lib: 存预设用例 ok');

@@ -33,8 +33,8 @@ import {
   unavailableTarget,
   withoutKnownUploads,
 } from './lib.js';
-import { extensionActionItems, presetTargetsFor } from './lib.js';
-import type { ConvertRequest, ConvertibleKind, DecodedPayload, QueueRow, ServerJob } from './lib.js';
+import { extensionActionItems, presetTargetsFor, upsertPresetPack } from './lib.js';
+import type { ConvertRequest, ConvertibleKind, DecodedPayload, PresetParams, QueueRow, ServerJob } from './lib.js';
 import type { MediaKind, StreamMeta } from '../../lib/plan.js';
 import type {
   Base64Response,
@@ -277,6 +277,13 @@ const batchGifWidth = ref(0);
 // the 0-based ordinal within the type, so the dropdowns offer 默认 + #2..#N.
 const videoTrack = ref(0);
 const audioTrack = ref(0);
+// Software encoder pick for video containers that have variants. The Host
+// probes libx265/libsvtav1 and ships the per-format list in /status.
+const swCodec = ref('h264');
+const SW_CODEC_FORMATS = ['mp4', 'mov', 'mkv'];
+const presetName = ref('');
+const presetSaving = ref(false);
+const presetMessage = ref('');
 const trimStart = ref('');
 const trimEnd = ref('');
 const metaTags = ref<Record<string, string>>({});
@@ -653,6 +660,63 @@ const showAudioTrack = computed(
         format.value !== 'gif')),
 );
 const showTrackRow = computed(() => showVideoTrack.value || showAudioTrack.value);
+// Software codec dropdown: convert and trim (both re-encode through the
+// software path) honor it; extract copies streams and never re-encodes.
+const swCodecList = computed(() => status.value?.softwareCodecs?.[format.value] || []);
+const showSwCodec = computed(
+  () =>
+    (currentAction.value?.id.startsWith('fmt:') || currentAction.value?.id === 'trim') &&
+    file.value?.kind === 'video' &&
+    SW_CODEC_FORMATS.includes(format.value),
+);
+// A stale encoder pick must not ride into the next format: reset on change.
+watch(format, () => {
+  swCodec.value = 'h264';
+});
+
+// Save the current form state as a macro in the reserved per-kind pack; the
+// Host validates and persists, then a status refresh puts the tile in the grid.
+async function savePreset() {
+  const name = presetName.value.trim();
+  if (!name || !file.value || !format.value || presetSaving.value) return;
+  const params: PresetParams = { format: format.value };
+  if (usesQuality.value) params.quality = quality.value;
+  if (usesBitrate.value && bitrate.value) params.bitrate = bitrate.value;
+  if (usesAudioTune.value && channels.value) params.channels = channels.value;
+  if (usesAudioTune.value && sampleRate.value) params.sampleRate = sampleRate.value;
+  if (usesVideoTune.value && gifFps.value) params.fps = gifFps.value;
+  if (usesVideoTune.value && gifWidth.value) params.width = gifWidth.value;
+  if (swCodec.value !== 'h264' && showSwCodec.value) params.codec = swCodec.value;
+  const result = upsertPresetPack(
+    (status.value?.extensions || []).map((pack) => pack.raw),
+    file.value.kind,
+    name,
+    params,
+  );
+  if (!result.ok) {
+    presetMessage.value = result.error;
+    return;
+  }
+  presetSaving.value = true;
+  try {
+    const saved = await readJson<{ ok: true } | ErrorResponse>(
+      await fetch('/api/media-convert/config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ extensions: JSON.stringify(result.packs) }),
+      }),
+    );
+    if (!saved.ok) {
+      presetMessage.value = saved.error;
+      return;
+    }
+    presetMessage.value = t('preset.saved');
+    presetName.value = '';
+    await fetchStatus();
+  } finally {
+    presetSaving.value = false;
+  }
+}
 
 const containerRows = computed(() =>
   meta.value
@@ -1685,6 +1749,10 @@ function convert() {
           ? videoTrack.value || undefined
           : undefined,
       audioTrack: file.value.kind === 'image' ? undefined : audioTrack.value || undefined,
+      codec:
+        file.value.kind === 'video' && swCodec.value !== 'h264' && SW_CODEC_FORMATS.includes(format.value)
+          ? swCodec.value
+          : undefined,
     },
     'fmt:' + format.value,
   );
@@ -1720,6 +1788,10 @@ function applyTrim() {
           ? videoTrack.value || undefined
           : undefined,
       audioTrack: file.value.kind === 'image' ? undefined : audioTrack.value || undefined,
+      codec:
+        file.value.kind === 'video' && swCodec.value !== 'h264' && SW_CODEC_FORMATS.includes(format.value)
+          ? swCodec.value
+          : undefined,
       trim: { start: window.start, end: window.end },
     },
     'trim',
@@ -2482,6 +2554,21 @@ watch([action, panelOpen], async () => {
                 </select>
               </template>
             </div>
+            <div v-if="showSwCodec" class="mc-row">
+              <span class="mc-muted">{{ t('codec.swLabel') }}</span>
+              <select
+                class="mc-select"
+                v-model="swCodec"
+                :disabled="busy"
+                :aria-label="t('codec.swLabel')"
+                @change="resetResult"
+              >
+                <option value="h264">{{ t('codec.swH264') }}</option>
+                <option v-if="swCodecList.includes('hevc')" value="hevc">{{ t('codec.swHevc') }}</option>
+                <option v-if="swCodecList.includes('av1')" value="av1">{{ t('codec.swAv1') }}</option>
+              </select>
+              <span class="mc-muted">{{ t('codec.swHint') }}</span>
+            </div>
             <template v-if="currentAction.id.startsWith('fmt:')">
               <div class="mc-row">
                 <span class="mc-muted">{{ t('name.label') }}</span>
@@ -2575,6 +2662,24 @@ watch([action, panelOpen], async () => {
                   @input="resetResult"
                 />
                 <span class="mc-muted">{{ format === 'gif' ? t('gif.hint') : t('video.tuneHint') }}</span>
+              </div>
+              <div v-if="currentAction.id === 'fmt:' + format" class="mc-row">
+                <input
+                  class="mc-name-input"
+                  v-model="presetName"
+                  :disabled="busy || presetSaving"
+                  :placeholder="t('preset.namePlaceholder')"
+                  :aria-label="t('preset.namePlaceholder')"
+                  @input="presetMessage = ''"
+                />
+                <button
+                  class="mc-btn mc-btn-ghost"
+                  :disabled="busy || presetSaving || !presetName.trim()"
+                  @click="savePreset"
+                >
+                  {{ t('preset.save') }}
+                </button>
+                <span v-if="presetMessage" class="mc-muted">{{ presetMessage }}</span>
               </div>
               <div class="mc-row">
                 <button
