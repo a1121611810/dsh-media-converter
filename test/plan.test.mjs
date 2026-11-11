@@ -30,6 +30,7 @@ import {
   trimArgs,
 } from '../dist/lib/plan.js';
 import { blendPtcRate, capacityFor, estimatePtcCost, planPtcGroups, threadsFor } from '../dist/lib/schedule.js';
+import { ACTIONS, actionFor, ptcFormats, toolActions } from '../dist/lib/actions.js';
 
 assert.equal(kindOf('movie.MOV'), 'video');
 assert.equal(kindOf('clip.gif'), 'image');
@@ -697,5 +698,24 @@ const hugeGroup = planPtcGroups(huge, ptcLimits);
 assert.equal(hugeGroup.length, 1);
 assert.equal(hugeGroup[0].timeoutMs, 600_000);
 assert.deepEqual(planPtcGroups([], ptcLimits), []);
+
+// --- the action registry -----------------------------------------------------
+// The table is the single source for planFor, the PTC prompt and the tool enum.
+assert.deepEqual(
+  ACTIONS.map((entry) => entry.id),
+  ['probe', 'convert', 'extract-audio', 'extract-video', 'subtitle', 'meta', 'base64'],
+);
+assert.equal(actionFor('convert')?.id, 'convert');
+assert.equal(actionFor('nope'), undefined);
+assert.deepEqual(toolActions(), ['probe', 'convert', 'extract-audio', 'extract-video', 'subtitle', 'rewrite-tags']);
+// 'rewrite-tags' is the tool's name for the 'meta' plan mode.
+assert.equal(actionFor('meta')?.tool, 'rewrite-tags');
+// Every plan mode the Host can be asked for has a plan behind it.
+for (const id of ['convert', 'extract-audio', 'extract-video', 'subtitle', 'meta']) {
+  assert.equal(typeof actionFor(id)?.plan, 'function', `${id} carries a plan`);
+}
+assert.deepEqual(ptcFormats('video'), FORMATS.video);
+assert.deepEqual(ptcFormats('audio'), FORMATS.audio);
+assert.deepEqual(ptcFormats('image'), FORMATS.image);
 
 console.log('plan.test.mjs: ok');

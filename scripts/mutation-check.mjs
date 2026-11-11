@@ -296,6 +296,8 @@ const MUTANTS = [
     name: '码率 copy 规则反转（显式 128k 反而走拷贝）',
     // 仍读取 body.bitrate，不会 TS6133；语义反转后只有「恰好要默认码率」
     // 才重编码 —— 与需求正好相反。
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
     apply: (s) =>
       replaceOnce(
         s,
@@ -352,6 +354,8 @@ const MUTANTS = [
     id: 'B6',
     name: 'mono 请求被 copy 短路（audioTuned 门失效）',
     // 条件永假后 mono 请求拿回拷贝的立体声——host 的 copy-trap 探针必红。
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
     apply: (s) =>
       replaceOnce(
         s,
@@ -415,13 +419,15 @@ const MUTANTS = [
     name: 'GPU 音轨请求被 copy 短路（hwAudioTuned 门失效）',
     // 仍读取 body.bitrate/channels/sampleRate，不会 TS6133；门永假后
     // GPU+mono 请求拿回拷贝的立体声——host 的 GPU copy-trap 探针必红。
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
     apply: (s) =>
       replaceOnce(
         s,
         `supportsHardwareAudio(format) &&
-      (Number(body.bitrate) > 0 || Number(body.channels) > 0 || Number(body.sampleRate) > 0);`,
+    (Number(body.bitrate) > 0 || Number(body.channels) > 0 || Number(body.sampleRate) > 0);`,
         `supportsHardwareAudio(format) &&
-      (Number(body.bitrate) > 0 || Number(body.channels) < 0 || Number(body.sampleRate) > 0);`,
+    (Number(body.bitrate) > 0 || Number(body.channels) < 0 || Number(body.sampleRate) > 0);`,
       ),
     distAnchor: 'Number(body.channels) < 0 || Number(body.sampleRate) > 0',
     expect: 'GPU 音轨请求必须绕开拷贝路径，突变后 result.copy 变 true → 测试红',
@@ -431,6 +437,8 @@ const MUTANTS = [
     name: 'width 请求被 copy 短路（videoTuneTuned 门失效）',
     // body.width 仍被读取（< 0 永假），不会 TS6133；门失效后 width 请求拿回
     // 拷贝的源流——host 的 width copy 门用例必红。
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
     apply: (s) =>
       replaceOnce(
         s,
@@ -445,6 +453,8 @@ const MUTANTS = [
     name: 'GPU 分支不拦 width 请求（-vf 打断零拷贝）',
     // videoTuneTuned 仍被 copy 门读取，不会 TS6133；有后端时 width 请求错误地
     // 骑上 GPU 计划——host 的 gpuWidth 用例必红。
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
     apply: (s) =>
       replaceOnce(s, 'if (body.hardware && hwBackend && !videoTuneTuned) {', 'if (body.hardware && hwBackend) {'),
     distAnchor: 'if (body.hardware && hwBackend) {',
@@ -518,15 +528,17 @@ const MUTANTS = [
     // body.fps/width 仍被 /run 路由与 PTC 绑定读取，不会 TS6133；只有
     // planFor 这条汇流点被掐断。channels/sampleRate 保持入参——它们走的是
     // 同一调用但不是本突变的目标（B5-B8 守它们）。
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
     apply: (s) =>
       replaceOnce(
         s,
-        `        body.fps,
-        body.width,
-        body.channels,`,
-        `        0,
-        0,
-        body.channels,`,
+        `      body.fps,
+      body.width,
+      body.channels,`,
+        `      0,
+      0,
+      body.channels,`,
       ),
     distAnchor: 'body.bitrate, 0, 0',
     expect: '单任务转换的 fps/width 必须到达 ffmpeg 参数，突变后产物回默认 12/640 → 测试红',
@@ -534,12 +546,13 @@ const MUTANTS = [
   {
     id: 'C6',
     name: '字幕导出丢面板选的格式（恒默认 srt）',
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
     apply: (s) =>
       replaceOnce(
         s,
-        `if (mode === 'subtitle')
-      return subtitlePlan(upload.streams, body.stream, body.format ? String(body.format) : undefined);`,
-        `if (mode === 'subtitle') return subtitlePlan(upload.streams, body.stream);`,
+        'subtitlePlan(upload.streams, body.stream, body.format ? String(body.format) : undefined)',
+        'subtitlePlan(upload.streams, body.stream)',
       ),
     distAnchor: 'subtitlePlan(upload.streams, body.stream)',
     expect: '面板/工具选的 vtt/ass 必须到达 subtitlePlan，突变后全部导成 srt → 测试红',
@@ -643,6 +656,8 @@ const MUTANTS = [
     name: 'codec 绕过 tuned 门（HEVC 请求被 copy 短路）',
     // 语义反转后 codec=hevc 不再拦 copy：源可拷时拿到原样拷贝，HEVC 请求
     // 被静默吞掉。copy===false 断言在无显卡机器上同样红（走软件重编码）。
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
     apply: (s) => replaceOnce(s, "String(body.codec || '') === 'hevc';", "String(body.codec || '') !== 'hevc';"),
     distAnchor: "String(body.codec || '') !== 'hevc';",
     expect: 'codec=hevc 必须禁用 copy 走真实重编码，突变后拿到原样拷贝 → 测试红',
@@ -691,6 +706,25 @@ const MUTANTS = [
       ),
     distAnchor: "format === 'ogv' ? jpegQscale(q) : theoraQscale(q)",
     expect: 'ogv 必须用 theora 的 0-10 映射、avi/wmv 用 mjpeg 式 qscale，突变后互换 → 测试红',
+  },
+  {
+    id: 'R1',
+    name: '注册表摘除 convert 条目',
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
+    apply: (s) => replaceOnce(s, "id: 'convert',", "id: 'convert-removed',"),
+    distAnchor: "id: 'convert-removed'",
+    expect: 'convert 被摘除后 planFor 失去条目，27 格式矩阵与工具枚举必须红',
+  },
+  {
+    id: 'R2',
+    name: 'actionFor 查找条件反转',
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
+    test: 'test/plan.test.mjs',
+    apply: (s) => replaceOnce(s, 'entry.id === mode', 'entry.id !== mode'),
+    distAnchor: 'entry.id !== mode',
+    expect: '查找反转后 actionFor 返回错误条目，注册表单测必须红',
   },
 ];
 

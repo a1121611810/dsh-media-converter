@@ -2110,6 +2110,11 @@ assert.match(garbage.data.error, /无法识别/);
 // --- the agent tool ---------------------------------------------------------
 const media = tools.get('media_toolbox');
 assert.ok(media, 'the agent tool is registered');
+assert.deepEqual(
+  media.parameters.properties.action.enum,
+  ['probe', 'convert', 'extract-audio', 'extract-video', 'subtitle', 'rewrite-tags'],
+  'the tool action enum derives from the registry',
+);
 const exec = { signal: new AbortController().signal };
 
 const probed = await media.execute({ path: clip, action: 'probe' }, exec);
