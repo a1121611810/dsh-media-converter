@@ -28,7 +28,7 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import Schema from '@deepseek-ai/schemastery';
 import { decodeBase64Payload } from './lib/base64.js';
-import { actionFor, ptcFormats, toolActions } from './lib/actions.js';
+import { actionFor, ptcFormats, resolveFeatures, toolActions } from './lib/actions.js';
 import {
   FORMATS,
   defaultFormat,
@@ -176,6 +176,7 @@ export interface Config {
   maxUploadMb: number;
   composerButton: boolean;
   groups: string;
+  features: string;
   persistState: boolean;
   uploadTtlMinutes: number;
   queueLimit: number;
@@ -187,6 +188,7 @@ export const Config = Schema.object({
   maxUploadMb: Schema.number().default(2048).volatile(),
   composerButton: Schema.boolean().default(true).volatile(),
   groups: Schema.string().default('convert,edit,view').volatile(),
+  features: Schema.string().default('').volatile(),
   persistState: Schema.boolean().default(false).volatile(),
   uploadTtlMinutes: Schema.number().default(120).volatile(),
   queueLimit: Schema.number().default(2000).volatile(),
@@ -423,6 +425,7 @@ export interface JsonBody {
   maxUploadMb?: unknown;
   composerButton?: unknown;
   groups?: unknown;
+  features?: unknown;
   persistState?: unknown;
   uploadTtlMinutes?: unknown;
   queueLimit?: unknown;
@@ -969,6 +972,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   let uploadLimit = `${MAX_UPLOAD_MB} MB`;
   let composerButton = true;
   let groups: string[] = [...GROUP_KEYS];
+  let features: string[] = resolveFeatures('');
   let persistState = false;
   let uploadTtlMs = DEFAULT_UPLOAD_TTL_MINUTES * 60 * 1000;
   let queueLimitN = DEFAULT_QUEUE_LIMIT;
@@ -990,6 +994,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     uploadLimit = maxUploadBytes >= 1048576 ? `${Math.round(maxUploadBytes / 1048576)} MB` : `${maxUploadBytes} B`;
     composerButton = unwrap(raw.composerButton) !== false;
     groups = resolveGroups(unwrap(raw.groups));
+    features = resolveFeatures(unwrap(raw.features));
     persistState = unwrap(raw.persistState) === true;
     const cfgTtl = unwrap(raw.uploadTtlMinutes);
     // Floor of 5 minutes: a smaller TTL deletes sources under running jobs.
@@ -1747,6 +1752,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     // Unrecognised modes keep the historical behaviour: they plan a convert.
     const entry = actionFor(mode) ?? actionFor('convert');
     if (!entry?.plan) throw new Error(`不支持的输出格式: ${String(body.format || '')}`);
+    if (!features.includes(entry.id)) throw new Error('该功能已停用');
     return entry.plan(upload, body, threads, hwBackend);
   };
 
@@ -1776,7 +1782,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       ...lines,
       '',
       `质量默认：${quality}（1-100，90=默认）。对软件编码的视频映射为该编码的质量参数（x264/vp9 为 CRF，avi/wmv/ogv 为 qscale），对 GPU 硬编视频映射为目标码率倍率，对 jpg/webp/avif 图片生效；quality 不是 90 时已强制重编码（不会走拷贝）。`,
-      `各类型的可用输出格式：video=${ptcFormats('video').join(', ')}；audio=${ptcFormats('audio').join(', ')}；image=${ptcFormats('image').join(', ')}。`,
+      `各类型的可用输出格式：video=${ptcFormats('video', features).join(', ')}；audio=${ptcFormats('audio', features).join(', ')}；image=${ptcFormats('image', features).join(', ')}。`,
       '',
       '只返回一个 JSON 对象。不要代码、不要解释、不要 Markdown 代码块：',
       '{"files":[{"id":"文件id","format":"输出格式","quality":90,"bitrate":128,"channels":1,"rate":22050,"fps":12,"width":640,"codec":"h264"}]}',
@@ -2135,6 +2141,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       at: Date.now(),
     };
     const action = String(a.action || 'convert');
+    const actionId = action === 'rewrite-tags' ? 'meta' : action;
+    if (!features.includes(actionId)) throw new Error('该功能已停用');
     if (action === 'probe') {
       return { file, kind: probed.kind, duration: probed.duration, sizeBytes: stat.size, meta: probed.meta };
     }
@@ -2215,8 +2223,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
 
   // The tool the agent calls. One tool with an action, not one tool per
   // action: the engine behind it is the same plan the panel builds.
-  ctx.effect(() =>
-    ctx.tools.register({
+  // Re-registered on every config save so a changed `features` whitelist
+  // reaches the advertised action enum without a restart.
+  let toolDisposer: (() => void) | null = null;
+  const registerMediaTool = (): void => {
+    toolDisposer?.();
+    toolDisposer = ctx.tools.register({
       name: 'media_toolbox',
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
@@ -2228,7 +2240,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           path: { type: 'string', description: '本机文件的绝对路径。' },
           action: {
             type: 'string',
-            enum: toolActions(),
+            enum: toolActions(features),
             description: '要做的动作，默认 convert。',
           },
           format: {
@@ -2338,8 +2350,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       // A long clip can take a while; the abort kills ffmpeg and cleans up.
       timeoutMs: 1800000,
       execute: (args, exec) => runMediaTool(args, exec),
-    }),
-  );
+    });
+  };
+  ctx.effect(() => {
+    registerMediaTool();
+    return () => toolDisposer?.();
+  });
 
   ctx.effect(() => {
     fs.mkdirSync(tmpDir, { recursive: true });
@@ -2441,6 +2457,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               if (typeof body.groups !== 'string') throw new Error('groups 必须是字符串');
               patch.groups = body.groups;
             }
+            if (body.features !== undefined) {
+              if (typeof body.features !== 'string') throw new Error('features 必须是字符串');
+              patch.features = body.features;
+            }
             if (body.persistState !== undefined) {
               if (typeof body.persistState !== 'boolean') throw new Error('persistState 必须是布尔值');
               patch.persistState = body.persistState;
@@ -2464,6 +2484,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             await ctx.settings.update('media-converter', patch);
             cfg = { ...cfg, ...patch };
             resolveConfig(cfg);
+            registerMediaTool();
             json(res, 200, { ok: true as const });
           } catch (err) {
             json(res, 200, errorPayload(errorText(err)));
@@ -2874,6 +2895,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               const row = (entry || {}) as Record<string, unknown>;
               const id = String(row.id || '');
               if (!uploads.has(id)) return json(res, 200, errorPayload('文件已失效，请重新选择'));
+              if (!features.includes(String(row.mode || 'convert'))) {
+                return json(res, 200, errorPayload('该功能已停用'));
+              }
               // A row the panel already knows it cannot convert (a silent video
               // asked for an audio-only target) travels with the run so it is
               // still explained after a page rebuild.
@@ -3218,6 +3242,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         handler: async (req, res) => {
           if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
           if (rejectUnauthenticated(req, res)) return;
+          if (!features.includes('base64')) return json(res, 200, errorPayload('该功能已停用'));
           let upload: Upload | undefined;
           let mime: string | undefined;
           try {
@@ -3260,6 +3285,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         handler: async (req, res) => {
           if (req.method !== 'POST') return json(res, 405, errorPayload('POST only'));
           if (rejectUnauthenticated(req, res)) return;
+          if (!features.includes('base64')) return json(res, 200, errorPayload('该功能已停用'));
           try {
             const body = await readJson(req);
             const payload = decodeBase64Payload(body.text);

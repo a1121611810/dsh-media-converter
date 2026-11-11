@@ -123,6 +123,7 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 - `maxUploadMb`：单次上传上限（默认 2048 MB），超了直接拒绝，不写盘。
 - `composerButton`：是否在输入框工具排显示「媒体工具箱」按钮（默认开）。
 - `groups`：文件详情页动作模块的顺序与显隐（`convert,edit,view`，写进字符串的才显示）。
+- `features`：功能白名单（逗号分隔的动作 id：`probe,convert,extract-audio,extract-video,subtitle,meta,base64`），留空全启用、未知 id 忽略；停用后对应入口（单任务转换、批量、Agent 工具、Base64）直接报「该功能已停用」，保存即生效。
 - 设置页右上角还有版本号显示与「刷新界面」（等同 Ctrl+R）。
 
 插件导出 `Config` schema 供宿主的 settings 服务投影表单（这是唯一的运行时依赖 `@deepseek-ai/schemastery`，由 npm 正常安装）。

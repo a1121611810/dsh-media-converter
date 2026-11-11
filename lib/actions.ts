@@ -163,12 +163,24 @@ export function actionFor(mode: string): ActionEntry | undefined {
   return ACTIONS.find((entry) => entry.id === mode);
 }
 
-export function toolActions(): string[] {
-  return ACTIONS.flatMap((entry) => (entry.tool ? [entry.tool] : []));
+// A configured `features` string is a whitelist of enabled action ids: empty
+// enables everything, unknown tokens are dropped (same mental model as
+// resolveGroups for the panel's action groups).
+export function resolveFeatures(raw: unknown): string[] {
+  const tokens = String(raw ?? '')
+    .split(',')
+    .map((token) => token.trim())
+    .filter((token) => ACTIONS.some((entry) => entry.id === token));
+  const known = [...new Set(tokens)];
+  return known.length ? known : ACTIONS.map((entry) => entry.id);
+}
+
+export function toolActions(enabled: string[] = ACTIONS.map((entry) => entry.id)): string[] {
+  return ACTIONS.flatMap((entry) => (entry.tool && enabled.includes(entry.id) ? [entry.tool] : []));
 }
 
 // The PTC prompt's format lists follow the convert entry: when convert is
 // removed from the table (or disabled), PTC has nothing to plan.
-export function ptcFormats(kind: MediaKind): string[] {
-  return actionFor('convert')?.ptc ? formatsFor(kind) : [];
+export function ptcFormats(kind: MediaKind, enabled: string[] = ACTIONS.map((entry) => entry.id)): string[] {
+  return actionFor('convert')?.ptc && enabled.includes('convert') ? formatsFor(kind) : [];
 }

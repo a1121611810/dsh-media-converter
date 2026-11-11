@@ -726,6 +726,49 @@ const MUTANTS = [
     distAnchor: 'entry.id !== mode',
     expect: '查找反转后 actionFor 返回错误条目，注册表单测必须红',
   },
+  {
+    id: 'F1',
+    name: 'features 白名单判定反转（停用的反而能跑）',
+    apply: (s) => replaceOnce(s, '!features.includes(entry.id)', 'features.includes(entry.id)'),
+    distAnchor: 'if (features.includes(entry.id))',
+    expect: 'features 白名单必须拦住停用动作，突变后默认配置全被拒 → host 全量红',
+  },
+  {
+    id: 'F2',
+    name: 'features 空串默认被改成全禁用',
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
+    test: 'test/plan.test.mjs',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'return known.length ? known : ACTIONS.map((entry) => entry.id);',
+        'return known.length ? known : [];',
+      ),
+    distAnchor: 'return known.length ? known : [];',
+    expect: '空 features 必须全启用，突变后默认全禁用 → resolveFeatures 单测红',
+  },
+  {
+    id: 'F3',
+    name: 'features 未知 token 不再丢弃',
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
+    test: 'test/plan.test.mjs',
+    apply: (s) =>
+      replaceOnce(s, '.filter((token) => ACTIONS.some((entry) => entry.id === token));', '.filter(() => true);'),
+    distAnchor: '.filter(() => true);',
+    expect: '未知 token 必须被丢弃，突变后混入白名单 → resolveFeatures 单测红',
+  },
+  {
+    id: 'F4',
+    name: '工具枚举的 features 过滤反转',
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
+    apply: (s) =>
+      replaceOnce(s, 'entry.tool && enabled.includes(entry.id)', 'entry.tool && !enabled.includes(entry.id)'),
+    distAnchor: 'entry.tool && !enabled.includes(entry.id)',
+    expect: '枚举必须只含启用动作，突变后默认枚举为空 → host 工具枚举断言红',
+  },
 ];
 
 function build() {

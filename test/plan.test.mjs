@@ -30,7 +30,7 @@ import {
   trimArgs,
 } from '../dist/lib/plan.js';
 import { blendPtcRate, capacityFor, estimatePtcCost, planPtcGroups, threadsFor } from '../dist/lib/schedule.js';
-import { ACTIONS, actionFor, ptcFormats, toolActions } from '../dist/lib/actions.js';
+import { ACTIONS, actionFor, ptcFormats, resolveFeatures, toolActions } from '../dist/lib/actions.js';
 
 assert.equal(kindOf('movie.MOV'), 'video');
 assert.equal(kindOf('clip.gif'), 'image');
@@ -717,5 +717,19 @@ for (const id of ['convert', 'extract-audio', 'extract-video', 'subtitle', 'meta
 assert.deepEqual(ptcFormats('video'), FORMATS.video);
 assert.deepEqual(ptcFormats('audio'), FORMATS.audio);
 assert.deepEqual(ptcFormats('image'), FORMATS.image);
+
+// The features whitelist: empty enables everything, a non-empty list narrows
+// the table, unknown tokens are dropped, duplicates collapse.
+const allIds = ACTIONS.map((entry) => entry.id);
+assert.deepEqual(resolveFeatures(''), allIds);
+assert.deepEqual(resolveFeatures(undefined), allIds);
+assert.deepEqual(resolveFeatures('convert'), ['convert']);
+assert.deepEqual(resolveFeatures('convert,nope'), ['convert']);
+assert.deepEqual(resolveFeatures('convert,convert'), ['convert']);
+assert.deepEqual(resolveFeatures('nope'), allIds);
+assert.deepEqual(toolActions(['convert']), ['convert']);
+assert.deepEqual(toolActions([]), []);
+assert.deepEqual(ptcFormats('video', ['convert']), FORMATS.video);
+assert.deepEqual(ptcFormats('video', ['extract-audio']), []);
 
 console.log('plan.test.mjs: ok');

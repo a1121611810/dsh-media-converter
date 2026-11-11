@@ -3124,4 +3124,109 @@ assert.equal(reloadSecond.hardware.backend, null, 'the adopted verdict is the on
 reloadCleanups.forEach((dispose) => dispose());
 fs.rmSync(reloadOut, { recursive: true, force: true });
 
+// --- the features whitelist ---------------------------------------------------
+// A configured features string narrows what the Host will plan and advertise;
+// every other action answers with a clear refusal instead of running.
+const featRoutes = new Map();
+const featTools = new Map();
+const featCleanups = [];
+const featOut = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-feat-'));
+apply(
+  {
+    get: (key) =>
+      key === 'webServer'
+        ? {
+            getOrigin: () => 'http://127.0.0.1:65533',
+            register: (route) => {
+              featRoutes.set(route.path, route.handler);
+              return () => featRoutes.delete(route.path);
+            },
+          }
+        : key === 'connection'
+          ? connection
+          : undefined,
+    tools: {
+      register: (definition) => {
+        featTools.set(definition.name, definition);
+        return () => featTools.delete(definition.name);
+      },
+    },
+    settings: { configure: () => () => {}, update: async () => {} },
+    effect: (fn) => featCleanups.push(fn()),
+  },
+  { outputDir: featOut, features: 'extract-audio' },
+);
+const featCall = async (route, options = {}) => {
+  const handler = featRoutes.get('/api/media-convert/' + route.split('?')[0]);
+  assert.ok(handler, `route ${route} registered`);
+  const res = makeRes();
+  await handler(fakeReq({ url: '/api/media-convert/' + route, ...options }), res);
+  await res.done;
+  return { status: res.status, data: JSON.parse(Buffer.concat(res.chunks).toString('utf8')) };
+};
+assert.deepEqual(
+  featTools.get('media_toolbox').parameters.properties.action.enum,
+  ['extract-audio'],
+  'the advertised enum follows the features whitelist',
+);
+const featClip = path.join(featOut, 'clip.mp4');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'testsrc=size=64x64:rate=10',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'sine=frequency=440',
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  '-c:a',
+  'aac',
+  '-shortest',
+  featClip,
+]);
+const featUpload = await featCall('upload?name=clip.mp4', { method: 'POST', body: fs.readFileSync(featClip) });
+assert.equal(featUpload.data.ok, true, JSON.stringify(featUpload.data));
+const featConvert = await featCall('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: featUpload.data.id, format: 'mp4' }),
+});
+assert.equal(featConvert.data.ok, false);
+assert.match(featConvert.data.error, /该功能已停用/);
+const featExtract = await featCall('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: featUpload.data.id, mode: 'extract-audio' }),
+});
+assert.equal(featExtract.data.ok, true, JSON.stringify(featExtract.data));
+await featCall('cancel', { method: 'POST', body: JSON.stringify({ id: featExtract.data.job.id }) });
+const featRun = await featCall('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: featUpload.data.id, format: 'mp4' }] }),
+});
+assert.equal(featRun.data.ok, false);
+assert.match(featRun.data.error, /该功能已停用/);
+await assert.rejects(
+  () => featTools.get('media_toolbox').execute({ path: featClip, action: 'probe' }, exec),
+  /该功能已停用/,
+  'probe is gated by the whitelist too',
+);
+const featBase64 = await featCall('base64', { method: 'POST', body: JSON.stringify({ id: featUpload.data.id }) });
+assert.equal(featBase64.data.ok, false);
+assert.match(featBase64.data.error, /该功能已停用/);
+const featDecode = await featCall('decode', { method: 'POST', body: JSON.stringify({ text: 'aGk=' }) });
+assert.equal(featDecode.data.ok, false);
+assert.match(featDecode.data.error, /该功能已停用/);
+featCleanups.forEach((dispose) => dispose());
+fs.rmSync(featOut, { recursive: true, force: true });
+
 console.log('host.test.mjs: ok');
