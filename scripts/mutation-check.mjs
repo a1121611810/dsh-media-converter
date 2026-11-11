@@ -901,21 +901,17 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        'if (!preset || preset.type !== \'macro\' || preset.kind !== file.kind) {',
-        'if (preset && preset.type === \'macro\' && preset.kind === file.kind) {',
+        "if (!preset || preset.type !== 'macro' || preset.kind !== file.kind) {",
+        "if (preset && preset.type === 'macro' && preset.kind === file.kind) {",
       ),
-    distAnchor: 'preset && preset.type === \'macro\'',
+    distAnchor: "preset && preset.type === 'macro'",
     expect: '模型计划的预设引用必须经扩展表校验，反转后合法预设反而被拒 → host PTC 预设断言红',
   },
   {
     id: 'P12',
     name: '工具 preset 参数被忽略',
     apply: (s) =>
-      replaceOnce(
-        s,
-        'preset: a.preset !== undefined ? String(a.preset) : undefined,',
-        'preset: undefined,',
-      ),
+      replaceOnce(s, 'preset: a.preset !== undefined ? String(a.preset) : undefined,', 'preset: undefined,'),
     distAnchor: 'preset: undefined,',
     expect: '工具的 preset 参数必须到达 planFor，突变后按普通 convert 跑默认格式 → host 工具预设断言红',
   },

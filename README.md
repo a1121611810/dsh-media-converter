@@ -18,6 +18,7 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | 音频参数 | 音频文件与视频转 mp3/m4a：可选码率（64-320k）、声道（单声道/立体声）与采样率（8k-48k 常用值），语音场景一键 mono + 22050 Hz |
 | 元数据 | 查看容器、章节、逐轨参数与全部标签；改写标题/作者/专辑/备注/日期/流派（另存为新文件） |
 | Base64 | 当前文件 → `data:` URL；或粘贴 Base64 还原成文件 / 文本 |
+| 扩展平台 | 设置页导入 JSON 扩展包（数据包，非代码）：宏 = 固定参数组合的新动作，出现在文件详情动作网格与批量目标里；配方 = 覆盖内置格式的 ffmpeg 参数（白名单校验，quality 滑杆可映射）；删除即恢复内置 |
 | 批量处理 | 按类型分组：视频/音频/图片各自一个目标；文本单独一段、不参与转换；读取中/未识别单独一段；逐组全选/质量、码率/声道采样率下拉，逐行进度/结果/取消 |
 | PTC 调度 | 批量转换可选：在 DSH 已注册模型里选一个（默认跟随主模型），模型只返回每文件 JSON 计划，宿主校验后交给 PTC 沙箱执行；整批按组多次求值，可超过单次 10 分钟上限；批次由宿主持有，切会话/关页面后继续；低推理档、分阶段进度；默认关，耗 token |
 | GPU / 直接拷贝 | 显卡硬编可勾选 GPU 编码（mp4/mov/mkv/flv/ts），探测到 HEVC 能力后还可选 H.264 / HEVC：macOS 走 VideoToolbox，Windows 走 NVENC / Intel Quick Sync / AMD AMF（自动探测后选一个）；兼容编码/容器直接 `-c copy`，不重编码 |
@@ -60,6 +61,8 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | `extract-audio` / `extract-video` | 抽音轨 / 抽画面，不重编码 |
 | `subtitle` | 导出内嵌字幕为 `.srt`/`.ass`/`.vtt`（`format` 选格式，默认 srt） |
 | `rewrite-tags` | 改写标题/作者/专辑/备注/日期/流派 |
+
+convert 可带 `preset`（`x:<包id>/<动作id>`）：按扩展预设转换，覆盖 format/quality；预设不存在会报错。PTC 批量同样可选预设（模型只回宿主校验过的引用）。
 
 工具吃的是**本机绝对路径**，不走上传：产物写在同一个输出目录，返回新文件路径。调用被取消或超时（30 分钟）时，ffmpeg 会被终止，半成品会被清掉。
 
@@ -122,6 +125,7 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 - `ffmpegPath`：找不到 ffmpeg 时手动指定。
 - `maxUploadMb`：单次上传上限（默认 2048 MB），超了直接拒绝，不写盘。
 - `composerButton`：是否在输入框工具排显示「媒体工具箱」按钮（默认开）。
+- `extensions`：扩展包原文（JSON 文本），设置页的扩展管理卡读写；保存时整包校验，坏包拒收。
 - `groups`：文件详情页动作模块的顺序与显隐（`convert,edit,view`，写进字符串的才显示）。
 - `features`：功能白名单（逗号分隔的动作 id：`probe,convert,extract-audio,extract-video,subtitle,meta,base64`），留空全启用、未知 id 忽略；停用后对应入口（单任务转换、批量、Agent 工具、Base64）直接报「该功能已停用」，保存即生效。
 - 设置页右上角还有版本号显示与「刷新界面」（等同 Ctrl+R）。
@@ -198,6 +202,7 @@ index.ts                  宿主：/api/media-convert/* 路由、ffmpeg 任务�
 lib/plan.ts               格式表、参数生成（含 copy/显卡硬编/线程）、显卡后端表（VideoToolbox/NVENC/QSV/AMF）、元数据解析（ffmpeg stderr 与 ffprobe JSON 两路，同一 MediaMeta）、裁剪（也定义面板要用的媒体类型）
 lib/schedule.ts           自适应容量、任务权重、每任务线程数（纯函数）
 lib/base64.ts             Base64 嗅探与还原
+lib/extensions.ts         扩展包解析校验（包/动作上限、ffmpeg 参数白名单、quality 映射）与 /status 投影
 lib/platform.ts           ffmpeg 查找、文件管理器、文件名规则、各平台可用的显卡后端（纯函数，跨平台分支可测）
 test/                     七套自检（.mjs，跑编译产物）
 dist/                     构建产物：宿主入口 dist/index.js（npm 包入口）+ dist/lib/、dist/src/
@@ -208,6 +213,7 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位。`t` 由平台按槽�
 ## 限制
 
 - Base64 单文件上限 24 MB。
+- 扩展：每包 ≤16 动作、合计 ≤32、一包单一 kind；配方只许白名单内的输出侧 ffmpeg 参数（禁 `-i`/`-filter_complex`/lavfi/路径），不支持新格式名；宏只在匹配 kind 的文件上出现。
 - 上传单文件上限 2048 MB（`maxUploadMb` 可调）。
 - 裁剪区间必须落在文件时长内；区间无效时按钮不可用。
 - 视频转 GIF 默认缩到宽 640、12 fps；普通视频转换也可选输出宽度上限与帧率（等比不放大，留空保持源分辨率/帧率）。
