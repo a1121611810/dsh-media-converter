@@ -358,6 +358,20 @@ const rowTargetValues = computed(() => {
   return map;
 });
 const batchTargets = computed(() => checkedItems.value.filter((item) => item.state !== 'uploading'));
+// Concat needs at least two checked rows that share one convertible kind
+// (video or audio): same kind, no presets in the way — only then the Host
+// can validate a copy-level merge without surprises.
+const concatable = computed(() => {
+  const rows = batchTargets.value.filter(
+    (item) => item.upload && (item.upload.kind === 'video' || item.upload.kind === 'audio'),
+  );
+  return rows.length >= 2 && rows.every((item) => item.upload!.kind === rows[0].upload!.kind);
+});
+const concatRows = computed(() =>
+  concatable.value
+    ? batchTargets.value.filter((item) => item.upload && (item.upload.kind === 'video' || item.upload.kind === 'audio'))
+    : [],
+);
 const planRows = computed(() =>
   rowPlan(
     batchTargets.value.map((item) => ({ key: item.key, kind: item.upload!.kind, streams: item.upload!.streams })),
@@ -1561,13 +1575,70 @@ async function postConvert(id: string, body: Record<string, unknown>): Promise<J
   return data.job;
 }
 
+// Chapter split polls many jobs at once; cancel walks the whole set.
+let splitJobIds: string[] = [];
+
 function cancelRun() {
-  if (!currentJobId) return;
-  fetch('/api/media-convert/cancel', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id: currentJobId }),
-  }).catch(() => {});
+  const ids = splitJobIds.length ? splitJobIds : currentJobId ? [currentJobId] : [];
+  for (const id of ids) {
+    fetch('/api/media-convert/cancel', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).catch(() => {});
+  }
+}
+
+async function splitChapters(how: string) {
+  const item = detailItem.value;
+  if (!item || !item.upload || busy.value) return;
+  detailError.value = '';
+  item.error = '';
+  item.result = null;
+  item.percent = null;
+  item.state = 'converting';
+  item.jobAction = 'split';
+  try {
+    const data = await readJson<{ ok: true; jobs: ServerJob[] } | ErrorResponse>(
+      await fetch('/api/media-convert/convert', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: item.upload.id, mode: 'split-chapters', chapterMode: how }),
+      }),
+    );
+    if (!data.ok) throw new Error(data.error || t('error.title'));
+    splitJobIds = data.jobs.map((job) => job.id);
+    splitJobIds.forEach((id) => activePolls.add(id));
+    let done = 0;
+    const outs: string[] = [];
+    let total = 0;
+    let kind = item.upload.kind;
+    try {
+      await Promise.all(
+        splitJobIds.map(async (id) => {
+          const job = await pollJob(id, () => {});
+          if (job.state === 'error') throw new Error(job.error || t('error.title'));
+          if (job.state === 'cancelled') throw new Error(t('action.cancelled'));
+          outs.push(job.out);
+          total += job.size;
+          kind = job.kind;
+          done += 1;
+          item.percent = Math.round((done / splitJobIds.length) * 100);
+        }),
+      );
+    } finally {
+      splitJobIds.forEach((id) => activePolls.delete(id));
+      splitJobIds = [];
+    }
+    outs.sort();
+    item.result = { file: outs[0], files: outs, size: total, kind };
+    item.state = 'done';
+    item.percent = 100;
+  } catch (err) {
+    item.state = String((err && (err as Error).message) || err) === t('action.cancelled') ? 'cancelled' : 'error';
+    if (item.state === 'error') item.error = String((err && (err as Error).message) || err);
+    item.percent = null;
+  }
 }
 
 function cancelBatch() {
@@ -1687,6 +1758,58 @@ async function startBatch() {
   });
   try {
     await runServerBatch(rows, ptc);
+  } finally {
+    batchRunning.value = false;
+    runStage.value = '';
+    currentJobId = '';
+    lastRun.value = summarizeRun();
+  }
+}
+
+async function runConcat(how: string) {
+  if (busy.value || batchRunning.value || !concatable.value) return;
+  const rows = concatRows.value;
+  const first = rows[0].upload!;
+  const row0 = planByKey.value.get(rows[0].key);
+  const target =
+    row0 && !row0.error && row0.target && !row0.target.startsWith('x:')
+      ? row0.target
+      : (status.value?.formats?.[first.kind as 'video' | 'audio']?.[0] ?? 'mp4');
+  batchError.value = '';
+  lastRun.value = null;
+  ptcTiming.value = null;
+  runKeys.value = [rows[0].key];
+  batchRunning.value = true;
+  rows[0].result = null;
+  rows[0].error = '';
+  rows[0].percent = null;
+  rows[0].state = 'ready';
+  rows[0].jobAction = '';
+  let run: RunInfo;
+  try {
+    const data = await readJson<{ ok: true; run: RunInfo } | ErrorResponse>(
+      await fetch('/api/media-convert/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          items: [{ id: first.id, format: target }],
+          concatIds: rows.map((item) => item.upload!.id),
+          concatHow: how,
+          format: target,
+          quality: batchQuality.value,
+        }),
+      }),
+    );
+    if (!data.ok) throw new Error(data.error || t('error.title'));
+    run = data.run;
+  } catch (err) {
+    batchError.value = String((err && (err as Error).message) || err);
+    batchRunning.value = false;
+    return;
+  }
+  applyRun(run);
+  try {
+    await pollRun(run.id);
   } finally {
     batchRunning.value = false;
     runStage.value = '';
@@ -2218,6 +2341,7 @@ watch([action, panelOpen], async () => {
             :progress-percent="batchProgressPercent"
             :can-audio="canAudio"
             :can-video="canVideo"
+            :concatable="concatable"
             :disabled="busy"
             :t="t"
             @ptc="usePtc = $event"
@@ -2225,6 +2349,7 @@ watch([action, panelOpen], async () => {
             @update:model-key="ptcModelKey = $event"
             @run="startBatch"
             @cancel="cancelBatch"
+            @concat="runConcat"
           />
 
           <div class="mc-list-wrap">
@@ -2894,6 +3019,15 @@ watch([action, panelOpen], async () => {
                     <span>{{ label }}</span
                     ><span>{{ value || '—' }}</span>
                   </template>
+                </div>
+                <div class="mc-row">
+                  <button class="mc-btn mc-btn-ghost" :disabled="busy" @click="splitChapters('copy')">
+                    {{ t('split.copy') }}
+                  </button>
+                  <button class="mc-btn mc-btn-ghost" :disabled="busy" @click="splitChapters('encode')">
+                    {{ t('split.encode') }}
+                  </button>
+                  <span class="mc-muted">{{ t('split.hint') }}</span>
                 </div>
               </template>
               <div class="mc-meta-head">{{ t('meta.tracks') }}</div>

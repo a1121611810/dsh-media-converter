@@ -79,8 +79,12 @@ export interface ConvertPlan {
   ext: string;
   kind: MediaKind;
   args: string[];
-  // Input options that must sit before -i (e.g. -hwaccel cuda).
+  // Input options that must sit before -i (e.g. -hwaccel cuda or the concat
+  // demuxer's -f concat -safe 0).
   inputArgs?: string[];
+  // Overrides the input path (the concat list file); duration and progress
+  // still come from the upload view the caller hands to startJob.
+  input?: string;
   // True when the job only rewrites the container.
   copy?: boolean;
   // True when the video encoder runs on the graphics card.
@@ -1084,6 +1088,57 @@ export function subtitlePlan(streams: StreamInfo, ordinal: number | string | und
     args: ['-map', `0:s:${Number(ordinal)}`, '-c:s', format === 'vtt' ? 'webvtt' : format],
     stemSuffix: track.language ? '.' + track.language : '',
   };
+}
+
+// --- concat & chapter split (R3) --------------------------------------------
+// The concat demuxer reads a list file; paths with single quotes are escaped
+// the way the demuxer documents (`'` -> `'\''`).
+export function concatListText(paths: string[]): string {
+  return paths.map((item) => `file '${item.replace(/'/g, `'\\''`)}'`).join('\n') + '\n';
+}
+
+// What the copy level needs every file to agree on; a null answer means the
+// files can be concatenated without re-encoding. The probed metas carry the
+// facts — never probe again here.
+export function concatCompatible(metas: MediaMeta[]): string | null {
+  const first = metas[0];
+  const videoCodec = first.video ? first.video.codec : '';
+  const audioCodec = first.audio ? first.audio.codec : '';
+  const width = first.video ? first.video.width || 0 : 0;
+  const height = first.video ? first.video.height || 0 : 0;
+  for (const meta of metas.slice(1)) {
+    if ((meta.video ? meta.video.codec : '') !== videoCodec) return '画面编码不一致';
+    if ((meta.audio ? meta.audio.codec : '') !== audioCodec) return '音轨编码不一致';
+    if (width && (meta.video ? meta.video.width || 0 : 0) !== width) return '分辨率不一致';
+    if (height && (meta.video ? meta.video.height || 0 : 0) !== height) return '分辨率不一致';
+  }
+  return null;
+}
+
+export function concatCopyArgs(format: string): string[] {
+  const args = ['-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy'];
+  if (format === 'mp4') args.push('-movflags', '+faststart');
+  return args;
+}
+
+// Chapters worth their own file: positive length, start clamped at zero and
+// end clamped at the duration. Zero-length chapters are skipped, not errors.
+export interface ChapterWindow {
+  index: number;
+  start: number;
+  end: number;
+  title: string;
+}
+export function chapterWindows(meta: MediaMeta): ChapterWindow[] {
+  const out: ChapterWindow[] = [];
+  for (const [index, chapter] of meta.chapters.entries()) {
+    const start = Math.max(0, chapter.start);
+    let end = chapter.end;
+    if (meta.duration > 0) end = Math.min(end, meta.duration);
+    if (!(end - start > 0.01)) continue;
+    out.push({ index, start, end, title: chapter.tags.title || '' });
+  }
+  return out;
 }
 
 const TAG_KEYS = ['title', 'artist', 'album', 'comment', 'date', 'genre'];

@@ -33,6 +33,11 @@ import { applyQualityMap, entriesOf, parseExtensions, statusOf } from './lib/ext
 import type { ExtensionEntry, ExtensionManifest } from './lib/extensions.js';
 import {
   FORMATS,
+  buildArgs,
+  chapterWindows,
+  concatCompatible,
+  concatCopyArgs,
+  concatListText,
   defaultFormat,
   extOf,
   formatsFor,
@@ -387,6 +392,10 @@ export interface RunInfo {
   // Estimated wall time for the whole batch, from the measured throughput.
   estimatedMs?: number;
   error?: string;
+  // A concat run is ONE job over many uploads: the ordered upload ids and the
+  // chosen level live here, items carries the single display row.
+  concatIds?: string[];
+  concatHow?: 'copy' | 'encode';
   items: RunItemInfo[];
 }
 
@@ -445,6 +454,11 @@ export interface JsonBody {
   queueLimit?: unknown;
   extensions?: unknown;
   ids?: unknown;
+  // Concat run: the ordered upload ids and the chosen level ('copy'|'encode').
+  concatIds?: unknown;
+  concatHow?: unknown;
+  // Chapter split: 'copy' (keyframe cut) or 'encode' (precise re-encode).
+  chapterMode?: unknown;
   items?: unknown;
   model?: unknown;
   runId?: unknown;
@@ -1255,7 +1269,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           ...(attempt.inputArgs || []),
           ...trimArgs(trim),
           '-i',
-          upload.path,
+          attempt.input || upload.path,
           ...attempt.args,
           ...threadArgs(attempt.threads),
           '-progress',
@@ -1391,6 +1405,85 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // cheap and light.
   // A lane's workers walk their own queue, so a slow software video never
   // blocks the other lanes behind it.
+  // A concat run is ONE ffmpeg over the concat list file; the display item is
+  // the first upload's row, and cancel/restore ride the generic run paths.
+  const executeConcatRun = async (run: RunInfo, quality: number): Promise<void> => {
+    const item = run.items[0];
+    try {
+      const files = (run.concatIds || []).map((id) => uploads.get(id));
+      if (files.some((file) => !file)) throw new Error('有文件已失效，请重新选择');
+      const list = files as Upload[];
+      if (list.some((file) => file.kind !== list[0].kind)) throw new Error('只能合并同类型的文件');
+      const how = run.concatHow === 'encode' ? 'encode' : 'copy';
+      const format = item.format || extOf(list[0].name) || defaultFormat(list[0].kind);
+      // The copy level's compatibility was validated at POST; the encode
+      // level reuses the plain convert recipe for the chosen format.
+      const plan: ConvertPlan =
+        how === 'copy'
+          ? {
+              ext: format,
+              kind: kindByExt(format),
+              args: concatCopyArgs(format),
+              inputArgs: ['-f', 'concat', '-safe', '0'],
+              copy: true,
+            }
+          : {
+              ext: format,
+              kind: kindByExt(format),
+              args: buildArgs(list[0].kind, format, quality),
+              inputArgs: ['-f', 'concat', '-safe', '0'],
+            };
+      const listFile = path.join(
+        tmpDir,
+        `concat-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.txt`,
+      );
+      await fsp.writeFile(listFile, concatListText(list.map((file) => file.path)), 'utf8');
+      const pseudo: Upload = {
+        id: 'concat',
+        name: `merged-${list.length}`,
+        path: listFile,
+        owned: false,
+        kind: list[0].kind,
+        duration: list.reduce((sum, file) => sum + file.duration, 0),
+        size: list.reduce((sum, file) => sum + file.size, 0),
+        streams: list[0].streams,
+        meta: list[0].meta,
+        at: Date.now(),
+      };
+      const { job, done } = await startJob(pseudo, { ...plan, input: listFile }, null, pseudo.name);
+      // The list file is scratch: it dies with the job, never with the TTL sweep.
+      void done.finally(() => fsp.rm(listFile, { force: true }).catch(() => {}));
+      item.jobId = job.id;
+      item.state = 'converting';
+      const tick = setInterval(() => {
+        item.percent = job.percent;
+      }, 250);
+      tick.unref();
+      try {
+        await done;
+      } finally {
+        clearInterval(tick);
+      }
+      if (job.state === 'done') {
+        item.state = 'done';
+        item.percent = 100;
+        item.result = { file: job.out, size: job.size, kind: job.kind, copy: job.copy, hardware: job.hardware };
+      } else if (job.state === 'cancelled') {
+        item.state = 'cancelled';
+        item.percent = null;
+      } else {
+        item.state = 'error';
+        item.percent = null;
+        item.error = job.error || '处理失败';
+      }
+    } catch (err) {
+      item.state = run.state === 'running' ? 'error' : 'cancelled';
+      item.percent = null;
+      if (item.state === 'error') item.error = errorText(err);
+    }
+    if (run.state === 'running') run.state = 'done';
+  };
+
   const executeRun = async (run: RunInfo, quality: number, hardware: boolean): Promise<void> => {
     // The backend must be settled before the plans are built, or a batch
     // that asked for hardware encoding would quietly fall back to the CPU.
@@ -1399,6 +1492,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     runControllers.set(run.id, controller);
     const { signal } = controller;
     try {
+      if (run.concatIds?.length) {
+        await executeConcatRun(run, quality);
+        return;
+      }
       interface RunEntry {
         item: RunInfo['items'][number];
         upload: Upload;
@@ -2218,9 +2315,143 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
 
   // The agent half: the same engine, reachable from a conversation. The tool
   // works on a local path, so it never copies the file into the temp folder.
+  // Shared by the tool's concat action: probe every path, validate like the
+  // /run route does, and hand back a started job plus its scratch list file.
+  const startConcatFromPaths = async (
+    paths: string[],
+    how: 'copy' | 'encode',
+    format: string | undefined,
+    quality: number,
+  ): Promise<{ job: Job; done: Promise<void>; listFile: string }> => {
+    const metas: Upload[] = [];
+    for (const item of paths) {
+      const probedOne = await probeFile(item, ffmpeg!, ffprobe);
+      if (!probedOne) throw new Error(`无法识别的媒体文件：${item}`);
+      const oneStat = await fsp.stat(item);
+      metas.push({
+        id: 'tool',
+        name: path.basename(item),
+        path: item,
+        owned: false,
+        kind: probedOne.kind,
+        duration: probedOne.duration,
+        size: oneStat.size,
+        streams: probedOne.streams,
+        meta: probedOne.meta,
+        at: Date.now(),
+      });
+    }
+    if (metas.length < 2) throw new Error('合并至少需要 2 个文件');
+    if (metas.length > 64) throw new Error('一次最多合并 64 个文件');
+    if (metas.some((item) => item.kind !== metas[0].kind)) throw new Error('只能合并同类型的文件');
+    const kind0 = metas[0].kind;
+    if (kind0 !== 'video' && kind0 !== 'audio') throw new Error('合并只支持视频或音频文件');
+    const target = format || extOf(metas[0].name) || defaultFormat(kind0);
+    // Same rule as the /run route: the container must hold the merged kind.
+    if (kind0 === 'video' ? kindByExt(target) !== 'video' : kindByExt(target) !== 'audio') {
+      throw new Error(`合并输出必须是${kind0 === 'video' ? '视频' : '音频'}格式: ${target}`);
+    }
+    if (how === 'copy') {
+      const mismatch = concatCompatible(metas.map((item) => item.meta));
+      if (mismatch) throw new Error(`直接拷贝要求各文件编码与分辨率一致（${mismatch}），请改用重编码合并`);
+    } else if (!formatsFor(kind0).includes(target)) {
+      throw new Error(`不支持的输出格式: ${target}`);
+    }
+    const plan: ConvertPlan =
+      how === 'copy'
+        ? {
+            ext: target,
+            kind: kindByExt(target),
+            args: concatCopyArgs(target),
+            inputArgs: ['-f', 'concat', '-safe', '0'],
+            copy: true,
+          }
+        : {
+            ext: target,
+            kind: kindByExt(target),
+            args: buildArgs(kind0, target, quality),
+            inputArgs: ['-f', 'concat', '-safe', '0'],
+          };
+    const listFile = path.join(
+      tmpDir,
+      `concat-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.txt`,
+    );
+    await fsp.writeFile(listFile, concatListText(metas.map((item) => item.path)), 'utf8');
+    const pseudo: Upload = {
+      id: 'concat',
+      name: `merged-${metas.length}`,
+      path: listFile,
+      owned: false,
+      kind: kind0,
+      duration: metas.reduce((sum, item) => sum + item.duration, 0),
+      size: metas.reduce((sum, item) => sum + item.size, 0),
+      streams: metas[0].streams,
+      meta: metas[0].meta,
+      at: Date.now(),
+    };
+    const started = await startJob(pseudo, { ...plan, input: listFile }, null, pseudo.name);
+    return { ...started, listFile };
+  };
+
+  const runConcatTool = async (a: Record<string, unknown>, exec: { signal: AbortSignal }): Promise<unknown> => {
+    const paths = Array.isArray(a.paths) ? a.paths.map(String).filter(Boolean) : [];
+    const how = String(a.mode || 'copy') === 'encode' ? 'encode' : 'copy';
+    const { job, done, listFile } = await startConcatFromPaths(
+      paths,
+      how,
+      a.format !== undefined ? String(a.format) : undefined,
+      Number(a.quality || 90),
+    );
+    try {
+      const finished = await awaitJob(job, done, exec.signal);
+      return { file: finished.out, kind: finished.kind, duration: 0, sizeBytes: finished.size };
+    } finally {
+      await fsp.rm(listFile, { force: true }).catch(() => {});
+    }
+  };
+
+  const runSplitTool = async (
+    upload: Upload,
+    a: Record<string, unknown>,
+    exec: { signal: AbortSignal },
+  ): Promise<unknown> => {
+    const windows = chapterWindows(upload.meta);
+    if (!windows.length) throw new Error('这个文件没有可分割的章节');
+    const how = String(a.chapterMode || 'copy') === 'encode' ? 'encode' : 'copy';
+    const sourceExt = extOf(upload.name) || defaultFormat(upload.kind);
+    const enc = formatsFor(upload.kind).includes(sourceExt) ? sourceExt : defaultFormat(upload.kind);
+    // Tool calls are one-off: chapters run sequentially, unlike the panel's
+    // scheduled fan-out.
+    const outs: string[] = [];
+    let total = 0;
+    for (const win of windows.slice(0, 64)) {
+      const suffix = `-ch${win.index + 1}` + (win.title ? `-${safeBaseName(win.title)}`.slice(0, 40) : '');
+      const plan: ConvertPlan =
+        how === 'copy'
+          ? { ext: sourceExt, kind: upload.kind, args: ['-map', '0', '-c', 'copy'], stemSuffix: suffix }
+          : {
+              ext: enc,
+              kind: kindByExt(enc),
+              args: buildArgs(upload.kind, enc, Number(a.quality || 90)),
+              stemSuffix: suffix,
+            };
+      const { job, done } = await startJob(upload, plan, { start: win.start, end: win.end }, '');
+      const finished = await awaitJob(job, done, exec.signal);
+      outs.push(finished.out);
+      total += finished.size;
+    }
+    return { file: outs[0], files: outs, kind: upload.kind, duration: upload.duration, sizeBytes: total };
+  };
+
   const runMediaTool = async (args: unknown, exec: { signal: AbortSignal }): Promise<unknown> => {
     if (!ffmpeg) throw new Error(noFfmpeg.error);
     const a = (args || {}) as Record<string, unknown>;
+    const action = String(a.action || 'convert');
+    const actionId = action === 'rewrite-tags' ? 'meta' : action;
+    if (!features.includes(actionId)) throw new Error('该功能已停用');
+    // Concat works on a path LIST, not one primary file: it goes before the
+    // single-path validation below.
+    if (action === 'concat') return runConcatTool(a, exec);
     const file = String(a.path || '');
     if (!file) throw new Error('缺少 path：需要本机文件的绝对路径');
     const stat = await fsp.stat(file).catch(() => null);
@@ -2242,12 +2473,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       meta: probed.meta,
       at: Date.now(),
     };
-    const action = String(a.action || 'convert');
-    const actionId = action === 'rewrite-tags' ? 'meta' : action;
-    if (!features.includes(actionId)) throw new Error('该功能已停用');
     if (action === 'probe') {
       return { file, kind: probed.kind, duration: probed.duration, sizeBytes: stat.size, meta: probed.meta };
     }
+    // Cross-file and multi-output actions feed paths/upload into the same
+    // engines the routes use; they never reach the single-file plan below.
+    // (concat was already handled before the single-path validation.)
+    if (action === 'split-chapters') return runSplitTool(upload, a, exec);
     const body: JsonBody = {
       mode: action === 'rewrite-tags' ? 'meta' : action,
       // A subtitle extraction without an explicit format defaults to srt, not
@@ -2341,7 +2573,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       name: 'media_toolbox',
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
-        '③extract-audio 抽音轨、④extract-video 抽画面（不重编码，可带 stream 选类型内第几条轨）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）。' +
+        '③extract-audio 抽音轨、④extract-video 抽画面（不重编码，可带 stream 选类型内第几条轨）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）；⑦concat 合并多个同类型文件（paths[]，mode=copy 直接拷贝/encode 重编码）；⑧split-chapters 按章节分割为多个文件（默认 copy 关键帧裁剪，mode=encode 精确重编码，返回 files[]）。' +
         'convert 可带 trim（秒，{start,end}）裁剪；视频转视频可带 videoTrack、带音频的输出可带 audioTrack（类型内轨序号，1=第二条，0 或不填走默认轨；显式选轨将禁用直接拷贝）；软件编码可选 codec（hevc=libx265、av1=libsvtav1，仅 mp4/mov/mkv，配 hardware=false 或缺省；缺编码器时任务报错，其它容器回退 H.264），指定 codec 而不填 hardware 视同请求 GPU 硬编（h264/hevc，hevc 限 mp4/mov/mkv/ts）；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale，x265/svt-av1 映射各自 CRF）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
@@ -2430,6 +2662,17 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             description:
               '轨序号（1=第二条，默认 0=第一条）：subtitle 选字幕轨；extract-audio/extract-video 选类型内第几条音轨/画面轨（超出范围报错）。',
           },
+          paths: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'concat 的本机文件绝对路径列表（≥2、≤64、同类型视频/音频）。',
+          },
+          mode: {
+            type: 'string',
+            enum: ['copy', 'encode'],
+            description:
+              'concat 的合并方式：copy=直接拷贝（要求各文件编码与分辨率一致），encode=重编码（配 format/quality）；split-chapters 用它选 encode=按章节精确重编码（默认 copy=关键帧裁剪，更快但不精确）。',
+          },
         },
         required: ['path'],
       },
@@ -2438,6 +2681,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           type: 'object',
           properties: {
             file: { type: 'string' },
+            files: { type: 'array', items: { type: 'string' } },
             kind: { type: 'string' },
             duration: { type: 'number' },
             sizeBytes: { type: 'number' },
@@ -2448,6 +2692,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         render(_args, value) {
           const v = (value || {}) as Record<string, unknown>;
           const lines = [`文件: ${String(v.file || '')}`];
+          const extra = Array.isArray(v.files) ? v.files.filter((item) => typeof item === 'string') : [];
+          if (extra.length > 1) lines.push(`共 ${extra.length} 个产物（第 1 个见上）`);
           const bytes = Number(v.sizeBytes) || 0;
           if (bytes) {
             // A 26 KB file is "0.0 MB"; below a megabyte the KB figure is the honest one.
@@ -2926,6 +3172,50 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             const body = await readJson(req);
             const upload = body.id ? uploads.get(body.id) : undefined;
             if (!upload) return json(res, 200, errorPayload('文件已失效，请重新选择'));
+            // Concat is a run-level job (see /run): a bare /convert ask gets a
+            // pointer instead of the plan-less registry entry's generic error.
+            if (String(body.mode || '') === 'concat') {
+              return json(res, 200, errorPayload('合并请从队列页的「合并选中项」发起（批量处理卡）'));
+            }
+            // Chapter split: one job per chapter, CPU-scheduled so a 50-chapter
+            // file does not spawn 50 encodes at once. The response carries all
+            // started jobs; completion polling rides the plain /job route.
+            if (String(body.mode || '') === 'split-chapters') {
+              if (!features.includes('split-chapters')) return json(res, 200, errorPayload('该功能已停用'));
+              const windows = chapterWindows(upload.meta);
+              if (!windows.length) return json(res, 200, errorPayload('这个文件没有可分割的章节'));
+              const how = String(body.chapterMode || 'copy') === 'encode' ? 'encode' : 'copy';
+              const sourceExt = extOf(upload.name) || defaultFormat(upload.kind);
+              const enc = formatsFor(upload.kind).includes(sourceExt) ? sourceExt : defaultFormat(upload.kind);
+              const starters = windows.slice(0, 64).map((win) => {
+                const suffix = `-ch${win.index + 1}` + (win.title ? `-${safeBaseName(win.title)}`.slice(0, 40) : '');
+                const plan: ConvertPlan =
+                  how === 'copy'
+                    ? { ext: sourceExt, kind: upload.kind, args: ['-map', '0', '-c', 'copy'], stemSuffix: suffix }
+                    : {
+                        ext: enc,
+                        kind: kindByExt(enc),
+                        args: buildArgs(upload.kind, enc, body.quality),
+                        stemSuffix: suffix,
+                      };
+                let begun!: (job: Job) => void;
+                const begunP = new Promise<Job>((resolve) => {
+                  begun = resolve;
+                });
+                const weight = upload.kind === 'video' ? WEIGHTS.video : WEIGHTS.audio;
+                const finishedP = schedule(weight, async () => {
+                  const started = await startJob(upload, plan, { start: win.start, end: win.end }, '');
+                  begun(started.job);
+                  await started.done;
+                  return started.job;
+                });
+                return { begunP, finishedP };
+              });
+              const started = await Promise.all(starters.map((starter) => starter.begunP));
+              json(res, 200, { ok: true, jobs: started });
+              void Promise.allSettled(starters.map((starter) => starter.finishedP));
+              return;
+            }
             // A request that asks for hardware encoding waits for the verdict
             // instead of quietly converting on the CPU.
             if (body.hardware) await deviceVerdict(ffmpeg!);
@@ -3033,6 +3323,84 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           if (!ffmpeg) return json(res, 200, noFfmpeg);
           try {
             const body = await readJson(req);
+            // A concat run is one job over many uploads; everything that can
+            // fail validation fails here, before the run exists, so the panel
+            // shows an immediate error instead of a failed batch row.
+            const concatIds = Array.isArray(body.concatIds)
+              ? body.concatIds.map((item: unknown) => String(item)).filter(Boolean)
+              : [];
+            if (concatIds.length) {
+              if (body.ptc === true) return json(res, 200, errorPayload('PTC 批量不支持合并'));
+              if (!features.includes('concat')) return json(res, 200, errorPayload('该功能已停用'));
+              if (concatIds.length < 2) return json(res, 200, errorPayload('合并至少需要 2 个文件'));
+              if (concatIds.length > 64) return json(res, 200, errorPayload('一次最多合并 64 个文件'));
+              const files = concatIds.map((id) => uploads.get(id));
+              if (files.some((file) => !file)) return json(res, 200, errorPayload('有文件已失效，请重新选择'));
+              const list = files as Upload[];
+              if (list.some((file) => file.kind !== list[0].kind)) {
+                return json(res, 200, errorPayload('只能合并同类型的文件'));
+              }
+              const kind0 = list[0].kind;
+              if (kind0 !== 'video' && kind0 !== 'audio') {
+                return json(res, 200, errorPayload('合并只支持视频或音频文件'));
+              }
+              const how = String(body.concatHow || 'copy') === 'encode' ? ('encode' as const) : ('copy' as const);
+              const format = String(body.format || extOf(list[0].name) || defaultFormat(kind0));
+              // A concat target must hold the kind being merged: FORMATS.video
+              // also lists mp3/m4a (single-file extraction), which would make
+              // a video merge die inside ffmpeg with a muxer error.
+              if (kind0 === 'video' ? kindByExt(format) !== 'video' : kindByExt(format) !== 'audio') {
+                return json(
+                  res,
+                  200,
+                  errorPayload(`合并输出必须是${kind0 === 'video' ? '视频' : '音频'}格式: ${format}`),
+                );
+              }
+              if (how === 'copy') {
+                const mismatch = concatCompatible(list.map((file) => file.meta));
+                if (mismatch) {
+                  return json(
+                    res,
+                    200,
+                    errorPayload(`直接拷贝要求各文件编码与分辨率一致（${mismatch}），请改用重编码合并`),
+                  );
+                }
+              } else if (!formatsFor(kind0).includes(format)) {
+                return json(res, 200, errorPayload(`不支持的输出格式: ${format}`));
+              }
+              const run: RunInfo = {
+                id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                state: 'running',
+                kind: 'plain',
+                at: Date.now(),
+                concatIds,
+                concatHow: how,
+                items: [
+                  {
+                    id: list[0].id,
+                    mode: 'concat',
+                    format,
+                    quality: undefined,
+                    bitrate: undefined,
+                    fps: undefined,
+                    width: undefined,
+                    channels: undefined,
+                    sampleRate: undefined,
+                    codec: undefined,
+                    state: 'waiting',
+                    percent: null,
+                    jobId: '',
+                    error: '',
+                    result: null,
+                  },
+                ],
+              };
+              runs.set(run.id, run);
+              latestRun = run.id;
+              json(res, 200, { ok: true, run });
+              void executeRun(run, Number(body.quality ?? 90), false);
+              return;
+            }
             const raw = Array.isArray(body.items) ? body.items : [];
             const items: RunItemInfo[] = [];
             for (const entry of raw) {

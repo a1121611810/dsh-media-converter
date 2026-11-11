@@ -22,6 +22,9 @@ export const PLATFORM =
 // the shapes it sends.
 export interface ResultPayload {
   file: string;
+  // Chapter split produces one file per chapter: the first rides `file`,
+  // everything landed is listed here.
+  files?: string[];
   size: number;
   kind: MediaKind;
   text?: string;

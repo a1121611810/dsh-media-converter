@@ -2259,10 +2259,224 @@ const media = tools.get('media_toolbox');
 assert.ok(media, 'the agent tool is registered');
 assert.deepEqual(
   media.parameters.properties.action.enum,
-  ['probe', 'convert', 'extract-audio', 'extract-video', 'subtitle', 'rewrite-tags'],
+  ['probe', 'convert', 'extract-audio', 'extract-video', 'subtitle', 'rewrite-tags', 'concat', 'split-chapters'],
   'the tool action enum derives from the registry',
 );
 const exec = { signal: new AbortController().signal };
+
+// --- concat & chapter split (R3): the /run and /convert faces ---------------
+const clip2 = path.join(outDir, 'clip2.mp4');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'testsrc=size=64x64:rate=10',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'sine=frequency=880',
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  '-c:a',
+  'aac',
+  '-shortest',
+  clip2,
+]);
+// 不同分辨率，且 .3gp 名字让假探针穿透、用真实元数据触发拷贝门禁。
+const clip3 = path.join(outDir, 'clip3.3gp');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-i',
+  'testsrc=duration=2:size=640x360:rate=10',
+  '-f',
+  'lavfi',
+  '-i',
+  'sine=frequency=880',
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  '-c:a',
+  'aac',
+  '-shortest',
+  clip3,
+]);
+const ffmeta = path.join(outDir, 'chapters.txt');
+fs.writeFileSync(
+  ffmeta,
+  [
+    ';FFMETADATA1',
+    '[CHAPTER]',
+    'TIMEBASE=1/1000',
+    'START=0',
+    'END=1000',
+    'title=开场',
+    '[CHAPTER]',
+    'TIMEBASE=1/1000',
+    'START=1000',
+    'END=4000',
+    'title=正片',
+    '[CHAPTER]',
+    'TIMEBASE=1/1000',
+    'START=4000',
+    'END=4500',
+    'title=尾声',
+  ].join('\n'),
+);
+const chaptered = path.join(outDir, 'chapters.3gp');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-i',
+  'testsrc=duration=4.5:size=320x240:rate=10',
+  '-f',
+  'lavfi',
+  '-i',
+  'sine=frequency=440',
+  '-i',
+  ffmeta,
+  '-map_metadata',
+  '2',
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  '-c:a',
+  'aac',
+  '-shortest',
+  chaptered,
+]);
+const clip2Upload = await call('upload?name=clip2.mp4', { method: 'POST', body: fs.readFileSync(clip2) });
+const clip3Upload = await call('upload?name=clip3.3gp', { method: 'POST', body: fs.readFileSync(clip3) });
+const chapterUpload = await call('upload?name=chapters.3gp', { method: 'POST', body: fs.readFileSync(chaptered) });
+assert.equal(chapterUpload.data.ok, true, JSON.stringify(chapterUpload.data));
+
+// 拷贝合并走 /run（与面板同一条路径）：产物时长≈两段之和、各一条轨。
+const concatCopyRun = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [{ id: clipUpload.data.id, format: 'mp4' }],
+    concatIds: [clipUpload.data.id, clip2Upload.data.id],
+    concatHow: 'copy',
+    format: 'mp4',
+  }),
+});
+assert.equal(concatCopyRun.data.ok, true, JSON.stringify(concatCopyRun.data));
+const concatCopyDone = await waitRun(concatCopyRun.data.run);
+assert.equal(concatCopyDone.items[0].state, 'done', JSON.stringify(concatCopyDone.items[0]));
+assert.equal(concatCopyDone.items[0].result.copy, true, '拷贝合并标记 copy');
+const mergedMeta = parseMeta(
+  spawnSync(ffmpeg, ['-hide_banner', '-i', concatCopyDone.items[0].result.file], { encoding: 'utf8' }).stderr,
+);
+assert.ok(Math.abs(mergedMeta.duration - 4) < 0.5, `merged duration ${mergedMeta.duration}`);
+assert.equal(mergedMeta.streams.filter((stream) => stream.type === 'video').length, 1, '合并产物只有一条画面轨');
+assert.equal(mergedMeta.streams.filter((stream) => stream.type === 'audio').length, 1);
+
+// 重编码合并：不要求源一致，产物是重编码的 h264。
+const concatEncRun = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [{ id: clipUpload.data.id, format: 'mp4' }],
+    concatIds: [clipUpload.data.id, clip2Upload.data.id],
+    concatHow: 'encode',
+    format: 'mp4',
+  }),
+});
+const concatEncDone = await waitRun(concatEncRun.data.run);
+assert.equal(concatEncDone.items[0].state, 'done', JSON.stringify(concatEncDone.items[0]));
+const mergedEnc = parseMeta(
+  spawnSync(ffmpeg, ['-hide_banner', '-i', concatEncDone.items[0].result.file], { encoding: 'utf8' }).stderr,
+);
+assert.equal(mergedEnc.video.codec, 'h264');
+assert.ok(Math.abs(mergedEnc.duration - 4) < 0.5);
+
+// 拷贝门禁：真实探针报出的分辨率不一致在 POST 层就拒绝。
+const concatBad = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [{ id: clipUpload.data.id, format: 'mp4' }],
+    concatIds: [clipUpload.data.id, clip3Upload.data.id],
+    concatHow: 'copy',
+  }),
+});
+assert.equal(concatBad.data.ok, false, '分辨率不一致的拷贝合并在 POST 层拒绝');
+assert.match(concatBad.data.error, /分辨率不一致/);
+const concatOne = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: clipUpload.data.id }], concatIds: [clipUpload.data.id] }),
+});
+assert.equal(concatOne.data.ok, false);
+assert.match(concatOne.data.error, /至少需要 2 个/);
+// 视频合并的输出必须是视频格式（FORMATS.video 里的 mp3/m4a 是单文件提取语义）。
+const concatMp3 = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [{ id: clipUpload.data.id, format: 'mp3' }],
+    concatIds: [clipUpload.data.id, clip2Upload.data.id],
+    concatHow: 'encode',
+    format: 'mp3',
+  }),
+});
+assert.equal(concatMp3.data.ok, false);
+assert.match(concatMp3.data.error, /必须是视频格式/);
+// /convert 直问 concat 拿到指路提示，而不是 plan-less 条目的含糊报错。
+const convertConcat = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, mode: 'concat' }),
+});
+assert.equal(convertConcat.data.ok, false);
+assert.match(convertConcat.data.error, /合并请从队列页/);
+
+// 工具路径 concat。
+const toolConcat = await media.execute({ paths: [clip, clip2], action: 'concat', mode: 'copy' }, exec);
+const toolConcatMeta = parseMeta(
+  spawnSync(ffmpeg, ['-hide_banner', '-i', toolConcat.file], { encoding: 'utf8' }).stderr,
+);
+assert.ok(Math.abs(toolConcatMeta.duration - 4) < 0.5, 'tool concat merges the pair');
+
+// 章节分割（copy）：零长跳过、越界 clamp → 3 个窗口。
+const splitCopy = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: chapterUpload.data.id, mode: 'split-chapters', chapterMode: 'copy' }),
+});
+assert.equal(splitCopy.data.ok, true, JSON.stringify(splitCopy.data));
+assert.equal(splitCopy.data.jobs.length, 3, '三个章节各自一个窗口');
+const splitDone = await Promise.all(splitCopy.data.jobs.map((job) => waitJob(job)));
+assert.ok(
+  splitDone.every((job) => /-ch\d/.test(job.out)),
+  '章节号进文件名',
+);
+const splitDurations = splitDone
+  .map((job) => parseDuration(spawnSync(ffmpeg, ['-hide_banner', '-i', job.out], { encoding: 'utf8' }).stderr))
+  .sort((a, b) => a - b);
+assert.ok(Math.abs(splitDurations[0] - 0.5) < 0.4, `shortest chapter ${splitDurations[0]}`);
+assert.ok(Math.abs(splitDurations[2] - 3) < 0.7, `longest chapter ${splitDurations[2]}`);
+
+// 无章节 → 明确报错；工具路径 split-chapters 返回 files。
+const noChapters = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, mode: 'split-chapters' }),
+});
+assert.equal(noChapters.data.ok, false);
+assert.match(noChapters.data.error, /没有可分割的章节/);
+const toolSplit = await media.execute({ path: chaptered, action: 'split-chapters', chapterMode: 'copy' }, exec);
+assert.equal(toolSplit.files.length, 3, 'tool split returns every chapter file');
 
 const probed = await media.execute({ path: clip, action: 'probe' }, exec);
 assert.equal(probed.kind, 'video');

@@ -35,6 +35,9 @@ const props = defineProps<{
   progressPercent: number | null;
   canAudio: boolean;
   canVideo: boolean;
+  // At least two checked rows share one media kind (video or audio): the
+  // concat controls appear.
+  concatable: boolean;
   disabled: boolean;
   t: (key: string) => string;
 }>();
@@ -47,9 +50,11 @@ const emit = defineEmits<{
   'update:model-key': [value: string];
   run: [];
   cancel: [];
+  concat: [how: string];
 }>();
 
 const showCopy = ref(false);
+const concatHow = ref('copy');
 watch(
   () => props.usePtc,
   (on) => {
@@ -65,6 +70,9 @@ const setCodec = (event: Event) => emit('update:codec', (event.target as HTMLSel
 // which encoder will run.
 const gpuTitle = computed(() => props.t('batch.gpu').replace('%s', props.gpuLabel || 'GPU'));
 const setModel = (event: Event) => emit('update:model-key', (event.target as HTMLSelectElement).value);
+const setConcatHow = (event: Event) => {
+  concatHow.value = (event.target as HTMLSelectElement).value;
+};
 const modelValue = (item: PtcModelOption) => item.provider + '\u0000' + item.id;
 const modelGroups = computed(() => {
   const groups = new Map<string, { provider: string; label: string; items: PtcModelOption[] }>();
@@ -172,6 +180,19 @@ const defaultLabel = computed(() => {
       </div>
       <div v-else-if="gpuPending" class="mc-ptc-row">
         <span class="mc-hint">{{ t('batch.gpuDetecting') }}</span>
+      </div>
+      <div v-if="concatable" class="mc-ptc-row">
+        <label class="mc-field">
+          <span>{{ t('concat.mode') }}</span>
+          <select class="mc-select" :value="concatHow" :disabled="disabled" @change="setConcatHow">
+            <option value="copy">{{ t('concat.copy') }}</option>
+            <option value="encode">{{ t('concat.encode') }}</option>
+          </select>
+        </label>
+        <span class="mc-hint">{{ concatHow === 'copy' ? t('concat.copyHint') : t('concat.encodeHint') }}</span>
+        <button type="button" class="mc-btn mc-btn-ghost" :disabled="disabled" @click="emit('concat', concatHow)">
+          {{ t('concat.run') }}
+        </button>
       </div>
     </template>
 

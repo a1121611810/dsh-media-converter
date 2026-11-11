@@ -982,13 +982,70 @@ const MUTANTS = [
     test: 'test/plan.test.mjs',
     dist: 'dist/lib/plan.js',
     apply: (s) =>
-      replaceOnce(
-        s,
-        "pick === 'hevc' ? x265CrfOf(q) :",
-        "pick === 'hevc' ? Math.round(x265CrfOf(q) * 0 + crfOf(q)) :",
-      ),
+      replaceOnce(s, "pick === 'hevc' ? x265CrfOf(q) :", "pick === 'hevc' ? Math.round(x265CrfOf(q) * 0 + crfOf(q)) :"),
     distAnchor: 'x265CrfOf(q) * 0 + crfOf(q)',
     expect: 'hevc 质量 100 必须映射 x265 CRF 27，突变后走 x264 曲线得 22 → 断言红',
+  },
+  // --- W 家族：合并与章节分割（R3）--------------------------------------------
+  {
+    id: 'W1',
+    name: '拷贝合并的音轨 map 被摘除',
+    source: 'lib/plan.ts',
+    test: 'test/host.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        `  const args = ['-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy'];
+  if (format === 'mp4') args.push('-movflags', '+faststart');`,
+        `  const args = ['-map', '0:v:0?', '-c', 'copy'];
+  if (format === 'mp4') args.push('-movflags', '+faststart');`,
+      ),
+    distAnchor: "'-map', '0:v:0?', '-c', 'copy'",
+    expect: '拷贝合并产物必须带一条音轨，突变后只剩画面 → 合并断言红',
+  },
+  {
+    id: 'W2',
+    name: '章节零长跳过被反转（窗口多算）',
+    source: 'lib/plan.ts',
+    test: 'test/host.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) => replaceOnce(s, 'if (!(end - start > 0.01)) continue;', 'if (end - start > 0.01) continue;'),
+    // dist 打印器把 if 与 continue 拆行：锚点只取条件本身（基线是 !== 形态，不会撞）。
+    distAnchor: 'if (end - start > 0.01)',
+    expect: '零长章节必须被跳过（3 个窗口），突变后只剩正片 1 个 → 分割断言红',
+  },
+  {
+    id: 'W3',
+    name: '章节越界 clamp 被反转',
+    source: 'lib/plan.ts',
+    // e2e 夹具的章节都被容器钳在时长内，守不住 clamp；plan.test 的
+    // chapterWindows 用例带越界章节（[4,12]→[4,10]），是这条防线的家。
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'if (meta.duration > 0) end = Math.min(end, meta.duration);',
+        'if (meta.duration < 0) end = Math.min(end, meta.duration);',
+      ),
+    distAnchor: 'if (meta.duration < 0)',
+    expect: '越界章节必须 clamp 到时长内（plan 用例 [4,10]），突变后保持 [4,12] → 断言红',
+  },
+  {
+    id: 'W4',
+    name: '拷贝合并的画面编码校验被反转',
+    source: 'lib/plan.ts',
+    test: 'test/host.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "if ((meta.video ? meta.video.codec : '') !== videoCodec) return '画面编码不一致';",
+        "if ((meta.video ? meta.video.codec : '') === videoCodec) return '画面编码不一致';",
+      ),
+    distAnchor: "=== videoCodec)",
+    expect: '编码一致的文件必须放行合并，反转后同类也被拒 → POST 层断言红',
   },
 ];
 

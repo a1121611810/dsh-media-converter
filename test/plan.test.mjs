@@ -4,6 +4,10 @@ import {
   FORMATS,
   HW_BACKENDS,
   buildArgs,
+  chapterWindows,
+  concatCompatible,
+  concatCopyArgs,
+  concatListText,
   copyArgs,
   defaultFormat,
   formatEncoders,
@@ -719,11 +723,20 @@ assert.deepEqual(planPtcGroups([], ptcLimits), []);
 // The table is the single source for planFor, the PTC prompt and the tool enum.
 assert.deepEqual(
   ACTIONS.map((entry) => entry.id),
-  ['probe', 'convert', 'extract-audio', 'extract-video', 'subtitle', 'meta', 'base64'],
+  ['probe', 'convert', 'extract-audio', 'extract-video', 'subtitle', 'meta', 'base64', 'concat', 'split-chapters'],
 );
 assert.equal(actionFor('convert')?.id, 'convert');
 assert.equal(actionFor('nope'), undefined);
-assert.deepEqual(toolActions(), ['probe', 'convert', 'extract-audio', 'extract-video', 'subtitle', 'rewrite-tags']);
+assert.deepEqual(toolActions(), [
+  'probe',
+  'convert',
+  'extract-audio',
+  'extract-video',
+  'subtitle',
+  'rewrite-tags',
+  'concat',
+  'split-chapters',
+]);
 // 'rewrite-tags' is the tool's name for the 'meta' plan mode.
 assert.equal(actionFor('meta')?.tool, 'rewrite-tags');
 // Every plan mode the Host can be asked for has a plan behind it.
@@ -887,3 +900,43 @@ assert.ok(av1Plan.args.includes('libsvtav1'));
 const h264Plan = convertSw.plan(trackUpload(1), { format: 'mp4', codec: 'h264' }, 0, null);
 assert.equal(h264Plan.copy, true, '显式 h264 不破坏拷贝快路径');
 console.log('plan: 软件编码用例 ok');
+
+// --- concat 与章节分割（R3）：纯函数 ------------------------------------------
+assert.equal(concatListText(["/tmp/a's.mp4", '/tmp/b.mp4']), "file '/tmp/a'\\''s.mp4'\nfile '/tmp/b.mp4'\n");
+const metaA = trackMetaOf([trackStream(0, 'video', 'h264'), trackStream(1, 'audio', 'aac')]);
+const metaSame = trackMetaOf([trackStream(0, 'video', 'h264'), trackStream(1, 'audio', 'aac')]);
+const metaOtherCodec = trackMetaOf([trackStream(0, 'video', 'hevc'), trackStream(1, 'audio', 'aac')]);
+const metaOtherSize = trackMetaOf([Object.assign(trackStream(0, 'video', 'h264'), { width: 640, height: 360 })]);
+const metaBaseSize = trackMetaOf([Object.assign(trackStream(0, 'video', 'h264'), { width: 320, height: 240 })]);
+assert.equal(concatCompatible([metaA, metaSame]), null, '编码与分辨率一致可拷贝合并');
+assert.match(concatCompatible([metaA, metaOtherCodec]), /画面编码不一致/);
+assert.match(concatCompatible([metaBaseSize, metaOtherSize]), /分辨率不一致/);
+// 音频文件没有画面：只比音轨。
+const audioA = trackMetaOf([trackStream(0, 'audio', 'mp3')]);
+const audioB = trackMetaOf([trackStream(0, 'audio', 'mp3')]);
+assert.equal(concatCompatible([audioA, audioB]), null, '音频合并只看音轨');
+assert.deepEqual(concatCopyArgs('mp4'), ['-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy', '-movflags', '+faststart']);
+assert.deepEqual(concatCopyArgs('mkv'), ['-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy'], 'mkv 无 faststart');
+
+// chapterWindows：零长跳过、越界 clamp、标题透传。
+const chapterMeta = trackMetaOf([trackStream(0, 'video', 'h264')]);
+chapterMeta.duration = 10;
+chapterMeta.chapters = [
+  { index: 0, start: 0, end: 0, tags: {} }, // 零长，跳过
+  { index: 1, start: 1, end: 4, tags: { title: 'Intro' } },
+  { index: 2, start: 4, end: 12, tags: {} }, // 越界，clamp 到 10
+  { index: 3, start: -2, end: 2, tags: {} }, // 负起点 clamp 到 0
+];
+const wins = chapterWindows(chapterMeta);
+assert.equal(wins.length, 3, '零长章节被跳过');
+assert.deepEqual(
+  wins.map((win) => [win.start, win.end]),
+  [
+    [1, 4],
+    [4, 10],
+    [0, 2],
+  ],
+  '窗口 clamp 到时长内、负起点归零',
+);
+assert.equal(wins[0].title, 'Intro');
+console.log('plan: concat/章节用例 ok');

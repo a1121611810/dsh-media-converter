@@ -200,6 +200,11 @@ export const ACTIONS: ActionEntry[] = [
   },
   // No plan: Base64 lives on its own routes and never builds an ffmpeg job.
   { id: 'base64' },
+  // No plan: concat is a run-level job over many uploads (see /run), and a
+  // chapter split starts one job per chapter (see /convert). Both stay in
+  // the registry so the features whitelist and the tool enum govern them.
+  { id: 'concat', tool: 'concat' },
+  { id: 'split-chapters', tool: 'split-chapters' },
 ];
 
 export function actionFor(mode: string): ActionEntry | undefined {

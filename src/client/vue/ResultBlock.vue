@@ -49,6 +49,9 @@ const saved = computed(() => {
 
     <template v-if="result">
       <span class="mc-ok">{{ t('result.done') }}</span>
+      <span v-if="result.files && result.files.length > 1" class="mc-muted">
+        {{ t('result.files').replace('%s', String(result.files.length)) }}
+      </span>
       <video
         v-if="result.kind === 'video'"
         class="mc-player"
