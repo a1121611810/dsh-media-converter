@@ -769,6 +769,66 @@ const MUTANTS = [
     distAnchor: 'entry.tool && !enabled.includes(entry.id)',
     expect: '枚举必须只含启用动作，突变后默认枚举为空 → host 工具枚举断言红',
   },
+  {
+    id: 'B1',
+    name: '-filter_complex 永拒被摘除',
+    source: 'lib/extensions.ts',
+    dist: 'dist/lib/extensions.js',
+    test: 'test/extensions.test.mjs',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "if (token === '-i' || token === '-filter_complex') return `${what}：参数 ${token} 永远不允许`;",
+        "if (token === '-i') return `${what}：参数 ${token} 永远不允许`;",
+      ),
+    distAnchor: "if (token === '-i')",
+    expect: '-filter_complex 必须被永拒，突变后改走白名单报错、拒绝原因不符 → 测试红',
+  },
+  {
+    id: 'B2',
+    name: 'vf 值的危险源检查反转（movie= 被放行）',
+    source: 'lib/extensions.ts',
+    dist: 'dist/lib/extensions.js',
+    test: 'test/extensions.test.mjs',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'if (/movie|lavfi|amovie|filter/i.test(value)) return false;',
+        'if (!/movie|lavfi|amovie|filter/i.test(value)) return false;',
+      ),
+    distAnchor: 'if (!/movie|lavfi|amovie|filter/i.test(value))',
+    expect: 'vf 值必须拒 movie/lavfi/filter 子串且放行普通滤镜，反转后两头都错 → 测试红',
+  },
+  {
+    id: 'B3',
+    name: '未知标志白名单判定反转',
+    source: 'lib/extensions.ts',
+    dist: 'dist/lib/extensions.js',
+    test: 'test/extensions.test.mjs',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "if (!(token in ALLOWED_FLAGS)) return `${what}：参数 ${token} 不在白名单里`;",
+        "if (token in ALLOWED_FLAGS) return `${what}：参数 ${token} 不在白名单里`;",
+      ),
+    distAnchor: 'if (token in ALLOWED_FLAGS)',
+    expect: '已知标志必须放行，反转后合法配方也被拒 → 测试红',
+  },
+  {
+    id: 'B4',
+    name: '路径分隔符检查反转（合法值反而被拒）',
+    source: 'lib/extensions.ts',
+    dist: 'dist/lib/extensions.js',
+    test: 'test/extensions.test.mjs',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "if (/[\\\\/]/.test(value)) return `${what}：${token} 的值不允许包含路径分隔符`;",
+        "if (!/[\\\\/]/.test(value)) return `${what}：${token} 的值不允许包含路径分隔符`;",
+      ),
+    distAnchor: 'if (!/[\\\\/]/.test(value))',
+    expect: '含斜杠的值必须被拒、合法值放行，反转后合法配方全灭 → 测试红',
+  },
 ];
 
 function build() {
