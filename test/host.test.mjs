@@ -2338,6 +2338,154 @@ const badPersist = await call('config', { method: 'POST', body: JSON.stringify({
 assert.equal(badPersist.data.ok, false, 'a non-boolean toggle is refused');
 assert.match(badPersist.data.error, /persistState/);
 
+// --- extension packs (data-only manifests) -------------------------------------
+// The raw JSON text rides the config merge like any other field; validation
+// rejects the whole batch, so a bad import never half-installs.
+const extPack = JSON.stringify([
+  {
+    version: 1,
+    id: 'wechat-image',
+    name: { zh: '微信图', en: 'WeChat image' },
+    actions: [
+      {
+        id: 'wx-webp',
+        type: 'macro',
+        kind: 'image',
+        label: { zh: '微信压缩图', en: 'WeChat compress' },
+        params: { format: 'webp', quality: 55, width: 1080 },
+      },
+    ],
+  },
+]);
+const extSaved = await call('config', { method: 'POST', body: JSON.stringify({ extensions: extPack }) });
+assert.equal(extSaved.data.ok, true, JSON.stringify(extSaved.data));
+const extUpdate = settingsCalls.filter((call) => call[0] === 'update').at(-1);
+assert.deepEqual(extUpdate[2], { extensions: extPack }, 'the raw pack rides the config merge');
+
+const beforeBadExt = settingsCalls.length;
+const badExt = await call('config', { method: 'POST', body: JSON.stringify({ extensions: '{broken' }) });
+assert.equal(badExt.data.ok, false, 'a broken pack is refused');
+assert.equal(badExt.data.error, 'extensions 不是合法 JSON');
+assert.equal(settingsCalls.length, beforeBadExt, 'a refused pack never reaches the settings service');
+const dupExt = await call('config', {
+  method: 'POST',
+  body: JSON.stringify({ extensions: JSON.stringify([JSON.parse(extPack)[0], JSON.parse(extPack)[0]]) }),
+});
+assert.equal(dupExt.data.ok, false, 'a duplicate pack id is refused');
+assert.equal(dupExt.data.error, 'manifest id "wechat-image" 重复');
+const typedExt = await call('config', { method: 'POST', body: JSON.stringify({ extensions: 42 }) });
+assert.equal(typedExt.data.ok, false, 'a non-string pack is refused');
+assert.equal(typedExt.data.error, 'extensions 必须是字符串');
+const clearedExt = await call('config', { method: 'POST', body: JSON.stringify({ extensions: '' }) });
+assert.equal(clearedExt.data.ok, true, 'an empty string clears every pack');
+
+// --- extension presets: macros ride the convert gates, recipes override --------
+// homebrew ffmpeg 9 drops libwebp: pin the macro's format to what this exact
+// binary can encode, same rule the advertised-format table follows above.
+const macroFormat = encoderText.includes('libwebp') ? 'webp' : 'jpg';
+const presetPacks = JSON.stringify([
+  {
+    version: 1,
+    id: 'wechat-image',
+    name: { zh: '微信图', en: 'WeChat image' },
+    actions: [
+      {
+        id: 'wx-webp',
+        type: 'macro',
+        kind: 'image',
+        label: { zh: '微信压缩图', en: 'WeChat compress' },
+        params: { format: macroFormat, quality: 55 },
+      },
+    ],
+  },
+  {
+    version: 1,
+    id: 'slow-mp4',
+    name: { zh: '慢速 MP4', en: 'Slow MP4' },
+    actions: [
+      {
+        id: 'x265',
+        type: 'recipe',
+        kind: 'video',
+        format: 'mp4',
+        override: true,
+        label: { zh: 'x265 慢速', en: 'x265 slow' },
+        args: ['-c:v', 'libx265', '-preset', 'slow', '-crf', '20', '-c:a', 'copy'],
+        quality: { flag: '-crf', at90: 20, min: 18, max: 28 },
+      },
+    ],
+  },
+]);
+await call('config', { method: 'POST', body: JSON.stringify({ extensions: presetPacks }) });
+const probeOut = (out) => parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', out], { encoding: 'utf8' }).stderr);
+
+// A macro is the convert action with fixed params: the webp comes out re-encoded.
+const macroJob = (
+  await call('convert', {
+    method: 'POST',
+    body: JSON.stringify({ id: upload.data.id, preset: 'x:wechat-image/wx-webp' }),
+  })
+).data.job;
+const macroDone = await waitJob(macroJob);
+assert.ok(macroDone.out.endsWith('.' + macroFormat), 'a macro lands on the pack format');
+assert.equal(
+  probeOut(macroDone.out).video.codec,
+  macroFormat === 'webp' ? 'webp' : 'mjpeg',
+  'the macro really re-encodes',
+);
+
+// A recipe overrides the built-in mp4 recipe: h264/aac would otherwise copy.
+const recipeJob = (
+  await call('convert', {
+    method: 'POST',
+    body: JSON.stringify({ id: clipUpload.data.id, preset: 'x:slow-mp4/x265', quality: 100 }),
+  })
+).data.job;
+const recipeDone = await waitJob(recipeJob);
+assert.equal(recipeDone.copy, false, 'a recipe always re-encodes, never copies');
+assert.equal(probeOut(recipeDone.out).video.codec, 'hevc', 'the override recipe replaces the built-in x264 one');
+
+const ghost = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, preset: 'x:slow-mp4/ghost' }),
+});
+assert.equal(ghost.data.ok, false, 'an unknown preset is refused');
+assert.equal(ghost.data.error, '扩展预设不存在：x:slow-mp4/ghost');
+
+// Clearing the packs restores the built-in behaviour: mp4 copies h264 again.
+await call('config', { method: 'POST', body: JSON.stringify({ extensions: '' }) });
+const plainJob = (
+  await call('convert', { method: 'POST', body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4' }) })
+).data.job;
+const plainDone = await waitJob(plainJob);
+assert.equal(plainDone.copy, true, 'the copy fast path returns once the override is gone');
+assert.equal(probeOut(plainDone.out).video.codec, 'h264', 'the built-in mp4 recipe is back');
+
+// A PTC batch can plan a preset: the prompt offers the installed macro, the
+// model echoes the reference as the row format, and the binding converts it.
+await call('config', { method: 'POST', body: JSON.stringify({ extensions: presetPacks }) });
+const ptcPreset = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({
+    items: [
+      { id: upload.data.id, preset: 'x:wechat-image/wx-webp' },
+      { id: clipUpload.data.id, format: 'mp4' },
+    ],
+    ptc: true,
+  }),
+});
+assert.equal(ptcPreset.data.ok, true, JSON.stringify(ptcPreset.data));
+const ptcPresetDone = await waitRun(ptcPreset.data.run);
+assert.equal(ptcPresetDone.state, 'done');
+assert.equal(ptcPresetDone.items[0].state, 'done', ptcPresetDone.items[0].error || '');
+assert.ok(ptcPresetDone.items[0].result.file.endsWith('.' + macroFormat), 'the preset row converted through PTC');
+assert.match(ptcPrompt, /x:wechat-image\/wx-webp/, 'the prompt offers the installed preset');
+
+// The agent tool resolves presets through the same table.
+const toolPreset = await media.execute({ path: sample, action: 'convert', preset: 'x:wechat-image/wx-webp' }, exec);
+assert.ok(toolPreset.file.endsWith('.' + macroFormat), 'the tool converts through the preset');
+await call('config', { method: 'POST', body: JSON.stringify({ extensions: '' }) });
+
 // The save applies to the running instance: the very next status read serves
 // the new values, with no restart and no reload.
 const after = await call('status');

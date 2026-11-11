@@ -33,6 +33,7 @@ import {
   unavailableTarget,
   withoutKnownUploads,
 } from './lib.js';
+import { extensionActionItems, presetTargetsFor } from './lib.js';
 import type { ConvertRequest, ConvertibleKind, DecodedPayload, QueueRow, ServerJob } from './lib.js';
 import type { MediaKind, StreamMeta } from '../../lib/plan.js';
 import type {
@@ -399,6 +400,8 @@ interface QueueSection {
   selectable: boolean;
   targetable: boolean;
   formatOptions: string[];
+  presetOptions: string[];
+  presetLabels: Record<string, string>;
   target: string;
   targets: Record<string, string>;
   targetOptions: Record<string, string[]>;
@@ -429,10 +432,22 @@ const queueGroups = computed<QueueSection[]>(() => {
         items: groupItems,
         selectable: Boolean(convertible),
         targetable: Boolean(convertible) && operation.value === 'convert',
-        formatOptions: convertible ? formatTable.value[convertible] || [] : [],
+        formatOptions: convertible
+          ? [...(formatTable.value[convertible] || []), ...presetTargetsFor(status.value?.extensions, convertible)]
+          : [],
+        presetOptions: convertible ? presetTargetsFor(status.value?.extensions, convertible) : [],
+        presetLabels: presetLabelMap.value,
         target: convertible ? targets.value[convertible] : '',
         targets: rowTargetValues.value,
-        targetOptions: formatTable.value,
+        targetOptions: convertible
+          ? {
+              ...formatTable.value,
+              [convertible]: [
+                ...(formatTable.value[convertible] || []),
+                ...presetTargetsFor(status.value?.extensions, convertible),
+              ],
+            }
+          : formatTable.value,
         showTargets: Boolean(convertible) && operation.value === 'convert',
         showQuality: Boolean(
           convertible &&
@@ -691,6 +706,16 @@ const actions = computed(() => {
     });
   }
   list.push({ id: 'b64', group: 'view', label: t('action.b64'), hint: '', keys: 'base64 编码' });
+  for (const item of extensionActionItems(status.value?.extensions, file.value?.kind || 'file', pickExtLabel)) {
+    list.push({
+      id: item.id,
+      group: 'ext',
+      label: item.label,
+      hint: item.hint,
+      off: unavailableTarget(file.value, item.format),
+      keys: item.id + ' preset 预设',
+    });
+  }
   return list;
 });
 const visible = computed(() => {
@@ -702,12 +727,14 @@ const GROUP_DEFS: [string, string, string][] = [
   ['edit', 'group.edit', '✂'],
   ['view', 'group.view', '☰'],
 ];
+const EXT_GROUP_DEF: [string, string, string] = ['ext', 'group.ext', '⧉'];
 const groups = computed(() => {
   const order = status.value?.groups ?? GROUP_DEFS.map(([key]) => key);
-  return order
+  const base = order
     .map((key) => GROUP_DEFS.find(([defKey]) => defKey === key))
     .filter((def): def is [string, string, string] => Boolean(def))
     .map(([key, labelKey, icon]) => [key, t(labelKey), icon]);
+  return [...base, [EXT_GROUP_DEF[0], t(EXT_GROUP_DEF[1]), EXT_GROUP_DEF[2]]];
 });
 const itemsOf = (key: string) => visible.value.filter((item) => item.group === key);
 const currentAction = computed(() => visible.value.find((item) => item.id === action.value) || null);
@@ -719,6 +746,17 @@ const gridGroups = computed(() =>
 // queue is rebuilt from the server — uploads and jobs are the single source of
 // truth, so every mount (first load, a rebuilt page, a second window) shows the
 // same files and the same running jobs. When off the page behaves as before.
+// Extension packs carry both languages; the panel picks by the browser's
+// language, same default the locale fallback chain uses (zh unless en).
+const pickExtLabel = (label: { zh: string; en: string }) =>
+  (navigator.language || '').toLowerCase().startsWith('en') ? label.en : label.zh;
+const presetLabelMap = computed(() => {
+  const map: Record<string, string> = {};
+  for (const ext of status.value?.extensions ?? []) {
+    for (const action of ext.actions) if (action.type === 'macro') map[action.ref] = pickExtLabel(action.label);
+  }
+  return map;
+});
 const persistOn = computed(() => status.value?.persistState === true);
 
 interface ServerQueueItem {
@@ -1460,6 +1498,7 @@ async function runServerBatch(rows: Item[], ptc = false) {
     }
     const row = planByKey.value.get(item.key);
     if (!row || row.error) return { id, skip: true, reason: row?.error || '' };
+    if (row.target.startsWith('x:')) return { id, preset: row.target };
     return {
       id,
       format: row.target,
@@ -1584,6 +1623,11 @@ function convert() {
     },
     'fmt:' + format.value,
   );
+}
+
+function runPreset(ref: string) {
+  if (!file.value) return;
+  runCurrent({ preset: ref }, ref);
 }
 
 function applyTrim() {
@@ -2058,6 +2102,8 @@ watch([action, panelOpen], async () => {
               :selectable="group.selectable"
               :targetable="group.targetable"
               :format-options="group.formatOptions"
+              :preset-options="group.presetOptions"
+              :preset-labels="group.presetLabels"
               :target="group.target"
               :targets="group.targets"
               :target-options="group.targetOptions"
@@ -2430,6 +2476,37 @@ watch([action, panelOpen], async () => {
                   class="mc-btn mc-btn-primary"
                   :disabled="busy || unavailableTarget(file, format)"
                   @click="convert"
+                >
+                  {{ t('action.convert') }}
+                </button>
+              </div>
+              <ResultBlock
+                :action-id="currentAction.id"
+                :job-action="jobAction"
+                :result="result"
+                :percent="percent"
+                :converting="phase === 'converting'"
+                :cancelling="cancelling"
+                :cancelled="cancelled"
+                :file="file"
+                :t="t"
+                @cancel="cancelRun"
+                @reveal="reveal"
+                @again="resetResult"
+              />
+            </template>
+
+            <template v-else-if="currentAction.id.startsWith('x:')">
+              <div class="mc-row">
+                <span class="mc-muted">{{ currentAction.hint }}</span>
+                <span class="mc-grow"></span>
+                <span class="mc-muted">{{ t('ext.fixed') }}</span>
+              </div>
+              <div class="mc-row">
+                <button
+                  class="mc-btn mc-btn-primary"
+                  :disabled="busy || currentAction.off"
+                  @click="runPreset(currentAction.id)"
                 >
                   {{ t('action.convert') }}
                 </button>

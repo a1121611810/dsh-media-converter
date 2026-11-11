@@ -770,7 +770,7 @@ const MUTANTS = [
     expect: '枚举必须只含启用动作，突变后默认枚举为空 → host 工具枚举断言红',
   },
   {
-    id: 'B1',
+    id: 'P1',
     name: '-filter_complex 永拒被摘除',
     source: 'lib/extensions.ts',
     dist: 'dist/lib/extensions.js',
@@ -785,7 +785,7 @@ const MUTANTS = [
     expect: '-filter_complex 必须被永拒，突变后改走白名单报错、拒绝原因不符 → 测试红',
   },
   {
-    id: 'B2',
+    id: 'P2',
     name: 'vf 值的危险源检查反转（movie= 被放行）',
     source: 'lib/extensions.ts',
     dist: 'dist/lib/extensions.js',
@@ -800,7 +800,7 @@ const MUTANTS = [
     expect: 'vf 值必须拒 movie/lavfi/filter 子串且放行普通滤镜，反转后两头都错 → 测试红',
   },
   {
-    id: 'B3',
+    id: 'P3',
     name: '未知标志白名单判定反转',
     source: 'lib/extensions.ts',
     dist: 'dist/lib/extensions.js',
@@ -808,14 +808,14 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        "if (!(token in ALLOWED_FLAGS)) return `${what}：参数 ${token} 不在白名单里`;",
-        "if (token in ALLOWED_FLAGS) return `${what}：参数 ${token} 不在白名单里`;",
+        'if (!(token in ALLOWED_FLAGS)) return `${what}：参数 ${token} 不在白名单里`;',
+        'if (token in ALLOWED_FLAGS) return `${what}：参数 ${token} 不在白名单里`;',
       ),
     distAnchor: 'if (token in ALLOWED_FLAGS)',
     expect: '已知标志必须放行，反转后合法配方也被拒 → 测试红',
   },
   {
-    id: 'B4',
+    id: 'P4',
     name: '路径分隔符检查反转（合法值反而被拒）',
     source: 'lib/extensions.ts',
     dist: 'dist/lib/extensions.js',
@@ -823,11 +823,101 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        "if (/[\\\\/]/.test(value)) return `${what}：${token} 的值不允许包含路径分隔符`;",
-        "if (!/[\\\\/]/.test(value)) return `${what}：${token} 的值不允许包含路径分隔符`;",
+        'if (/[\\\\/]/.test(value)) return `${what}：${token} 的值不允许包含路径分隔符`;',
+        'if (!/[\\\\/]/.test(value)) return `${what}：${token} 的值不允许包含路径分隔符`;',
       ),
     distAnchor: 'if (!/[\\\\/]/.test(value))',
     expect: '含斜杠的值必须被拒、合法值放行，反转后合法配方全灭 → 测试红',
+  },
+  {
+    id: 'P5',
+    name: '扩展整包拒收被改成只警告',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'const parsed = parseExtensions(body.extensions);\n              // Reject the whole batch: a half-installed pack is worse than a refused one.\n              if (!parsed.ok) throw new Error(parsed.error);',
+        'const parsed = parseExtensions(body.extensions);\n              // Reject the whole batch: a half-installed pack is worse than a refused one.\n              if (!parsed.ok) console.error(parsed.error);',
+      ),
+    distAnchor: 'console.error(parsed.error)',
+    expect: '坏包必须整包拒收，突变后保存成功 → host 扩展保存断言红',
+  },
+  {
+    id: 'P6',
+    name: '扩展保存不进 patch（静默丢失）',
+    apply: (s) => deleteLine(s, 'patch.extensions = body.extensions;'),
+    distAnchor: 'patch.extensions = body.extensions;',
+    expect: '保存必须把原文写进 patch，突变后 settings 收不到 → host 深比较红',
+    delete: true,
+  },
+  {
+    id: 'P7',
+    name: '包 id 唯一性登记被摘除（重复 id 可存）',
+    source: 'lib/extensions.ts',
+    dist: 'dist/lib/extensions.js',
+    test: 'test/extensions.test.mjs',
+    apply: (s) => deleteLine(s, 'ids.add(manifest.id);'),
+    distAnchor: 'ids.add(manifest.id);',
+    expect: '重复包 id 必须整包拒收，突变后存入 → host 重复 id 断言红',
+    delete: true,
+  },
+  {
+    id: 'P8',
+    name: '预设引用查找被改成永不命中',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'extensionEntries.find((e) => e.ref === ref)',
+        "extensionEntries.find((e) => e.ref === ref + '!')",
+      ),
+    distAnchor: "e.ref === ref + '!'",
+    expect: '已装预设必须可解析，突变后全部「扩展预设不存在」 → host 预设断言红',
+  },
+  {
+    id: 'P9',
+    name: 'preset 分支条件反转（空 preset 反而进预设解析）',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'if (preset) return planForPreset(upload, body, preset, threads);',
+        'if (!preset) return planForPreset(upload, body, preset, threads);',
+      ),
+    // tsrs 把 71 列的该语句折行打印，锚点只取条件片段（全 dist 唯一）。
+    distAnchor: 'if (!preset)',
+    expect: 'preset 必须先于内置模式解析，反转后普通转换也炸 → host 预设断言红',
+  },
+  {
+    id: 'P10',
+    name: '扩展保存后不再重解析（条目清空）',
+    // 整行删除会让 entriesOf 导入变成 TS6133 假红；改成「重解析空表」——
+    // 语义等价于永不刷新，且保住 entriesOf 的读取。
+    apply: (s) =>
+      replaceOnce(s, 'extensionEntries = entriesOf(extensionManifests);', 'extensionEntries = entriesOf([]);'),
+    distAnchor: 'entriesOf([])',
+    expect: '保存扩展必须重解析条目，突变后任何保存都清空预设 → host 预设断言红',
+  },
+  {
+    id: 'P11',
+    name: 'PTC 预设引用校验反转（不存在的预设也放行）',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'if (!preset || preset.type !== \'macro\' || preset.kind !== file.kind) {',
+        'if (preset && preset.type === \'macro\' && preset.kind === file.kind) {',
+      ),
+    distAnchor: 'preset && preset.type === \'macro\'',
+    expect: '模型计划的预设引用必须经扩展表校验，反转后合法预设反而被拒 → host PTC 预设断言红',
+  },
+  {
+    id: 'P12',
+    name: '工具 preset 参数被忽略',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'preset: a.preset !== undefined ? String(a.preset) : undefined,',
+        'preset: undefined,',
+      ),
+    distAnchor: 'preset: undefined,',
+    expect: '工具的 preset 参数必须到达 planFor，突变后按普通 convert 跑默认格式 → host 工具预设断言红',
   },
 ];
 

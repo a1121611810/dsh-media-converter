@@ -12,6 +12,7 @@ const props = defineProps<{
   head: boolean;
   targets: Record<string, string>;
   targetOptions: Record<string, string[]>;
+  presetLabels?: Record<string, string>;
   showTargets: boolean;
   disabled: boolean;
   t: (key: string) => string;
@@ -173,7 +174,7 @@ const statusOf = (item: QueueRow): string => {
             @change="setTarget(item.key, $event)"
           >
             <option v-for="format in targetOptions[kindOf(item)] || []" :key="format" :value="format">
-              {{ format.toUpperCase() }}
+              {{ presetLabels?.[format] || format.toUpperCase() }}
             </option>
           </select>
         </span>

@@ -48,6 +48,7 @@ export interface ConvertRequest {
   id: string;
   name?: string;
   format?: string;
+  preset?: string;
   quality?: number;
   bitrate?: number;
   channels?: number;
@@ -396,6 +397,67 @@ export interface BatchRowTarget {
   key: string;
   target: string;
   error: '' | 'hint.noAudio';
+}
+
+// --- user extension packs (data-only manifests, see lib/extensions.ts) ------
+// The Host validates and merges packs; the panel only renders what /status
+// ships, so these helpers stay pure projections of that payload and never
+// re-derive the Host's rules.
+export interface ExtensionLabel {
+  zh: string;
+  en: string;
+}
+export interface ExtensionActionInfo {
+  // 'x:<manifest>/<action>'; travels in the same target field formats use.
+  ref: string;
+  type: 'macro' | 'recipe';
+  kind: MediaKind;
+  label: ExtensionLabel;
+  format: string;
+}
+export interface ExtensionInfo {
+  id: string;
+  name: ExtensionLabel;
+  // The normalized manifest text (see lib/extensions.ts statusOf).
+  raw: string;
+  description?: ExtensionLabel;
+  actions: ExtensionActionInfo[];
+}
+
+// A macro is a fixed-parameter convert: it shows as one tile for files of its
+// kind, grouped under its pack's name. Recipes override a built-in format's
+// ffmpeg recipe and deliberately add no tile.
+export interface ExtensionActionItem {
+  id: string;
+  label: string;
+  hint: string;
+  // The macro's fixed output format: the panel greys the tile for the same
+  // physically-impossible targets the built-in ones use (silent video → mp3).
+  format: string;
+}
+export function extensionActionItems(
+  extensions: ExtensionInfo[] | undefined,
+  kind: MediaKind,
+  pick: (label: ExtensionLabel) => string,
+): ExtensionActionItem[] {
+  if (!extensions) return [];
+  const items: ExtensionActionItem[] = [];
+  for (const ext of extensions) {
+    for (const action of ext.actions) {
+      if (action.type !== 'macro' || action.kind !== kind) continue;
+      items.push({ id: action.ref, label: pick(action.label), hint: pick(ext.name), format: action.format });
+    }
+  }
+  return items;
+}
+
+// Batch target dropdowns accept a preset reference anywhere a format goes;
+// the Host re-validates it at plan time.
+export function presetTargetsFor(extensions: ExtensionInfo[] | undefined, kind: MediaKind): string[] {
+  if (!extensions) return [];
+  return extensions.flatMap((ext) =>
+    ext.actions.filter((a) => a.type === 'macro' && a.kind === kind).map((a) => a.ref),
+  );
 }
 
 export function rowPlan(

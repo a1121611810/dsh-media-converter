@@ -153,6 +153,8 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
   });
   const [rows, setRows] = React.useState<{ key: string; on: boolean }[]>([]);
   const [phase, setPhase] = React.useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [extPhase, setExtPhase] = React.useState<'idle' | 'importing' | 'error'>('idle');
+  const [extError, setExtError] = React.useState('');
   const readyRef = React.useRef(false);
 
   const load = () => {
@@ -217,6 +219,62 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
         }, 700);
       })
       .catch(() => setPhase('error'));
+  };
+
+  // Packs carry both languages; pick like the panel does (zh unless the
+  // browser says en).
+  const pickExt = (label: { zh: string; en: string }) =>
+    (navigator.language || '').toLowerCase().startsWith('en') ? label.en : label.zh;
+  const saveExtensions = (packs: unknown[]) =>
+    fetch('/api/media-convert/config', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ extensions: JSON.stringify(packs) }),
+    })
+      .then((resp) => resp.json())
+      .then((data) => {
+        if (!data.ok) throw new Error(data.error || 'save failed');
+        setExtPhase('idle');
+        setExtError('');
+        setTimeout(load, 300);
+      })
+      .catch((err) => {
+        setExtError(String((err && (err as Error).message) || err));
+        setExtPhase('error');
+      });
+  const importPack = (event: { target: HTMLInputElement }) => {
+    const input = event.target;
+    const file = input.files && input.files[0];
+    input.value = '';
+    if (!file) return;
+    setExtPhase('importing');
+    void file
+      .text()
+      .then((text) => {
+        let manifest: { id?: string };
+        try {
+          manifest = JSON.parse(text);
+        } catch {
+          setExtError(t('settings.ext.importFailed').replace('%s', 'invalid JSON'));
+          setExtPhase('error');
+          return;
+        }
+        const current = (status?.extensions || []).map((pack) => JSON.parse(pack.raw) as { id?: string });
+        if (current.some((pack) => pack.id === manifest.id)) {
+          setExtError(t('settings.ext.duplicate').replace('%s', String(manifest.id)));
+          setExtPhase('error');
+          return;
+        }
+        void saveExtensions([...current, manifest]);
+      })
+      .catch(() => {
+        setExtError(t('settings.ext.importFailed').replace('%s', 'read error'));
+        setExtPhase('error');
+      });
+  };
+  const removePack = (id: string) => {
+    const rest = (status?.extensions || []).filter((pack) => pack.id !== id).map((pack) => JSON.parse(pack.raw));
+    void saveExtensions(rest);
   };
 
   if (!status) {
@@ -306,6 +364,50 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
         ),
       ),
       status.probeMode === 'ffmpeg' ? h('p', { className: 'mc-settings-note err' }, t('settings.probe.fix')) : null,
+    ),
+    // Extension packs (data-only manifests): import a JSON pack to add preset
+    // actions to the detail page and the batch targets; removing one restores
+    // the built-in behaviour. The Host validates the whole batch, so a bad
+    // import never half-installs.
+    h(
+      'section',
+      { className: 'mc-settings-section' },
+      h('h4', null, t('settings.ext.title')),
+      h('p', { className: 'mc-settings-note' }, t('settings.ext.hint')),
+      (status.extensions || []).length
+        ? h(
+            'ul',
+            { className: 'mc-settings-ext' },
+            (status.extensions || []).map((pack) =>
+              h(
+                'li',
+                { key: pack.id },
+                h(
+                  'span',
+                  null,
+                  pickExt(pack.name) + ' · ' + t('settings.ext.actions').replace('%s', String(pack.actions.length)),
+                ),
+                h(
+                  'button',
+                  { type: 'button', className: 'mc-link', onClick: () => removePack(pack.id) },
+                  t('settings.ext.delete'),
+                ),
+              ),
+            ),
+          )
+        : h('p', { className: 'mc-settings-note' }, t('settings.ext.empty')),
+      h(
+        'label',
+        { className: 'mc-btn mc-btn-ghost mc-settings-import' },
+        extPhase === 'importing' ? '…' : t('settings.ext.import'),
+        h('input', {
+          type: 'file',
+          accept: '.json,application/json',
+          style: { display: 'none' },
+          onChange: importPack,
+        }),
+      ),
+      extPhase === 'error' && extError ? h('p', { className: 'mc-settings-note err' }, extError) : null,
     ),
     // The one place to edit: every field names its live value in the hint, so
     // there is no separate "current" list to cross-check while typing.

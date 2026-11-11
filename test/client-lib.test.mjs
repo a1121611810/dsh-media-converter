@@ -22,7 +22,59 @@ import {
   supportsBitrate,
   supportsQuality,
   removeUploadRow,
+  extensionActionItems,
+  presetTargetsFor,
 } from '../dist/src/client/lib.js';
+
+// --- extension packs: pure projections of the /status payload -----------------
+const packs = [
+  {
+    id: 'wechat-image',
+    name: { zh: '微信图', en: 'WeChat image' },
+    raw: '{"version":1}',
+    actions: [
+      {
+        ref: 'x:wechat-image/wx-webp',
+        type: 'macro',
+        kind: 'image',
+        label: { zh: '微信压缩图', en: 'WeChat compress' },
+        format: 'webp',
+      },
+    ],
+  },
+  {
+    id: 'slow-mp4',
+    name: { zh: '慢速 MP4', en: 'Slow MP4' },
+    raw: '{"version":1}',
+    actions: [
+      {
+        ref: 'x:slow-mp4/x265',
+        type: 'recipe',
+        kind: 'video',
+        label: { zh: 'x265 慢速', en: 'x265 slow' },
+        format: 'mp4',
+      },
+      {
+        ref: 'x:slow-mp4/wx-audio',
+        type: 'macro',
+        kind: 'audio',
+        label: { zh: '语音', en: 'Voice' },
+        format: 'mp3',
+      },
+    ],
+  },
+];
+const zh = (l) => l.zh;
+assert.deepEqual(extensionActionItems(packs, 'image', zh), [
+  { id: 'x:wechat-image/wx-webp', label: '微信压缩图', hint: '微信图', format: 'webp' },
+]);
+// Recipes add no tile; other kinds stay out.
+assert.deepEqual(extensionActionItems(packs, 'video', zh), []);
+assert.deepEqual(extensionActionItems(undefined, 'image', zh), []);
+assert.equal(extensionActionItems(packs, 'audio', (l) => l.en)[0].label, 'Voice');
+assert.deepEqual(presetTargetsFor(packs, 'image'), ['x:wechat-image/wx-webp']);
+assert.deepEqual(presetTargetsFor(packs, 'video'), []);
+assert.deepEqual(presetTargetsFor(undefined, 'audio'), []);
 
 assert.deepEqual(fitPreview(4000, 3000), { width: 900, height: 675 });
 assert.deepEqual(fitPreview(300, 200), { width: 300, height: 200 });

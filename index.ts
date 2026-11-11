@@ -29,6 +29,8 @@ import { pipeline } from 'node:stream/promises';
 import Schema from '@deepseek-ai/schemastery';
 import { decodeBase64Payload } from './lib/base64.js';
 import { actionFor, ptcFormats, resolveFeatures, toolActions } from './lib/actions.js';
+import { applyQualityMap, entriesOf, parseExtensions, statusOf } from './lib/extensions.js';
+import type { ExtensionEntry, ExtensionManifest } from './lib/extensions.js';
 import {
   FORMATS,
   defaultFormat,
@@ -180,6 +182,7 @@ export interface Config {
   persistState: boolean;
   uploadTtlMinutes: number;
   queueLimit: number;
+  extensions: string;
 }
 
 export const Config = Schema.object({
@@ -192,6 +195,7 @@ export const Config = Schema.object({
   persistState: Schema.boolean().default(false).volatile(),
   uploadTtlMinutes: Schema.number().default(120).volatile(),
   queueLimit: Schema.number().default(2000).volatile(),
+  extensions: Schema.string().default('').volatile(),
 });
 
 // The action panel's module keys, in their built-in order. A configured
@@ -344,6 +348,8 @@ export interface RunItemInfo {
   // 'extract-audio' / 'extract-video' for an audio/video batch, '' for convert.
   mode: string;
   format: string;
+  // An extension preset reference ('x:<manifest>/<action>'); '' = plain convert.
+  preset?: string;
   // The panel's per-row quality choice; the run's top-level quality is the
   // fallback for rows without one.
   quality?: number;
@@ -414,6 +420,9 @@ export interface JsonBody {
   sampleRate?: number;
   codec?: unknown;
   hardware?: unknown;
+  // An extension preset reference ('x:<manifest>/<action>'); when set, the
+  // plan comes from the extension table instead of the built-in recipe.
+  preset?: unknown;
   name?: string;
   stream?: number | string;
   trim?: { start?: unknown; end?: unknown };
@@ -429,6 +438,7 @@ export interface JsonBody {
   persistState?: unknown;
   uploadTtlMinutes?: unknown;
   queueLimit?: unknown;
+  extensions?: unknown;
   ids?: unknown;
   items?: unknown;
   model?: unknown;
@@ -641,6 +651,7 @@ const statusPayload = (
   hardware: HardwareInfo,
   probeMode: 'ffprobe' | 'ffmpeg',
   formats: FormatTable,
+  extensions: ReturnType<typeof statusOf>,
 ) => ({
   ok: true as const,
   ffmpegPath,
@@ -656,6 +667,7 @@ const statusPayload = (
   hardware,
   probeMode,
   formats,
+  extensions,
 });
 export type StatusResponse = ReturnType<typeof statusPayload>;
 
@@ -976,6 +988,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   let persistState = false;
   let uploadTtlMs = DEFAULT_UPLOAD_TTL_MINUTES * 60 * 1000;
   let queueLimitN = DEFAULT_QUEUE_LIMIT;
+  // User extensions (data-only manifests): parsed tolerantly at load — a bad
+  // saved value must not take the whole plugin down — and strictly at save.
+  let extensionManifests: ExtensionManifest[] = [];
+  let extensionEntries: ExtensionEntry[] = [];
   const resolveConfig = (raw: Partial<Config>) => {
     // A configured '~/Movies/x' means the home directory, not a folder literally
     // named '~' under the working directory.
@@ -1003,6 +1019,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     const cfgQueueLimit = unwrap(raw.queueLimit);
     // Floor of 10: a /queue cap near zero would restore an empty page.
     queueLimitN = Math.max(10, Math.round(cfgQueueLimit === undefined ? DEFAULT_QUEUE_LIMIT : Number(cfgQueueLimit)));
+    const parsedExtensions = parseExtensions(unwrap(raw.extensions));
+    if (!parsedExtensions.ok) {
+      console.error(`[dsh-media-converter] extensions 配置无效，已忽略：${parsedExtensions.error}`);
+    }
+    extensionManifests = parsedExtensions.ok ? parsedExtensions.manifests : [];
+    extensionEntries = entriesOf(extensionManifests);
   };
   resolveConfig(cfg);
   // The backend this machine can really run. planFor() is synchronous, so the
@@ -1399,6 +1421,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               channels: item.channels,
               sampleRate: item.sampleRate,
               codec: item.codec,
+              preset: item.preset || '',
               hardware,
             },
             0,
@@ -1519,7 +1542,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         if (upload) files.push(upload);
       }
       if (files.length !== planned.length) throw new Error('文件已失效，请重新选择');
-      const targets = new Map(planned.map((item) => [item.id, item.format]));
+      // Preset rows carry the reference as their target: the model echoes it
+      // back as the row's format, and parsePtcPlan validates it against the
+      // extension table.
+      const targets = new Map(planned.map((item) => [item.id, item.preset || item.format]));
       const bitrates = new Map(planned.map((item) => [item.id, item.bitrate]));
       const channelMap = new Map(planned.map((item) => [item.id, item.channels]));
       const rateMap = new Map(planned.map((item) => [item.id, item.sampleRate]));
@@ -1555,8 +1581,10 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         // codec rides along: like quality it can flip the copy gate (a hevc
         // ask is a re-encode), and a misread plan would cost the row as a
         // free copy while the binding runs a hardware encode.
+        const rowPreset = row.format.startsWith('x:') ? row.format : '';
         const preview = planFor(upload, {
-          format: row.format,
+          format: rowPreset ? '' : row.format,
+          preset: rowPreset,
           quality: row.quality ?? quality,
           bitrate: row.bitrate ?? bitrates.get(row.id),
           // channels/sampleRate ride along for the copy gate too: a mono ask
@@ -1598,7 +1626,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         const upload = uploads.get(String(a.id || ''));
         if (!upload || !allowed.has(upload.id)) throw new Error('文件不在这一批里');
         const target = String(a.format || '');
-        if (!formatsFor(upload.kind).includes(target)) {
+        const presetRef = target.startsWith('x:') ? target : '';
+        if (!presetRef && !formatsFor(upload.kind).includes(target)) {
           throw new Error(`不支持的输出格式: ${target}`);
         }
         const entry = run.items.find((item) => item.id === upload.id);
@@ -1618,6 +1647,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           channels: Number(a.channels ?? entry?.channels),
           sampleRate: Number(a.sampleRate ?? entry?.sampleRate),
           codec: a.codec !== undefined ? String(a.codec) : entry?.codec,
+          preset: presetRef,
           hardware,
         });
         const weight = estimate.copy
@@ -1644,6 +1674,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                   channels: Number(a.channels ?? entry?.channels),
                   sampleRate: Number(a.sampleRate ?? entry?.sampleRate),
                   codec: a.codec !== undefined ? String(a.codec) : entry?.codec,
+                  preset: presetRef,
                   hardware,
                 },
                 threads,
@@ -1747,7 +1778,27 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       runControllers.delete(run.id);
     }
   };
+  // A preset reference ('x:<manifest>/<action>') resolves before the built-in
+  // modes: macros are fixed convert params (the convert entry re-runs every
+  // tuned gate), recipes carry their own whitelisted args and always
+  // re-encode, with quality sliding the mapped flag.
+  const planForPreset = (upload: Upload, body: JsonBody, ref: string, threads: number): ConvertPlan => {
+    const entry = extensionEntries.find((e) => e.ref === ref);
+    if (!entry) throw new Error(`扩展预设不存在：${ref}`);
+    if (!features.includes('convert')) throw new Error('该功能已停用');
+    if (entry.type === 'macro') {
+      const convert = actionFor('convert');
+      if (!convert?.plan) throw new Error('该功能已停用');
+      return convert.plan(upload, { ...entry.params, trim: body.trim, name: body.name }, threads, hwBackend);
+    }
+    const base = entry.args ?? [];
+    const args = entry.quality ? applyQualityMap(base, entry.quality, Number(body.quality) || 90) : base;
+    return { ext: entry.format, kind: kindByExt(entry.format), args: args.slice(), threads };
+  };
+
   const planFor = (upload: Upload, body: JsonBody, threads = 0): ConvertPlan => {
+    const preset = String(body.preset || '');
+    if (preset) return planForPreset(upload, body, preset, threads);
     const mode = String(body.mode || 'convert');
     // Unrecognised modes keep the historical behaviour: they plan a convert.
     const entry = actionFor(mode) ?? actionFor('convert');
@@ -1768,6 +1819,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     rateMap: Map<string, number | undefined>,
     quality: number,
   ): string => {
+    const macroRefs = features.includes('convert')
+      ? extensionEntries.filter((e) => e.type === 'macro').map((e) => `${e.ref}（${e.kind}）`)
+      : [];
     const lines = files.map(
       (f) =>
         `- id=${f.id} name=${f.name} kind=${f.kind} target=${targets.get(f.id) || ''} ` +
@@ -1783,6 +1837,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       '',
       `质量默认：${quality}（1-100，90=默认）。对软件编码的视频映射为该编码的质量参数（x264/vp9 为 CRF，avi/wmv/ogv 为 qscale），对 GPU 硬编视频映射为目标码率倍率，对 jpg/webp/avif 图片生效；quality 不是 90 时已强制重编码（不会走拷贝）。`,
       `各类型的可用输出格式：video=${ptcFormats('video', features).join(', ')}；audio=${ptcFormats('audio', features).join(', ')}；image=${ptcFormats('image', features).join(', ')}。`,
+      ...(macroRefs.length
+        ? [`可用预设（宏，固定参数，format 直接填引用）：${macroRefs.join(' ')}。预设忽略 quality/bitrate 等旋钮。`]
+        : []),
       '',
       '只返回一个 JSON 对象。不要代码、不要解释、不要 Markdown 代码块：',
       '{"files":[{"id":"文件id","format":"输出格式","quality":90,"bitrate":128,"channels":1,"rate":22050,"fps":12,"width":640,"codec":"h264"}]}',
@@ -1843,7 +1900,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       const row = byId.get(file.id);
       if (!row) throw new Error(`模型计划缺少文件 ${file.id}`);
       const format = String(row.format || '');
-      if (!formatsFor(file.kind).includes(format)) {
+      if (format.startsWith('x:')) {
+        const preset = extensionEntries.find((entry) => entry.ref === format);
+        if (!preset || preset.type !== 'macro' || preset.kind !== file.kind) {
+          throw new Error(`模型给 ${file.id} 选了不支持的预设 ${format}`);
+        }
+      } else if (!formatsFor(file.kind).includes(format)) {
         throw new Error(`模型给 ${file.id} 选了不支持的格式 ${format}`);
       }
       const out: {
@@ -2162,6 +2224,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       // into hardware encoding (which still falls back to software where no
       // backend was probed).
       hardware: a.codec !== undefined ? true : undefined,
+      // An extension preset reference ('x:<manifest>/<action>'): when set it
+      // supersedes format/quality, like the panel's preset tiles.
+      preset: a.preset !== undefined ? String(a.preset) : undefined,
       stream: Number(a.stream || 0),
       tags: (a.tags || {}) as Record<string, string>,
       trim: a.trim as { start?: unknown; end?: unknown } | undefined,
@@ -2246,6 +2311,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           format: {
             type: 'string',
             description: 'convert 的目标格式；不填则用该类型的默认格式（视频 mp4、音频 mp3、图片 png）。',
+          },
+          preset: {
+            type: 'string',
+            description:
+              "扩展预设引用（'x:<包id>/<动作id>'）：设置后覆盖 format/quality，走该预设的固定参数或覆盖配方；预设不存在会报错。",
           },
           trim: {
             type: 'object',
@@ -2421,6 +2491,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               // An ffmpeg that cannot even list its encoders must not empty
               // the panel's format table: the built-in one is the fallback.
               build?.encoders.length ? supportedFormats(build.encoders) : FORMATS,
+              statusOf(extensionManifests),
             ),
           );
         },
@@ -2474,6 +2545,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               const limit = Number(body.queueLimit);
               if (!Number.isFinite(limit) || limit < 10) throw new Error('queueLimit 必须是 ≥ 10 的数字');
               patch.queueLimit = limit;
+            }
+            if (body.extensions !== undefined) {
+              if (typeof body.extensions !== 'string') throw new Error('extensions 必须是字符串');
+              const parsed = parseExtensions(body.extensions);
+              // Reject the whole batch: a half-installed pack is worse than a refused one.
+              if (!parsed.ok) throw new Error(parsed.error);
+              patch.extensions = body.extensions;
             }
             if (Object.keys(patch).length === 0) return json(res, 200, errorPayload('没有要保存的字段'));
             // No expectedRevision: last write wins; the service validates the
@@ -2913,6 +2991,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                 id,
                 mode: String(row.mode || ''),
                 format: String(row.format || ''),
+                ...(row.preset !== undefined ? { preset: String(row.preset || '') } : {}),
                 quality: Number.isFinite(q) && q >= 1 && q <= 100 ? Math.round(q) : undefined,
                 bitrate: Number.isFinite(br) && br >= 32 && br <= 320 ? Math.round(br) : undefined,
                 fps: Number.isFinite(gf) && gf >= 1 && gf <= 30 ? Math.round(gf) : undefined,

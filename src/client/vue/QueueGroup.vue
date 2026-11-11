@@ -14,6 +14,8 @@ const props = defineProps<{
   selectable: boolean;
   targetable: boolean;
   formatOptions: string[];
+  presetOptions: string[];
+  presetLabels: Record<string, string>;
   target: string;
   targets: Record<string, string>;
   targetOptions: Record<string, string[]>;
@@ -90,6 +92,7 @@ const setGifWidth = (event: Event) => emit('update:gifWidth', Number((event.targ
         <span>{{ t('queue.defaultTarget') }}</span>
         <select class="mc-select" :value="target" :disabled="disabled" @change="setTarget">
           <option v-for="option in formatOptions" :key="option" :value="option">{{ option.toUpperCase() }}</option>
+          <option v-for="ref in presetOptions" :key="ref" :value="ref">{{ presetLabels[ref] || ref }}</option>
         </select>
       </label>
       <label v-if="showQuality" class="mc-field mc-quality">
@@ -176,6 +179,7 @@ const setGifWidth = (event: Event) => emit('update:gifWidth', Number((event.targ
       :head="false"
       :targets="targets"
       :target-options="targetOptions"
+      :preset-labels="presetLabels"
       :show-targets="showTargets"
       :disabled="disabled"
       :t="t"

@@ -396,12 +396,16 @@ export function applyQualityMap(args: string[], map: RecipeQuality, quality: num
 export function statusOf(manifests: ExtensionManifest[]): {
   id: string;
   name: LocalizedText;
+  // The normalized manifest text: the settings page round-trips packs through
+  // the config save without losing recipe args or quality maps.
+  raw: string;
   description?: LocalizedText;
   actions: { ref: string; type: 'macro' | 'recipe'; kind: ConvertKind; label: LocalizedText; format: string }[];
 }[] {
   return manifests.map((manifest) => ({
     id: manifest.id,
     name: manifest.name,
+    raw: JSON.stringify(manifest),
     ...(manifest.description ? { description: manifest.description } : {}),
     actions: manifest.actions.map((action) => ({
       ref: refOf(manifest.id, action.id),
