@@ -154,6 +154,9 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
   const [rows, setRows] = React.useState<{ key: string; on: boolean }[]>([]);
   const [phase, setPhase] = React.useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [extPhase, setExtPhase] = React.useState<'idle' | 'importing' | 'error'>('idle');
+  // One save at a time: a second delete computed from the stale list would
+  // resurrect the first deleted pack.
+  const [extBusy, setExtBusy] = React.useState(false);
   const [extError, setExtError] = React.useState('');
   const readyRef = React.useRef(false);
 
@@ -225,8 +228,9 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
   // browser says en).
   const pickExt = (label: { zh: string; en: string }) =>
     (navigator.language || '').toLowerCase().startsWith('en') ? label.en : label.zh;
-  const saveExtensions = (packs: unknown[]) =>
-    fetch('/api/media-convert/config', {
+  const saveExtensions = (packs: unknown[]) => {
+    setExtBusy(true);
+    return fetch('/api/media-convert/config', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ extensions: JSON.stringify(packs) }),
@@ -241,7 +245,9 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
       .catch((err) => {
         setExtError(String((err && (err as Error).message) || err));
         setExtPhase('error');
-      });
+      })
+      .finally(() => setExtBusy(false));
+  };
   const importPack = (event: { target: HTMLInputElement }) => {
     const input = event.target;
     const file = input.files && input.files[0];
@@ -389,7 +395,12 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
                 ),
                 h(
                   'button',
-                  { type: 'button', className: 'mc-link', onClick: () => removePack(pack.id) },
+                  {
+                    type: 'button',
+                    className: 'mc-link',
+                    disabled: extBusy,
+                    onClick: () => removePack(pack.id),
+                  },
                   t('settings.ext.delete'),
                 ),
               ),

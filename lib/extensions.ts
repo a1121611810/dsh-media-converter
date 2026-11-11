@@ -5,7 +5,7 @@
 // code execution: a manifest can never register a route or run JavaScript.
 // The Config field stores the raw JSON text; parseExtensions rejects the
 // whole batch on any error so a bad import never leaves half an extension.
-import { FORMATS, formatsFor } from './plan.js';
+import { formatsFor } from './plan.js';
 import type { ConvertKind } from './plan.js';
 
 export interface LocalizedText {
@@ -416,6 +416,3 @@ export function statusOf(manifests: ExtensionManifest[]): {
     })),
   }));
 }
-
-// The built-in format table, re-exported for the panel-facing type surface.
-export const EXTENSION_FORMATS = FORMATS;

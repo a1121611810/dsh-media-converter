@@ -1498,7 +1498,13 @@ async function runServerBatch(rows: Item[], ptc = false) {
     }
     const row = planByKey.value.get(item.key);
     if (!row || row.error) return { id, skip: true, reason: row?.error || '' };
-    if (row.target.startsWith('x:')) return { id, preset: row.target };
+    if (row.target.startsWith('x:'))
+      return {
+        id,
+        preset: row.target,
+        hardware: useGpu.value || undefined,
+        codec: useGpu.value ? codec.value : undefined,
+      };
     return {
       id,
       format: row.target,

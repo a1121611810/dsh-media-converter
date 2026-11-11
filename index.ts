@@ -1838,7 +1838,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       `质量默认：${quality}（1-100，90=默认）。对软件编码的视频映射为该编码的质量参数（x264/vp9 为 CRF，avi/wmv/ogv 为 qscale），对 GPU 硬编视频映射为目标码率倍率，对 jpg/webp/avif 图片生效；quality 不是 90 时已强制重编码（不会走拷贝）。`,
       `各类型的可用输出格式：video=${ptcFormats('video', features).join(', ')}；audio=${ptcFormats('audio', features).join(', ')}；image=${ptcFormats('image', features).join(', ')}。`,
       ...(macroRefs.length
-        ? [`可用预设（宏，固定参数，format 直接填引用）：${macroRefs.join(' ')}。预设忽略 quality/bitrate 等旋钮。`]
+        ? [
+            `可用预设（宏，固定参数，format 直接填引用）：${macroRefs.join(' ')}。宏忽略 quality/bitrate 等旋钮；配方可用 quality 滑动其质量参数。`,
+          ]
         : []),
       '',
       '只返回一个 JSON 对象。不要代码、不要解释、不要 Markdown 代码块：',
