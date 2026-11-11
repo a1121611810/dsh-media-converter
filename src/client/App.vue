@@ -632,6 +632,27 @@ watch(meta, () => {
   videoTrack.value = 0;
   audioTrack.value = 0;
 });
+// The track picks show in every param surface that honors them — convert,
+// trim (it re-sends the picks with the cut) and extract (one dropdown per
+// direction) — so the state is always visible where it takes effect.
+const showVideoTrack = computed(
+  () =>
+    videoTrackOptions.value.length > 0 &&
+    (currentAction.value?.id === 'extract-video' ||
+      ((currentAction.value?.id.startsWith('fmt:') || currentAction.value?.id === 'trim') &&
+        file.value?.kind === 'video' &&
+        format.value !== 'mp3' &&
+        format.value !== 'm4a')),
+);
+const showAudioTrack = computed(
+  () =>
+    audioTrackOptions.value.length > 0 &&
+    (currentAction.value?.id === 'extract-audio' ||
+      ((currentAction.value?.id.startsWith('fmt:') || currentAction.value?.id === 'trim') &&
+        file.value?.kind !== 'image' &&
+        format.value !== 'gif')),
+);
+const showTrackRow = computed(() => showVideoTrack.value || showAudioTrack.value);
 
 const containerRows = computed(() =>
   meta.value
@@ -2429,6 +2450,38 @@ watch([action, panelOpen], async () => {
 
         <template v-if="currentAction">
           <div class="mc-panel">
+            <div v-if="showTrackRow" class="mc-row">
+              <template v-if="showVideoTrack">
+                <span class="mc-muted">{{ t('track.video') }}</span>
+                <select
+                  class="mc-select"
+                  v-model.number="videoTrack"
+                  :disabled="busy"
+                  :aria-label="t('track.video')"
+                  @change="resetResult"
+                >
+                  <option :value="0">{{ t('track.auto') }}</option>
+                  <option v-for="option in videoTrackOptions" :key="option.value" :value="option.value">
+                    {{ option.label }}
+                  </option>
+                </select>
+              </template>
+              <template v-if="showAudioTrack">
+                <span class="mc-muted">{{ t('track.audio') }}</span>
+                <select
+                  class="mc-select"
+                  v-model.number="audioTrack"
+                  :disabled="busy"
+                  :aria-label="t('track.audio')"
+                  @change="resetResult"
+                >
+                  <option :value="0">{{ t('track.auto') }}</option>
+                  <option v-for="option in audioTrackOptions" :key="option.value" :value="option.value">
+                    {{ option.label }}
+                  </option>
+                </select>
+              </template>
+            </div>
             <template v-if="currentAction.id.startsWith('fmt:')">
               <div class="mc-row">
                 <span class="mc-muted">{{ t('name.label') }}</span>
@@ -2494,43 +2547,6 @@ watch([action, panelOpen], async () => {
                   <option :value="0">{{ t('bitrate.default') }}</option>
                   <option v-for="option in RATE_OPTIONS" :key="option" :value="option">{{ option }} Hz</option>
                 </select>
-              </div>
-              <div
-                v-if="currentAction.id === 'fmt:' + format && (videoTrackOptions.length || audioTrackOptions.length)"
-                class="mc-row"
-              >
-                <template
-                  v-if="file.kind === 'video' && format !== 'mp3' && format !== 'm4a' && videoTrackOptions.length"
-                >
-                  <span class="mc-muted">{{ t('track.video') }}</span>
-                  <select
-                    class="mc-select"
-                    v-model.number="videoTrack"
-                    :disabled="busy"
-                    :aria-label="t('track.video')"
-                    @change="resetResult"
-                  >
-                    <option :value="0">{{ t('track.auto') }}</option>
-                    <option v-for="option in videoTrackOptions" :key="option.value" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </template>
-                <template v-if="file.kind !== 'image' && format !== 'gif' && audioTrackOptions.length">
-                  <span class="mc-muted">{{ t('track.audio') }}</span>
-                  <select
-                    class="mc-select"
-                    v-model.number="audioTrack"
-                    :disabled="busy"
-                    :aria-label="t('track.audio')"
-                    @change="resetResult"
-                  >
-                    <option :value="0">{{ t('track.auto') }}</option>
-                    <option v-for="option in audioTrackOptions" :key="option.value" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
-                </template>
               </div>
               <div v-if="usesVideoTune && currentAction.id === 'fmt:' + format" class="mc-row">
                 <span class="mc-muted">{{ t('gif.fps') }}</span>
