@@ -458,10 +458,10 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        'if (body.hardware && hwBackend && !videoTuneTuned && !geometryTuned) {',
-        'if (body.hardware && hwBackend && !geometryTuned) {',
+        'if (body.hardware && hwBackend && !videoTuneTuned && !geometryTuned && !filtersTuned) {',
+        'if (body.hardware && hwBackend && !geometryTuned && !filtersTuned) {',
       ),
-    distAnchor: 'hwBackend && !geometryTuned) {',
+    distAnchor: 'hwBackend && !geometryTuned && !filtersTuned) {',
     expect: '带 width/fps 的请求必须走软件编码，突变后（有后端时）job.hardware 变 true → 测试红',
   },
   {
@@ -475,10 +475,14 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        'if (supportsVideoTune(kind, format) && (geoParts.length > 0 || Number(fps) > 0 || Number(width) > 0)) {',
-        'if (false && supportsVideoTune(kind, format) && (geoParts.length > 0 || Number(fps) > 0 || Number(width) > 0)) {',
+        `  if (
+    supportsVideoTune(kind, format) &&`,
+        `  if (
+    false &&
+    supportsVideoTune(kind, format) &&`,
       ),
-    distAnchor: 'false && supportsVideoTune',
+    // dist 打印器把条件接在 if ( 同行：锚点只取这一小段（基线三份产物零命中）。
+    distAnchor: 'if (false &&',
     expect: '显式 fps/width 必须生成/重建 -vf（gif 与普通容器），突变后 gif 回默认、mp4 无滤镜 → 测试红',
   },
   {
@@ -971,12 +975,15 @@ const MUTANTS = [
         `        body.sampleRate,
         body.codec,
         geometry,
+        filters,
       ),`,
         `        body.sampleRate,
+        undefined,
         geometry,
+        filters,
       ),`,
       ),
-    distAnchor: 'body.sampleRate, geometry)',
+    distAnchor: 'body.sampleRate, undefined,',
     expect: 'codec=hevc 必须产出 libx265 配方，突变后回退默认 x264 → plan 断言红',
   },
   {
@@ -1064,8 +1071,7 @@ const MUTANTS = [
     source: 'lib/plan.ts',
     test: 'test/host.test.mjs',
     dist: 'dist/lib/plan.js',
-    apply: (s) =>
-      replaceOnce(s, 'if (geo.crop) geoParts.push(', 'if (geo.crop && geo.rotate === 91) geoParts.push('),
+    apply: (s) => replaceOnce(s, 'if (geo.crop) geoParts.push(', 'if (geo.crop && geo.rotate === 91) geoParts.push('),
     distAnchor: 'geo.rotate === 91',
     expect: 'crop 必须进入 -vf 链（产物 48x32），突变后原尺寸 → 反读断言红',
   },
@@ -1100,9 +1106,76 @@ const MUTANTS = [
     source: 'lib/actions.ts',
     test: 'test/plan.test.mjs',
     dist: 'dist/lib/actions.js',
-    apply: (s) => replaceOnce(s, '!geometryTuned &&', '!!geometryTuned &&'),
+    apply: (s) => replaceOnce(s, '!geometryTuned &&\n    !filtersTuned', '!!geometryTuned &&\n    !filtersTuned'),
     distAnchor: '!!geometryTuned &&',
     expect: '未选几何的 mp4 直拷贝必须保留；突变后永不拷贝 → copy 断言红',
+  },
+  // --- Y 家族：变速/响度/水印/烧录/截图（R5）----------------------------------
+  {
+    id: 'Y1',
+    name: '滤镜探测被短路（scale canary 谎报）',
+    source: 'index.ts',
+    test: 'test/host.test.mjs',
+    dist: 'dist/index.js',
+    // scale 每个 ffmpeg 都有：任何机器上突变都必被 e2e 的独立探针对照抓住
+    // （drawtext/subtitles 在本机缺失，不能当靶子）。
+    apply: (s) => replaceOnce(s, "scale: build ? build.filters.includes('scale') : false,", 'scale: false,'),
+    distAnchor: 'scale: false',
+    expect: '本机有 drawtext 时 /status 必须如实报 true，突变后恒 false → 门控 e2e 断言红',
+  },
+  {
+    id: 'Y2',
+    name: 'atempo 链退化成单段（极值即非法参数）',
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'parts.push(`atempo=${String(Math.round(rest * 1000) / 1000)}`);',
+        'parts.push(`atempo=${String(speed)}`);',
+      ),
+    distAnchor: 'atempo=${String(speed)}',
+    expect: 'speed=4 必须拆 atempo=2,atempo=2；突变后第二段 atempo=4 非法 → plan 断言红',
+  },
+  {
+    id: 'Y3',
+    name: '水印 textfile 退回内联 text=（转义地狱回归）',
+    source: 'lib/plan.ts',
+    // plan 级守护：宿主端路径在 macOS 上无特殊字符，内联 text= 也能跑成，
+    // e2e 判别不了；段形态由 plan.test 的 textfile= 断言钉住。
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) => replaceOnce(s, ":textfile='${text}'", ":text='${text}'"),
+    distAnchor: ":text='${text}'",
+    expect: '水印段必须用 textfile=；突变后段断言（textfile= 存在 / 内联 text= 不存在）红',
+  },
+  {
+    id: 'Y4',
+    name: '烧录 fontsdir 被写死（字体目录逃逸）',
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    // void fontsDir 保活参数，避免 noUnusedParameters 让构建炸。
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'return `subtitles=filename=${esc(srtFile)}:fontsdir=${esc(fontsDir)}`;',
+        'void fontsDir;\n  return `subtitles=filename=${esc(srtFile)}:fontsdir=/tmp`;',
+      ),
+    distAnchor: 'fontsdir=/tmp',
+    expect: '烧录段必须用传入的系统字体目录；突变后写死 /tmp → 段断言红',
+  },
+  {
+    id: 'Y5',
+    name: '截图单帧约束被放宽（-frames:v 2）',
+    source: 'lib/plan.ts',
+    test: 'test/host.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(s, "args: ['-frames:v', '1', ...(ext === 'jpg'", "args: ['-frames:v', '2', ...(ext === 'jpg'"),
+    distAnchor: "'-frames:v', '2'",
+    expect: 'png 单帧容器收到第 2 帧必报错；突变后截图任务失败 → e2e 断言红',
   },
 ];
 

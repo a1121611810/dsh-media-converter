@@ -69,7 +69,14 @@ export interface ConvertRequest {
   rotate?: number;
   flip?: string;
   remux?: boolean;
-  mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta';
+  // R5: speed (0.25–4), loudnorm, text watermark, subtitle burn, snapshot.
+  speed?: number;
+  loudnorm?: boolean;
+  watermarkText?: string;
+  watermarkPos?: string;
+  burn?: number;
+  at?: number;
+  mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta' | 'snapshot';
   stream?: number;
   tags?: Record<string, string>;
   trim?: TrimWindow;

@@ -4,11 +4,16 @@ import {
   FORMATS,
   HW_BACKENDS,
   buildArgs,
+  burnSegment,
   chapterWindows,
   concatCompatible,
   concatCopyArgs,
   concatListText,
   copyArgs,
+  loudnormSegment,
+  snapshotPlan,
+  speedSegments,
+  watermarkSegment,
   defaultFormat,
   formatEncoders,
   forceRemuxArgs,
@@ -729,7 +734,18 @@ assert.deepEqual(planPtcGroups([], ptcLimits), []);
 // The table is the single source for planFor, the PTC prompt and the tool enum.
 assert.deepEqual(
   ACTIONS.map((entry) => entry.id),
-  ['probe', 'convert', 'extract-audio', 'extract-video', 'subtitle', 'meta', 'base64', 'concat', 'split-chapters'],
+  [
+    'probe',
+    'convert',
+    'extract-audio',
+    'extract-video',
+    'subtitle',
+    'meta',
+    'base64',
+    'concat',
+    'split-chapters',
+    'snapshot',
+  ],
 );
 assert.equal(actionFor('convert')?.id, 'convert');
 assert.equal(actionFor('nope'), undefined);
@@ -742,6 +758,7 @@ assert.deepEqual(toolActions(), [
   'rewrite-tags',
   'concat',
   'split-chapters',
+  'snapshot',
 ]);
 // 'rewrite-tags' is the tool's name for the 'meta' plan mode.
 assert.equal(actionFor('meta')?.tool, 'rewrite-tags');
@@ -1001,3 +1018,78 @@ assert.throws(
   /画面几何仅对视频目标有效/,
 );
 console.log('plan: 几何/remux 负形态 ok');
+
+// --- 变速 / loudnorm / 水印 / 烧录 / 截图（R5）--------------------------------
+assert.equal(speedSegments(1), null);
+assert.equal(speedSegments(0), null);
+assert.deepEqual(speedSegments(2), { vf: 'setpts=PTS/2', af: 'atempo=2' });
+assert.deepEqual(speedSegments(0.5), { vf: 'setpts=PTS/0.5', af: 'atempo=0.5' });
+assert.equal(speedSegments(4).af, 'atempo=2,atempo=2', '4 倍拆成两段 atempo');
+assert.equal(speedSegments(0.25).af, 'atempo=0.5,atempo=0.5');
+assert.equal(speedSegments(3).af, 'atempo=2,atempo=1.5');
+assert.throws(() => speedSegments(5), /0.25–4/);
+assert.throws(() => speedSegments(0.1), /0.25–4/);
+assert.equal(loudnormSegment(), 'loudnorm=I=-16:TP=-1.5:LRA=11');
+// 链序：setpts 在几何前；-af 里 atempo 先于 loudnorm。
+const spArgs = buildArgs(
+  'video',
+  'mp4',
+  90,
+  0,
+  0,
+  0,
+  0,
+  0,
+  undefined,
+  { crop: '32:32:0:0' },
+  { speed: 2, loudnorm: true },
+);
+assert.ok(spArgs[spArgs.indexOf('-vf') + 1].startsWith('setpts=PTS/2,crop=32:32:0:0'), 'setpts 在几何前');
+assert.equal(spArgs[spArgs.indexOf('-af') + 1], 'atempo=2,loudnorm=I=-16:TP=-1.5:LRA=11');
+// 音频文件只有 -af（变速播客）。
+const auSp = buildArgs('audio', 'mp3', 90, 0, 0, 0, 0, 0, undefined, undefined, { speed: 0.5 });
+assert.ok(!auSp.includes('-vf'));
+assert.equal(auSp[auSp.indexOf('-af') + 1], 'atempo=0.5');
+// 水印段：textfile 而非 text=，含位置表达式。
+const wm = watermarkSegment({
+  fontFile: '/System/Library/Fonts/Supplemental/Arial.ttf',
+  textFile: '/tmp/wm.txt',
+  size: 24,
+  pos: 'br',
+});
+assert.ok(wm.includes("textfile='/tmp/wm.txt'"), '水印走 textfile');
+assert.ok(!wm.includes(':text='), '不用内联 text=');
+assert.ok(wm.includes('x=w-tw-24:y=h-th-24'), 'br 位置表达式');
+assert.ok(
+  watermarkSegment({
+    fontFile: 'C:\\Windows\\Fonts\\arial.ttf',
+    textFile: 'C:\\tmp\\w.txt',
+    size: 12,
+    pos: 'tl',
+  }).includes("fontfile='C:/Windows/Fonts/arial.ttf'"),
+);
+// 烧录段：filename= 显式形态 + Windows 盘符冒号转义 + fontsdir 用传入目录。
+const burn = burnSegment('C:\\tmp\\x.srt', 'C:\\Windows\\Fonts');
+assert.ok(burn.includes('subtitles=filename=C\\:/tmp/x.srt'), '烧录路径转义');
+assert.ok(burn.includes('fontsdir=C\\:/Windows/Fonts'), 'fontsdir 用传入的系统字体目录');
+// 截图：inputArgs 落 -ss，单帧。
+const snap = snapshotPlan(1.5, 'jpg');
+assert.deepEqual(snap.inputArgs, ['-ss', '1.500']);
+assert.ok(snap.args.includes('-frames:v'));
+assert.equal(snap.ext, 'jpg');
+assert.equal(snapshotPlan(0, 'bmp').ext, 'png', '未知格式回退 png');
+// 注册表层：speed 禁拷贝；snapshot 校验时间点。
+const spPlan = convertEntry.plan(trackUpload(1), { format: 'mp4', speed: 2 }, 0, null);
+assert.ok(!spPlan.copy, '变速强制重编码');
+assert.throws(() => convertEntry.plan(trackUpload(1), { format: 'mp4', speed: 9 }, 0, null), /0.25–4/);
+const snapEntry = ACTIONS.find((entry) => entry.id === 'snapshot');
+assert.throws(() => snapEntry.plan(trackUpload(1), { at: 99 }, 0, null), /超出文件时长/);
+const snapOk = snapEntry.plan(trackUpload(1), { at: 1, format: 'png' }, 0, null);
+assert.equal(snapOk.kind, 'image');
+// 水印/烧录的误用形态。
+assert.throws(
+  () => convertEntry.plan(trackUpload(1, 0), { format: 'mp3', watermarkText: 'x' }, 0, null),
+  /水印仅对视频目标有效/,
+);
+assert.throws(() => convertEntry.plan(trackUpload(1), { format: 'mp4', burn: 0 }, 0, null), /这条字幕轨不存在/);
+console.log('plan: R5 用例 ok');

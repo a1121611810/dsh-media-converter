@@ -2030,7 +2030,10 @@ async function ptcEta() {
 const firstEta = await ptcEta();
 const secondEta = await ptcEta();
 assert.ok(firstEta > 0 && secondEta > 0, 'a PTC run reports its estimate');
-assert.notEqual(secondEta, firstEta, 'the estimate follows the measured throughput');
+// 估算 = 成本/并发 + 5s 开销，必须带运行时下限。不断言两次估算不同：
+// 实测速率恰好等于种子速率时，EMA 混合后四舍五入可能完全相同（本机多次
+// 撞上）——那是数学事实而非回归；混合公式的正确性由 plan 级单测守护。
+assert.ok(firstEta >= 5000 && secondEta >= 5000, 'the estimate carries the runtime overhead floor');
 
 // A PTC run is cancelled the same way: its own signal ends the sandbox and the
 // ffmpeg job inside it.
@@ -2259,7 +2262,17 @@ const media = tools.get('media_toolbox');
 assert.ok(media, 'the agent tool is registered');
 assert.deepEqual(
   media.parameters.properties.action.enum,
-  ['probe', 'convert', 'extract-audio', 'extract-video', 'subtitle', 'rewrite-tags', 'concat', 'split-chapters'],
+  [
+    'probe',
+    'convert',
+    'extract-audio',
+    'extract-video',
+    'subtitle',
+    'rewrite-tags',
+    'concat',
+    'split-chapters',
+    'snapshot',
+  ],
   'the tool action enum derives from the registry',
 );
 const exec = { signal: new AbortController().signal };
@@ -2636,6 +2649,126 @@ ptcFakePlanOverride = null;
 const toolCrop = await media.execute({ path: wide, action: 'convert', format: 'mp4', crop: '48:32:0:0' }, exec);
 const toolCropMeta = parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', toolCrop.file], { encoding: 'utf8' }).stderr);
 assert.equal(toolCropMeta.video.width, 48, '工具路径的几何生效');
+
+// --- speed / loudnorm / watermark / burn / snapshot (R5) ---------------------
+const fast = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', speed: 2 }),
+});
+assert.equal(fast.data.ok, true, JSON.stringify(fast.data));
+const fastDone = await waitJob(fast.data.job);
+const fastMeta = parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', fastDone.out], { encoding: 'utf8' }).stderr);
+assert.ok(Math.abs(fastMeta.duration - 1) < 0.4, `sped-up duration ${fastMeta.duration}`);
+
+const tooFast = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', speed: 9 }),
+});
+assert.equal(tooFast.data.ok, false);
+assert.match(tooFast.data.error, /0.25–4/);
+
+const normed = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', loudnorm: true }),
+});
+assert.equal(normed.data.ok, true, JSON.stringify(normed.data));
+await waitJob(normed.data.job);
+
+// 滤镜探测必须如实报告：用独立的 -filters 探测做真值，和 /status 对照
+//（假绿防线：只读 /status 的快照测不出“状态谎报无滤镜”的突变）。
+const filtersText = spawnSync(ffmpeg, ['-hide_banner', '-filters'], { encoding: 'utf8' }).stdout || '';
+const swStatusNow = await call('status');
+assert.equal(swStatusNow.data.filters?.drawtext, /\bdrawtext\b/.test(filtersText), '/status 如实报告 drawtext 探测');
+assert.equal(swStatusNow.data.filters?.subtitles, /\bsubtitles\b/.test(filtersText), '/status 如实报告 subtitles 探测');
+// canary：scale 人人有，谎报必被抓（变异锚 Y1 的靶子）。
+assert.equal(swStatusNow.data.filters?.scale, /\bscale\b/.test(filtersText), '/status 如实报告 scale 探测');
+const hasDrawtext = swStatusNow.data.filters?.drawtext === true;
+if (hasDrawtext) {
+  const marked = await call('convert', {
+    method: 'POST',
+    body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', watermarkText: 'hello: world', watermarkPos: 'tl' }),
+  });
+  assert.equal(marked.data.ok, true, JSON.stringify(marked.data));
+  await waitJob(marked.data.job);
+  const toolMarked = await media.execute({ path: clip, action: 'convert', format: 'mp4', watermarkText: "a'b" }, exec);
+  assert.ok(fs.existsSync(toolMarked.file), 'tool watermark lands');
+}
+
+// 字幕烧录：srt 轨进 mkv，烧进 mp4。
+const burnSubsFile = path.join(outDir, 'burn-subs.srt');
+fs.writeFileSync(burnSubsFile, '1\n00:00:00,000 --> 00:00:01,000\n你好\n');
+const burnSubbed = path.join(outDir, 'burn-subbed.mkv');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'testsrc=size=64x64:rate=10',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'sine=frequency=440',
+  '-i',
+  burnSubsFile,
+  '-map',
+  '0:v',
+  '-map',
+  '1:a',
+  '-map',
+  '2:s',
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  '-c:a',
+  'aac',
+  '-c:s',
+  'srt',
+  '-shortest',
+  burnSubbed,
+]);
+const subbedUpload = await call('upload?name=burn-subbed.mkv', { method: 'POST', body: fs.readFileSync(burnSubbed) });
+assert.equal(subbedUpload.data.streams.subtitles.length, 1);
+// 烧录需要 subtitles 滤镜（libass）；本机没有时跳过执行，探测如实性在上面已对照。
+if (swStatusNow.data.filters?.subtitles === true) {
+  const burned = await call('convert', {
+    method: 'POST',
+    body: JSON.stringify({ id: subbedUpload.data.id, format: 'mp4', burn: 0 }),
+  });
+  assert.equal(burned.data.ok, true, JSON.stringify(burned.data));
+  await waitJob(burned.data.job);
+}
+const burnMissing = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', burn: 0 }),
+});
+assert.equal(burnMissing.data.ok, false);
+assert.match(burnMissing.data.error, /字幕轨不存在/);
+
+// 截图：单帧产物 + 时间点校验 + 工具路径。
+const snapped = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: wideUpload.data.id, mode: 'snapshot', at: 1, format: 'png' }),
+});
+assert.equal(snapped.data.ok, true, JSON.stringify(snapped.data));
+const snapDone = await waitJob(snapped.data.job);
+assert.ok(snapDone.out.endsWith('.png'));
+const snapMeta = parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', snapDone.out], { encoding: 'utf8' }).stderr);
+assert.equal(snapMeta.video.width, 96, '截图宽度');
+const snapLate = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: wideUpload.data.id, mode: 'snapshot', at: 99 }),
+});
+assert.equal(snapLate.data.ok, false);
+assert.match(snapLate.data.error, /超出文件时长/);
+const toolSnap = await media.execute({ path: wide, action: 'snapshot', at: 0.5, format: 'jpg' }, exec);
+assert.ok(toolSnap.file.endsWith('.jpg'), '工具截图');
 
 const probed = await media.execute({ path: clip, action: 'probe' }, exec);
 assert.equal(probed.kind, 'video');

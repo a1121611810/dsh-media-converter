@@ -442,6 +442,16 @@ export interface JsonBody {
   // Explicit container rewrite: copy whatever fits, never re-encode; ffmpeg
   // itself rejects impossible combinations. Incompatible with trim.
   remux?: unknown;
+  // R5 knobs: speed (0.25–4), loudnorm, text watermark (pos tl/tr/bl/br),
+  // subtitle burn (track ordinal; burnFile is the extracted srt, host-side),
+  // snapshot at (seconds).
+  speed?: unknown;
+  loudnorm?: unknown;
+  watermarkText?: unknown;
+  watermarkPos?: unknown;
+  burn?: unknown;
+  burnFile?: string;
+  at?: unknown;
   // An extension preset reference ('x:<manifest>/<action>'); when set, the
   // plan comes from the extension table instead of the built-in recipe.
   preset?: unknown;
@@ -564,17 +574,32 @@ function deviceArgs(backend: HwBackend, encoder: string): string[] {
 export interface FfmpegBuild {
   encoders: string[];
   hwaccels: Set<string>;
+  // Filter names from `-filters`; the panel reads drawtext's presence to
+  // show or hide the text-watermark controls.
+  filters: string[];
 }
 
 export async function probeFfmpegBuild(ffmpeg: string, run: FfmpegRunner = execRunner(ffmpeg)): Promise<FfmpegBuild> {
-  const [encText, accelText] = await Promise.all([
+  const [encText, accelText, filterText] = await Promise.all([
     run(['-hide_banner', '-encoders'], FFMPEG_TIMEOUT_MS).catch(() => ''),
     run(['-hide_banner', '-hwaccels'], FFMPEG_TIMEOUT_MS).catch(() => ''),
+    run(['-hide_banner', '-filters'], FFMPEG_TIMEOUT_MS).catch(() => ''),
   ]);
   // Some lines carry a leading space in the flags column (" VF...D").
   const encoders = [...encText.matchAll(/^\s*[A-Z.]{6}\s+(\S+)/gm)].map((match) => match[1]);
   const hwaccels = new Set(accelText.split(/\s+/).filter((name) => /^[a-z][a-z0-9_]*$/.test(name)));
-  return { encoders, hwaccels };
+  // Filter names sit in the SECOND column — the first is the capability flags
+  // ("...", "T.C", ...). Static builds without libfreetype/libass simply have
+  // no drawtext/subtitles row.
+  const filters = filterText
+    .split('\n')
+    .map((line) => {
+      const parts = line.trim().split(/\s+/);
+      const name = parts.length > 1 ? parts[1] : '';
+      return /^[a-z][a-z0-9._-]*$/i.test(name) ? name : '';
+    })
+    .filter(Boolean);
+  return { encoders, hwaccels, filters };
 }
 
 // Which backend this machine can really run, and whether its HEVC sibling
@@ -679,6 +704,7 @@ const statusPayload = (
   probeMode: 'ffprobe' | 'ffmpeg',
   formats: FormatTable,
   softwareCodecs: Record<string, string[]>,
+  filters: { drawtext: boolean; subtitles: boolean; scale: boolean },
   extensions: ReturnType<typeof statusOf>,
 ) => ({
   ok: true as const,
@@ -696,6 +722,7 @@ const statusPayload = (
   probeMode,
   formats,
   softwareCodecs,
+  filters,
   extensions,
 });
 export type StatusResponse = ReturnType<typeof statusPayload>;
@@ -2533,7 +2560,12 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       mode: action === 'rewrite-tags' ? 'meta' : action,
       // A subtitle extraction without an explicit format defaults to srt, not
       // to the kind's default container (mp4 would fail the format whitelist).
-      format: action === 'subtitle' ? String(a.format || 'srt') : String(a.format || defaultFormat(probed.kind)),
+      format:
+        action === 'subtitle'
+          ? String(a.format || 'srt')
+          : action === 'snapshot'
+            ? String(a.format || 'png')
+            : String(a.format || defaultFormat(probed.kind)),
       quality: Number(a.quality || 90),
       bitrate: Number(a.bitrate || 0),
       fps: Number(a.fps || 0),
@@ -2559,6 +2591,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       rotate: Number(a.rotate || 0) || undefined,
       flip: a.flip !== undefined ? String(a.flip) : undefined,
       remux: a.remux === true ? true : undefined,
+      // R5: speed/loudnorm/watermark/burn/snapshot.
+      speed: Number(a.speed || 0) || undefined,
+      loudnorm: a.loudnorm === true ? true : undefined,
+      watermarkText: a.watermarkText !== undefined ? String(a.watermarkText) : undefined,
+      watermarkPos: a.watermarkPos !== undefined ? String(a.watermarkPos) : undefined,
+      burn: a.burn !== undefined && a.burn !== null ? Number(a.burn) : undefined,
+      at: Number(a.at || 0),
       stream: Number(a.stream || 0),
       tags: (a.tags || {}) as Record<string, string>,
       trim: a.trim as { start?: unknown; end?: unknown } | undefined,
@@ -2567,16 +2606,44 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     // the device verdict too: asking while the check is still running must
     // not quietly fall back to the CPU.
     if (body.hardware) await deviceVerdict(ffmpeg!);
-    const { job, done } = await startJob(
-      upload,
-      planFor(upload, body, 0),
-      normalizeTrim(body.trim, upload.duration),
-      '',
-    );
+    const toolScratch = await prepareBurn(upload, body);
+    const toolPlan = planFor(upload, body, 0);
+    if (toolPlan.scratch?.length) toolScratch.push(...toolPlan.scratch);
+    const { job, done } = await startJob(upload, toolPlan, normalizeTrim(body.trim, upload.duration), '');
+    if (toolScratch.length) {
+      void done.finally(() => toolScratch.forEach((file) => fsp.rm(file, { force: true }).catch(() => {})));
+    }
     // The agent can walk away or the call can time out: either way the ffmpeg
     // process dies and the half-written output is removed.
     const finished = await awaitJob(job, done, exec.signal);
     return { file: finished.out, kind: finished.kind, duration: upload.duration, sizeBytes: finished.size };
+  };
+
+  // An embedded subtitle track -> a plain srt the burn filter can read. The
+  // plan builder stays synchronous; extraction is the route's job.
+  const extractSubtitle = (source: string, ordinal: number, out: string): Promise<void> =>
+    new Promise((resolve, reject) => {
+      execFile(
+        ffmpeg!,
+        ['-y', '-hide_banner', '-loglevel', 'error', '-i', source, '-map', `0:s:${ordinal}`, '-c:s', 'srt', out],
+        { timeout: 30000 },
+        (err) => (err ? reject(new Error(`字幕提取失败：${errorText(err)}`)) : resolve()),
+      );
+    });
+
+  // Shared by the web routes and the agent tool: pull the subtitle track out
+  // before planning a burn, and remember every scratch file for cleanup.
+  const prepareBurn = async (upload: Upload, body: JsonBody): Promise<string[]> => {
+    const scratch: string[] = [];
+    if (body.burn !== undefined && body.burn !== null && body.burn !== false) {
+      const ordinal = Math.max(0, Math.round(Number(body.burn) || 0));
+      if (!upload.streams.subtitles[ordinal]) throw new Error('这条字幕轨不存在');
+      const srtFile = path.join(tmpDir, `burn-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.srt`);
+      await extractSubtitle(upload.path, ordinal, srtFile);
+      body.burnFile = srtFile;
+      scratch.push(srtFile);
+    }
+    return scratch;
   };
 
   // Byte range support keeps the preview player's scrub bar working.
@@ -2719,6 +2786,33 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             type: 'boolean',
             description:
               'true=仅换封装（直接拷贝到目标容器，绝不重编码；不兼容组合任务报错，与 trim 互斥）；不填按常规规则。',
+          },
+          speed: {
+            type: 'number',
+            description: '变速倍率 0.25–4（1 或省略不变）：视频 setpts + 音频 atempo 联动，强制重编码。',
+          },
+          loudnorm: {
+            type: 'boolean',
+            description: 'true=单遍响度归一化（EBU R128：-16 LUFS、TP -1.5）；与变速同用时排在 atempo 之后。',
+          },
+          watermarkText: {
+            type: 'string',
+            description:
+              '文字水印内容（非空即启用）：写入临时文本文件经 drawtext 渲染，需要本机 ffmpeg 带 drawtext（libfreetype），字号按源宽自动。',
+          },
+          watermarkPos: {
+            type: 'string',
+            enum: ['tl', 'tr', 'bl', 'br'],
+            description: '水印位置：tl 左上 / tr 右上 / bl 左下 / br 右下（默认 br）；仅水印生效。',
+          },
+          burn: {
+            type: 'number',
+            description:
+              '字幕烧录：内嵌字幕轨序号（0 起），把该轨烧进画面（subtitles 滤镜，系统字体目录）；强制重编码。需要本机有系统字体目录。',
+          },
+          at: {
+            type: 'number',
+            description: 'snapshot 的截图时间点（秒，≥0 且小于时长）。',
           },
           tags: {
             type: 'object',
@@ -2878,6 +2972,15 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               // The codec dimension hides instead of falling back: an
               // unverifiable build advertises no software variants.
               build?.encoders.length ? softwareCodecTable(build.encoders) : {},
+              // Text watermark hides without libfreetype, subtitle burn
+              // without libass; the panel reads these instead of guessing.
+              // `scale` is the sanity canary every ffmpeg carries — the tests
+              // compare it against their own probe to catch a lying /status.
+              {
+                drawtext: build ? build.filters.includes('drawtext') : false,
+                subtitles: build ? build.filters.includes('subtitles') : false,
+                scale: build ? build.filters.includes('scale') : false,
+              },
               statusOf(extensionManifests),
             ),
           );
@@ -3294,12 +3397,21 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             // A request that asks for hardware encoding waits for the verdict
             // instead of quietly converting on the CPU.
             if (body.hardware) await deviceVerdict(ffmpeg!);
-            const { job } = await startJob(
+            // Burn prep runs before the plan: the subtitle track becomes a
+            // scratch srt, and every scratch file (burn srt, watermark text)
+            // dies with the job.
+            const scratch = await prepareBurn(upload, body);
+            const plan = planFor(upload, body, 0);
+            if (plan.scratch?.length) scratch.push(...plan.scratch);
+            const { job, done } = await startJob(
               upload,
-              planFor(upload, body, 0),
+              plan,
               normalizeTrim(body.trim, upload.duration),
               String(body.name || '').trim(),
             );
+            if (scratch.length) {
+              void done.finally(() => scratch.forEach((file) => fsp.rm(file, { force: true }).catch(() => {})));
+            }
             json(res, 200, { ok: true, job });
           } catch (err) {
             json(res, 200, errorPayload(errorText(err)));

@@ -92,6 +92,8 @@ export interface ConvertPlan {
   // 0 / undefined lets ffmpeg pick its own thread count.
   threads?: number;
   stemSuffix?: string;
+  // Scratch files (watermark text) the caller removes when the job settles.
+  scratch?: string[];
 }
 
 export const FORMATS: FormatTable = {
@@ -297,6 +299,74 @@ function x265CrfOf(quality: number): number {
 // shortcut: 常用文献值，未经 VMAF 实测；上线后补实测再校准。
 function svtCrfOf(quality: number): number {
   return Math.min(45, Math.max(20, Math.round(32 + (90 - quality) * 0.3)));
+}
+
+// --- R5: speed / loudnorm / watermark / burn / snapshot ---------------------
+// Speed factor -> the two filter segments. atempo only covers [0.5, 2] per
+// segment, so extreme factors chain several; setpts rides the video chain
+// FIRST (timing before geometry).
+export function speedSegments(factor: number): { vf: string; af: string } | null {
+  const speed = Number(factor);
+  if (!(speed > 0) || speed === 1) return null;
+  if (speed < 0.25 || speed > 4) throw new Error('speed 必须在 0.25–4 之间');
+  const parts: string[] = [];
+  let rest = speed;
+  while (rest < 0.5 - 1e-9) {
+    parts.push('atempo=0.5');
+    rest /= 0.5;
+  }
+  while (rest > 2 + 1e-9) {
+    parts.push('atempo=2');
+    rest /= 2;
+  }
+  parts.push(`atempo=${String(Math.round(rest * 1000) / 1000)}`);
+  return { vf: `setpts=PTS/${String(speed)}`, af: parts.join(',') };
+}
+
+// Single-pass loudnorm. shortcut: 单遍精度弱于双遍分析，等真实需求再补。
+export function loudnormSegment(): string {
+  return 'loudnorm=I=-16:TP=-1.5:LRA=11';
+}
+
+const WM_POS: Record<string, { x: string; y: string }> = {
+  tl: { x: '24', y: '24' },
+  tr: { x: 'w-tw-24', y: '24' },
+  bl: { x: '24', y: 'h-th-24' },
+  br: { x: 'w-tw-24', y: 'h-th-24' },
+};
+export const WM_POS_KEYS = Object.keys(WM_POS);
+
+// drawtext rides the TAIL of the video chain (after scale/burn). textfile
+// (not text=) sidesteps every escaping nightmare; paths are quoted, and
+// backslashes become slashes for the filter parser.
+export function watermarkSegment(opts: { fontFile: string; textFile: string; size: number; pos: string }): string {
+  const pos = WM_POS[opts.pos] || WM_POS.br;
+  const font = opts.fontFile.replace(/\\/g, '/');
+  const text = opts.textFile.replace(/\\/g, '/');
+  return (
+    `drawtext=fontfile='${font}':textfile='${text}':fontsize=${Math.round(opts.size)}` +
+    `:fontcolor=white:box=1:boxcolor=black@0.4:boxborderw=8:x=${pos.x}:y=${pos.y}`
+  );
+}
+
+// subtitles=filename= is the explicit-option form every current ffmpeg
+// accepts (the bare positional form was retired). Colons are escaped for
+// Windows drive letters; backslashes become slashes.
+export function burnSegment(srtFile: string, fontsDir: string): string {
+  const esc = (p: string) => p.replace(/\\/g, '/').replace(/:/g, '\\:').replace(/'/g, "\\'");
+  return `subtitles=filename=${esc(srtFile)}:fontsdir=${esc(fontsDir)}`;
+}
+
+// One frame at `at` seconds via input options (a trim would fight -frames:v).
+export function snapshotPlan(at: number, format: string): ConvertPlan {
+  const when = Math.max(0, Number(at) || 0);
+  const ext = format === 'jpg' ? 'jpg' : 'png';
+  return {
+    ext,
+    kind: 'image',
+    inputArgs: ['-ss', when.toFixed(3)],
+    args: ['-frames:v', '1', ...(ext === 'jpg' ? ['-q:v', '2'] : [])],
+  };
 }
 
 // Lossy formats only: the UI shows its quality control for exactly these.
@@ -646,6 +716,7 @@ export function buildArgs(
   sampleRate?: number,
   codec?: unknown,
   geometry?: VideoGeometry,
+  filters?: { speed?: number; loudnorm?: boolean; extraVf?: string[]; extraAf?: string[] },
 ): string[] {
   const table = kind === 'audio' ? AUDIO : kind === 'image' ? IMAGE : VIDEO;
   // An explicit software pick swaps the recipe; an unsupported combination
@@ -687,7 +758,18 @@ export function buildArgs(
   // falls back to the recipe's own 12fps/640px; the other recipes carry no -vf
   // and get one pushed with only what was asked.
   const geo = kind === 'video' ? geometry : undefined;
-  const geoParts: string[] = [];
+  // Speed and loudnorm never touch images; on audio files only the -af chain
+  // applies (atempo/loudnorm are pure audio filters).
+  const speed = kind !== 'image' ? speedSegments(filters?.speed ?? 1) : null;
+  const loud = kind !== 'image' && filters?.loudnorm === true ? loudnormSegment() : '';
+  const afParts: string[] = [];
+  if (speed) afParts.push(speed.af);
+  if (loud) afParts.push(loud);
+  if (filters?.extraAf?.length) afParts.push(...filters.extraAf);
+  // Recipes that drop audio (-an, e.g. gif/png single-frame) would leave the
+  // -af chain applying to nothing; ffmpeg rejects that, so skip it.
+  if (afParts.length && !args.includes('-an')) args.push('-af', afParts.join(','));
+  const geoParts: string[] = speed ? [speed.vf] : [];
   if (geo) {
     if (geo.crop) geoParts.push(`crop=${geo.crop}`);
     if (geo.rotate === 90) geoParts.push('transpose=1');
@@ -696,12 +778,17 @@ export function buildArgs(
     if (geo.flip === 'h') geoParts.push('hflip');
     else if (geo.flip === 'v') geoParts.push('vflip');
   }
-  if (supportsVideoTune(kind, format) && (geoParts.length > 0 || Number(fps) > 0 || Number(width) > 0)) {
+  const tailParts = filters?.extraVf ?? [];
+  if (
+    supportsVideoTune(kind, format) &&
+    (geoParts.length > 0 || tailParts.length > 0 || Number(fps) > 0 || Number(width) > 0)
+  ) {
     if (format === 'gif') {
       const f = Number(fps) > 0 ? Math.min(30, Math.max(1, Math.round(Number(fps)))) : 12;
       const w = Number(width) > 0 ? Math.min(7680, Math.max(16, Math.round(Number(width)))) : 640;
       const at = args.indexOf('-vf');
-      if (at >= 0) args[at + 1] = [...geoParts, `fps=${f},scale='min(${w},iw)':-2:flags=lanczos`].join(',');
+      if (at >= 0)
+        args[at + 1] = [...geoParts, `fps=${f},scale='min(${w},iw)':-2:flags=lanczos`, ...tailParts].join(',');
     } else {
       const parts: string[] = [...geoParts];
       if (Number(fps) > 0) parts.push(`fps=${Math.min(30, Math.max(1, Math.round(Number(fps))))}`);
@@ -711,6 +798,7 @@ export function buildArgs(
         parts.push(
           `scale='trunc(min(${Math.min(7680, Math.max(16, Math.round(Number(width))))},iw)/2)*2':-2:flags=lanczos`,
         );
+      parts.push(...tailParts);
       args.push('-vf', parts.join(','));
     }
   }

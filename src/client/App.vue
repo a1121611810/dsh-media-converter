@@ -289,6 +289,15 @@ const crop = ref('');
 const rotate = ref(0);
 const flip = ref('');
 const remuxOnly = ref(false);
+// R5 knobs: speed (1 = unchanged), loudnorm, text watermark, subtitle burn
+// (-1 = none); all reset with the format like the geometry above.
+const speed = ref(1);
+const loudnormOn = ref(false);
+const wmText = ref('');
+const wmPos = ref('br');
+const burnTrack = ref(-1);
+const snapAt = ref(0);
+const snapFormat = ref('png');
 const trimStart = ref('');
 const trimEnd = ref('');
 const metaTags = ref<Record<string, string>>({});
@@ -702,6 +711,25 @@ const showRemux = computed(
     (currentAction.value?.id.startsWith('fmt:') || currentAction.value?.id === 'trim') &&
     (file.value?.kind === 'video' || file.value?.kind === 'audio'),
 );
+// Speed and loudnorm apply to video and audio alike; watermark and burn are
+// video-only. Watermark additionally needs the drawtext filter in this
+// ffmpeg build (static builds without libfreetype simply hide the controls).
+const showSpeedLoud = computed(
+  () =>
+    (currentAction.value?.id.startsWith('fmt:') || currentAction.value?.id === 'trim') &&
+    (file.value?.kind === 'audio' ||
+      (file.value?.kind === 'video' && format.value !== 'mp3' && format.value !== 'm4a')),
+);
+const showWatermark = computed(
+  () => showSpeedLoud.value && file.value?.kind === 'video' && status.value?.filters?.drawtext === true,
+);
+const showBurn = computed(
+  () =>
+    (currentAction.value?.id.startsWith('fmt:') || currentAction.value?.id === 'trim') &&
+    file.value?.kind === 'video' &&
+    status.value?.filters?.subtitles === true &&
+    Boolean(meta.value && meta.value.subtitles.length),
+);
 // A stale encoder pick must not ride into the next format: reset on change.
 watch(format, () => {
   swCodec.value = 'h264';
@@ -709,6 +737,11 @@ watch(format, () => {
   rotate.value = 0;
   flip.value = '';
   remuxOnly.value = false;
+  speed.value = 1;
+  loudnormOn.value = false;
+  wmText.value = '';
+  wmPos.value = 'br';
+  burnTrack.value = -1;
 });
 
 // Save the current form state as a macro in the reserved per-kind pack; the
@@ -856,6 +889,15 @@ const actions = computed(() => {
         meta.value ? meta.value.audio && meta.value.audio.codec : '',
       ]),
       keys: 'metadata info 元数据',
+    });
+  }
+  if (file.value && file.value.kind === 'video') {
+    list.push({
+      id: 'snapshot',
+      group: 'view',
+      label: t('action.snapshot'),
+      hint: t('snap.hint'),
+      keys: 'snapshot 截图 frame 截帧',
     });
   }
   list.push({ id: 'b64', group: 'view', label: t('action.b64'), hint: '', keys: 'base64 编码' });
@@ -1903,6 +1945,11 @@ function convert() {
       rotate: rotate.value || undefined,
       flip: flip.value || undefined,
       remux: remuxOnly.value || undefined,
+      speed: speed.value !== 1 ? speed.value : undefined,
+      loudnorm: loudnormOn.value || undefined,
+      watermarkText: wmText.value.trim() || undefined,
+      watermarkPos: wmPos.value,
+      burn: burnTrack.value >= 0 ? burnTrack.value : undefined,
     },
     'fmt:' + format.value,
   );
@@ -1946,6 +1993,11 @@ function applyTrim() {
       rotate: rotate.value || undefined,
       flip: flip.value || undefined,
       remux: remuxOnly.value || undefined,
+      speed: speed.value !== 1 ? speed.value : undefined,
+      loudnorm: loudnormOn.value || undefined,
+      watermarkText: wmText.value.trim() || undefined,
+      watermarkPos: wmPos.value,
+      burn: burnTrack.value >= 0 ? burnTrack.value : undefined,
       trim: { start: window.start, end: window.end },
     },
     'trim',
@@ -2758,6 +2810,53 @@ watch([action, panelOpen], async () => {
               </label>
               <span class="mc-muted">{{ t('geo.remuxHint') }}</span>
             </div>
+            <div v-if="showSpeedLoud" class="mc-row">
+              <span class="mc-muted">{{ t('fx.speed') }}</span>
+              <input
+                class="mc-name-input"
+                style="width: 64px"
+                type="number"
+                min="0.25"
+                max="4"
+                step="0.05"
+                v-model.number="speed"
+                :disabled="busy"
+                :aria-label="t('fx.speed')"
+                @input="resetResult"
+              />
+              <span class="mc-muted">{{ t('fx.speedHint') }}</span>
+              <label class="mc-check">
+                <input type="checkbox" v-model="loudnormOn" :disabled="busy" @change="resetResult" />
+                {{ t('fx.loudnorm') }}
+              </label>
+            </div>
+            <div v-if="showWatermark" class="mc-row">
+              <span class="mc-muted">{{ t('wm.text') }}</span>
+              <input
+                class="mc-name-input"
+                v-model="wmText"
+                :disabled="busy"
+                :placeholder="t('wm.placeholder')"
+                :aria-label="t('wm.text')"
+                @input="resetResult"
+              />
+              <span class="mc-muted">{{ t('wm.pos') }}</span>
+              <select class="mc-select" v-model="wmPos" :disabled="busy || !wmText.trim()" @change="resetResult">
+                <option value="tl">{{ t('wm.tl') }}</option>
+                <option value="tr">{{ t('wm.tr') }}</option>
+                <option value="bl">{{ t('wm.bl') }}</option>
+                <option value="br">{{ t('wm.br') }}</option>
+              </select>
+            </div>
+            <div v-if="showBurn" class="mc-row">
+              <span class="mc-muted">{{ t('burn.label') }}</span>
+              <select class="mc-select" v-model.number="burnTrack" :disabled="busy" @change="resetResult">
+                <option :value="-1">{{ t('burn.none') }}</option>
+                <option v-for="(track, index) in meta!.subtitles" :key="index" :value="index">
+                  #{{ index + 1 }} {{ track.language || '?' }} {{ track.codec }}
+                </option>
+              </select>
+            </div>
             <template v-if="currentAction.id.startsWith('fmt:')">
               <div class="mc-row">
                 <span class="mc-muted">{{ t('name.label') }}</span>
@@ -3013,6 +3112,49 @@ watch([action, panelOpen], async () => {
                   {{ currentAction.id === 'extract-audio' ? t('extract.audio') : t('extract.video') }}
                 </button>
                 <span class="mc-muted">{{ t('extract.note') }}</span>
+              </div>
+              <ResultBlock
+                :action-id="currentAction.id"
+                :job-action="jobAction"
+                :result="result"
+                :percent="percent"
+                :converting="phase === 'converting'"
+                :cancelling="cancelling"
+                :cancelled="cancelled"
+                :file="file"
+                :t="t"
+                @cancel="cancelRun"
+                @reveal="reveal"
+                @again="resetResult"
+              />
+            </template>
+
+            <template v-else-if="currentAction.id === 'snapshot'">
+              <div class="mc-row">
+                <span class="mc-muted">{{ t('snap.at') }}</span>
+                <input
+                  class="mc-name-input"
+                  style="width: 80px"
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  v-model.number="snapAt"
+                  :disabled="busy"
+                  :placeholder="'0'"
+                  :aria-label="t('snap.at')"
+                />
+                <span class="mc-muted">{{ t('subs.format') }}</span>
+                <select class="mc-select" v-model="snapFormat" :disabled="busy" :aria-label="t('subs.format')">
+                  <option value="png">PNG</option>
+                  <option value="jpg">JPG</option>
+                </select>
+                <button
+                  class="mc-btn mc-btn-primary"
+                  :disabled="busy || !file || snapAt < 0 || snapAt >= (file.duration || Infinity)"
+                  @click="runCurrent({ mode: 'snapshot', at: snapAt, format: snapFormat }, 'snapshot')"
+                >
+                  {{ t('action.snapshot') }}
+                </button>
               </div>
               <ResultBlock
                 :action-id="currentAction.id"

@@ -142,6 +142,30 @@ export function safeBaseName(raw: string, platform = process.platform): string {
   return stem;
 }
 
+// System font file for drawtext and font directory for the subtitles filter:
+// candidates in preference order, first existing wins (the Host checks
+// existence; the plan never guesses a path that is not there).
+export function fontCandidates(platform: string): string[] {
+  if (platform === 'win32') return ['C:\\Windows\\Fonts\\arial.ttf'];
+  if (platform === 'darwin') {
+    return [
+      '/System/Library/Fonts/Supplemental/Arial.ttf',
+      '/System/Library/Fonts/Helvetica.ttc',
+      '/Library/Fonts/Arial.ttf',
+    ];
+  }
+  return [
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+    '/usr/share/fonts/dejavu/DejaVuSans.ttf',
+    '/usr/share/fonts/TTF/DejaVuSans.ttf',
+  ];
+}
+export function fontDirCandidates(platform: string): string[] {
+  if (platform === 'win32') return ['C:\\Windows\\Fonts'];
+  if (platform === 'darwin') return ['/System/Library/Fonts/Supplemental', '/System/Library/Fonts', '/Library/Fonts'];
+  return ['/usr/share/fonts/truetype/dejavu', '/usr/share/fonts', '/usr/share/fonts/TTF'];
+}
+
 // The hardware backends a platform may use, best first. The probe then
 // checks whether this machine can really run one of them; a platform without
 // a list — or a machine without a matching GPU — falls back to the software
