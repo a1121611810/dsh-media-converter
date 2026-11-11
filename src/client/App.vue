@@ -284,6 +284,11 @@ const SW_CODEC_FORMATS = ['mp4', 'mov', 'mkv'];
 const presetName = ref('');
 const presetSaving = ref(false);
 const presetMessage = ref('');
+// Picture geometry + the remux escape hatch; they reset with the format.
+const crop = ref('');
+const rotate = ref(0);
+const flip = ref('');
+const remuxOnly = ref(false);
 const trimStart = ref('');
 const trimEnd = ref('');
 const metaTags = ref<Record<string, string>>({});
@@ -683,9 +688,27 @@ const showSwCodec = computed(
     file.value?.kind === 'video' &&
     SW_CODEC_FORMATS.includes(format.value),
 );
+// Picture geometry rides every video target (not only the codec-variant
+// ones); the mp3/m4a targets carry no picture.
+const showGeometry = computed(
+  () =>
+    (currentAction.value?.id.startsWith('fmt:') || currentAction.value?.id === 'trim') &&
+    file.value?.kind === 'video' &&
+    format.value !== 'mp3' &&
+    format.value !== 'm4a',
+);
+const showRemux = computed(
+  () =>
+    (currentAction.value?.id.startsWith('fmt:') || currentAction.value?.id === 'trim') &&
+    (file.value?.kind === 'video' || file.value?.kind === 'audio'),
+);
 // A stale encoder pick must not ride into the next format: reset on change.
 watch(format, () => {
   swCodec.value = 'h264';
+  crop.value = '';
+  rotate.value = 0;
+  flip.value = '';
+  remuxOnly.value = false;
 });
 
 // Save the current form state as a macro in the reserved per-kind pack; the
@@ -1876,6 +1899,10 @@ function convert() {
         file.value.kind === 'video' && swCodec.value !== 'h264' && SW_CODEC_FORMATS.includes(format.value)
           ? swCodec.value
           : undefined,
+      crop: crop.value || undefined,
+      rotate: rotate.value || undefined,
+      flip: flip.value || undefined,
+      remux: remuxOnly.value || undefined,
     },
     'fmt:' + format.value,
   );
@@ -1915,6 +1942,10 @@ function applyTrim() {
         file.value.kind === 'video' && swCodec.value !== 'h264' && SW_CODEC_FORMATS.includes(format.value)
           ? swCodec.value
           : undefined,
+      crop: crop.value || undefined,
+      rotate: rotate.value || undefined,
+      flip: flip.value || undefined,
+      remux: remuxOnly.value || undefined,
       trim: { start: window.start, end: window.end },
     },
     'trim',
@@ -2693,6 +2724,39 @@ watch([action, panelOpen], async () => {
                 <option v-if="swCodecList.includes('av1')" value="av1">{{ t('codec.swAv1') }}</option>
               </select>
               <span class="mc-muted">{{ t('codec.swHint') }}</span>
+            </div>
+            <div v-if="showGeometry" class="mc-row">
+              <span class="mc-muted">{{ t('geo.crop') }}</span>
+              <input
+                class="mc-name-input"
+                style="width: 112px"
+                v-model="crop"
+                :disabled="busy"
+                placeholder="640:360:0:0"
+                :aria-label="t('geo.crop')"
+                @input="resetResult"
+              />
+              <span class="mc-muted">{{ t('geo.rotate') }}</span>
+              <select class="mc-select" v-model.number="rotate" :disabled="busy" @change="resetResult">
+                <option :value="0">{{ t('geo.none') }}</option>
+                <option :value="90">90°</option>
+                <option :value="180">180°</option>
+                <option :value="270">270°</option>
+              </select>
+              <span class="mc-muted">{{ t('geo.flip') }}</span>
+              <select class="mc-select" v-model="flip" :disabled="busy" @change="resetResult">
+                <option value="">{{ t('geo.none') }}</option>
+                <option value="h">{{ t('geo.flipH') }}</option>
+                <option value="v">{{ t('geo.flipV') }}</option>
+              </select>
+              <span class="mc-muted">{{ t('geo.hint') }}</span>
+            </div>
+            <div v-if="showRemux" class="mc-row">
+              <label class="mc-check">
+                <input type="checkbox" v-model="remuxOnly" :disabled="busy" @change="resetResult" />
+                {{ t('geo.remux') }}
+              </label>
+              <span class="mc-muted">{{ t('geo.remuxHint') }}</span>
             </div>
             <template v-if="currentAction.id.startsWith('fmt:')">
               <div class="mc-row">

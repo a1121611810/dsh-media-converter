@@ -11,11 +11,13 @@ import {
   copyArgs,
   defaultFormat,
   formatEncoders,
+  forceRemuxArgs,
   hardwareFor,
   extractPlan,
   kindOf,
   metaArgs,
   mimeOf,
+  normalizeGeometry,
   normalizeStderr,
   normalizeTrim,
   parseDuration,
@@ -542,7 +544,11 @@ assert.equal(percentOf(1, 0), null);
 // Copy only when the codecs fit the target container.
 assert.ok(copyArgs('video', 'mp4', { video: { codec: 'h264' }, audio: { codec: 'aac' } }).includes('copy'));
 assert.ok(copyArgs('video', 'webm', { video: { codec: 'vp9' }, audio: { codec: 'opus' } }));
-assert.equal(copyArgs('video', 'mp4', { video: { codec: 'vp9' }, audio: { codec: 'opus' } }), null);
+// R4 widened the matrix: vp9/av1 video and flac/alac/opus audio now copy
+// straight into mp4 — but exotic combos still re-encode.
+assert.ok(copyArgs('video', 'mp4', { video: { codec: 'vp9' }, audio: { codec: 'opus' } }));
+assert.ok(copyArgs('video', 'mp4', { video: { codec: 'av1' }, audio: { codec: 'flac' } }));
+assert.equal(copyArgs('video', 'mp4', { video: { codec: 'theora' }, audio: { codec: 'vorbis' } }), null);
 assert.ok(copyArgs('audio', 'mp3', { video: null, audio: { codec: 'mp3' } }));
 assert.equal(copyArgs('audio', 'mp3', { video: null, audio: { codec: 'aac' } }), null);
 
@@ -940,3 +946,58 @@ assert.deepEqual(
 );
 assert.equal(wins[0].title, 'Intro');
 console.log('plan: concat/章节用例 ok');
+
+// --- 画面几何与强制 remux（R4）------------------------------------------------
+assert.equal(normalizeGeometry({}), undefined);
+assert.deepEqual(normalizeGeometry({ crop: '640:360:10:20', rotate: 90, flip: 'h' }), {
+  crop: '640:360:10:20',
+  rotate: 90,
+  flip: 'h',
+});
+assert.throws(() => normalizeGeometry({ crop: 'abc' }), /crop 格式/);
+assert.throws(() => normalizeGeometry({ crop: '633:360' }), /偶数/);
+assert.throws(() => normalizeGeometry({ rotate: 45 }), /rotate 只支持/);
+assert.throws(() => normalizeGeometry({ flip: 'x' }), /flip 只支持/);
+assert.equal(normalizeGeometry({ rotate: 0, flip: '', crop: undefined }), undefined);
+// canonical 链顺序：crop → transpose → flip → fps → scale。
+const chainArgs = buildArgs('video', 'mp4', 90, 0, 15, 320, 0, 0, undefined, {
+  crop: '64:64:0:0',
+  rotate: 90,
+  flip: 'h',
+});
+assert.equal(
+  chainArgs[chainArgs.indexOf('-vf') + 1],
+  "crop=64:64:0:0,transpose=1,hflip,fps=15,scale='trunc(min(320,iw)/2)*2':-2:flags=lanczos",
+);
+const geoOnly = buildArgs('video', 'mp4', 90, 0, 0, 0, 0, 0, undefined, { rotate: 180 });
+assert.equal(geoOnly[geoOnly.indexOf('-vf') + 1], 'transpose=1,transpose=1');
+const gifGeo = buildArgs('video', 'gif', 90, 0, 0, 0, 0, 0, undefined, { flip: 'v' });
+assert.ok(gifGeo[gifGeo.indexOf('-vf') + 1].startsWith('vflip,fps=12'), 'GIF 链前置几何段');
+assert.ok(!buildArgs('audio', 'mp3', 90, 0, 0, 0, 0, 0, undefined, { rotate: 90 }).includes('-vf'), '音频忽略几何');
+// 注册表层：几何选择禁拷贝；remux 覆盖一切 tuned 语义；trim 与 remux 互斥。
+const geoPlan = convertEntry.plan(trackUpload(1), { format: 'mp4', crop: '32:32:0:0' }, 0, null);
+assert.ok(!geoPlan.copy && geoPlan.args.includes('-vf'), '几何选择强制重编码');
+const remuxPlan = convertEntry.plan(trackUpload(1), { format: 'mkv', remux: true }, 0, null);
+assert.equal(remuxPlan.copy, true);
+assert.deepEqual(remuxPlan.args, forceRemuxArgs('mkv'));
+assert.throws(
+  () => convertEntry.plan(trackUpload(1), { format: 'mp4', remux: true, trim: { start: 0, end: 1 } }, 0, null),
+  /remux（仅换封装）不支持裁剪/,
+);
+assert.throws(() => convertEntry.plan(trackUpload(1), { format: 'mp4', crop: '33:32' }, 0, null), /偶数/);
+console.log('plan: 几何/remux 用例 ok');
+
+// --- R4 review 负形态：互斥与误用即报错，不静默丢弃 ---
+assert.throws(
+  () => convertEntry.plan(trackUpload(2), { format: 'mp4', remux: true, audioTrack: 1 }, 0, null),
+  /remux（仅换封装）不支持选轨/,
+);
+assert.throws(
+  () => convertEntry.plan(trackUpload(1), { format: 'mp4', remux: true, crop: '32:32:0:0' }, 0, null),
+  /remux（仅换封装）不支持画面几何/,
+);
+assert.throws(
+  () => convertEntry.plan(trackUpload(1, 0), { format: 'mp3', crop: '32:32:0:0' }, 0, null),
+  /画面几何仅对视频目标有效/,
+);
+console.log('plan: 几何/remux 负形态 ok');

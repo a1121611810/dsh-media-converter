@@ -10,7 +10,7 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 
 | 动作 | 说明 |
 | --- | --- |
-| 转成 X | 视频 12 种（mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif/mp3/m4a）、音频 8 种（mp3/m4a/aac/wav/flac/ogg/opus/aiff）、图片 7 种（png/jpg/webp/gif/bmp/tiff/avif）；按本机 ffmpeg 实际具备的编码器过滤——如 homebrew ffmpeg 9 缺 libtheora/libvorbis/libaom/libwebp，则不显示 ogv/ogg/avif/webp；多轨文件可选轨：视频转视频选画面轨、带音频输出选音轨（详情页下拉，第 2 条起，显式选轨将禁用直接拷贝）；mp4/mov/mkv 软件编码可选编码器：H.264（默认）/ HEVC（libx265，体积更小）/ AV1（libsvtav1），按本机编码器探测显隐，显式选择将禁用直接拷贝 |
+| 转成 X | 视频 12 种（mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif/mp3/m4a）、音频 8 种（mp3/m4a/aac/wav/flac/ogg/opus/aiff）、图片 7 种（png/jpg/webp/gif/bmp/tiff/avif）；按本机 ffmpeg 实际具备的编码器过滤——如 homebrew ffmpeg 9 缺 libtheora/libvorbis/libaom/libwebp，则不显示 ogv/ogg/avif/webp；多轨文件可选轨：视频转视频选画面轨、带音频输出选音轨（详情页下拉，第 2 条起，显式选轨将禁用直接拷贝）；mp4/mov/mkv 软件编码可选编码器：H.264（默认）/ HEVC（libx265，体积更小）/ AV1（libsvtav1），按本机编码器探测显隐，显式选择将禁用直接拷贝；画面几何：裁剪（`宽:高[:x[:y]]`，宽高偶数）、旋转 90/180/270、翻转（水平/垂直），任一存在即重编码；「仅换封装（remux）」直接拷贝到目标容器、绝不重编码，不兼容组合报错、与裁剪互斥 |
 | 裁一段 | 从播放器取起点/终点，或手填 `分:秒`；裁剪与转换一次完成 |
 | 提取音频 / 提取画面 | 直接拷贝轨道，不重编码 |
 | 提取字幕 | 内嵌字幕轨导出 `.srt`/`.ass`/`.vtt`（可选），文件名带语言码（如 `clip.chi.srt`） |
@@ -59,7 +59,7 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | action | 作用 |
 | --- | --- |
 | `probe` | 读时长、分辨率、编码、音轨、字幕轨、标签 |
-| `convert` | 转格式（可带 `trim` 裁剪；`quality` 1-100：软件编码视频映射各编码质量参数——mp4/mov/mkv/flv/ts 为 x264 CRF、webm 为 vp9 CRF、avi/wmv/ogv 为 qscale，软件 hevc/av1 映射各自 CRF——GPU 硬编映射目标码率倍率，图片 jpg/webp/avif 有效；转 mp3/m4a/aac/opus 可带 `bitrate` kbps 32-320，音频编码目标可带 `channels` 1/2 与 `sampleRate` Hz 8000-96000——GPU 硬编时这三个音轨参数对 mp4/mov/mkv/flv/ts 的输出音轨同样生效；指定 `codec`（h264/hevc/av1）选输出编码器——软件编码 hevc=libx265、av1=libsvtav1 仅 mp4/mov/mkv 有效（本机缺编码器时任务报错，其它容器回退 H.264），不填 `hardware` 时指定 codec 视同请求 GPU 硬编（h264/hevc，hevc 限 mp4/mov/mkv/ts）；`hardware` 显式 false 强制软件编码；多轨文件可带 `videoTrack`/`audioTrack` 选类型内第几条画面/音轨，1=第二条，0 或不填走默认轨，显式选轨将禁用直接拷贝） |
+| `convert` | 转格式（可带 `trim` 裁剪；`quality` 1-100：软件编码视频映射各编码质量参数——mp4/mov/mkv/flv/ts 为 x264 CRF、webm 为 vp9 CRF、avi/wmv/ogv 为 qscale，软件 hevc/av1 映射各自 CRF——GPU 硬编映射目标码率倍率，图片 jpg/webp/avif 有效；转 mp3/m4a/aac/opus 可带 `bitrate` kbps 32-320，音频编码目标可带 `channels` 1/2 与 `sampleRate` Hz 8000-96000——GPU 硬编时这三个音轨参数对 mp4/mov/mkv/flv/ts 的输出音轨同样生效；指定 `codec`（h264/hevc/av1）选输出编码器——软件编码 hevc=libx265、av1=libsvtav1 仅 mp4/mov/mkv 有效（本机缺编码器时任务报错，其它容器回退 H.264），不填 `hardware` 时指定 codec 视同请求 GPU 硬编（h264/hevc，hevc 限 mp4/mov/mkv/ts）；`hardware` 显式 false 强制软件编码；画面几何 `crop`（宽:高[:x[:y]]，偶数）/`rotate`（90/180/270）/`flip`（h/v），任一存在即强制重编码；`remux: true` 仅换封装（直接拷贝，绝不重编码，不兼容组合报错、与 trim 互斥）；多轨文件可带 `videoTrack`/`audioTrack` 选类型内第几条画面/音轨，1=第二条，0 或不填走默认轨，显式选轨将禁用直接拷贝） |
 | `extract-audio` / `extract-video` | 抽音轨 / 抽画面，不重编码（多轨文件可带 `stream` 选类型内第几条，0=第一条） |
 | `concat` | 合并多个同类型文件（`paths[]` 本机绝对路径，≥2 ≤64；`mode` = `copy` 直接拷贝（要求编码与分辨率一致）/ `encode` 重编码（可带 `format`/`quality`）；产物只有主画面+第一条音轨） |
 | `split-chapters` | 按内嵌章节分割（默认 copy 关键帧裁剪；`mode=encode` 精确重编码；返回 `files[]`，每章一个，命名带章节号） |
@@ -225,6 +225,8 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位。`t` 由平台按槽�
 - 用户预设存进保留扩展包 `user-presets-<类型>`（每类上限 16 个，同名覆盖）；预设的宏参数在保存时经宿主校验，使用时目标格式失效会报错。
 - 合并只支持视频/音频（图片不可），一次 2–64 个同类文件；直接拷贝要求各文件编码与分辨率一致（POST 层即报错）；合并产物丢弃章节与字幕轨；PTC 批量不支持合并。
 - 章节分割按容器内嵌章节执行，零长章节跳过、越界 clamp；「直接拷贝」按关键帧裁剪（起止不精确），要精确选「重编码」；单文件上限 64 章；分割进行中取消会停掉全部章节任务。
+- 直接拷贝矩阵已放宽：mp4 收 h264/hevc/vp9/av1 视频与 aac/mp3/flac/alac/opus 音频、mov 收 h264/hevc 与 aac/mp3/alac；矩阵外组合选「仅换封装」显式拷贝（ffmpeg 自身报错，绝不静默重编码）。
+- 画面几何（裁剪/旋转/翻转）任一存在即强制重编码且不进 GPU 零拷贝路径；crop 宽高必须偶数（yuv420p），旋转 90/270 会把宽高互换；几何在详情页、裁剪、工具与 PTC 计划（可带 crop/rotate/flip）可用，固定规则批量不携带。
 - 视频转 GIF 默认缩到宽 640、12 fps；普通视频转换也可选输出宽度上限与帧率（等比不放大，留空保持源分辨率/帧率）。
 - 批量按类型分组：视频/音频/图片各自一个目标；文本单独一段、不参与转换；读取中/未识别不可批量。
 - 批量提取只处理视频；不适用或没有音轨的行标「跳过」，不算失败。

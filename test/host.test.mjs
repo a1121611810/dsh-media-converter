@@ -2478,6 +2478,165 @@ assert.match(noChapters.data.error, /没有可分割的章节/);
 const toolSplit = await media.execute({ path: chaptered, action: 'split-chapters', chapterMode: 'copy' }, exec);
 assert.equal(toolSplit.files.length, 3, 'tool split returns every chapter file');
 
+// --- geometry & forced remux (R4) -------------------------------------------
+// 宽屏夹具：旋转 90° 后宽高互换，探针反读即可证明几何真的发生。
+const wide = path.join(outDir, 'wide.mp4');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'testsrc=size=96x64:rate=10',
+  '-f',
+  'lavfi',
+  '-t',
+  '2',
+  '-i',
+  'sine=frequency=440',
+  '-c:v',
+  'libx264',
+  '-pix_fmt',
+  'yuv420p',
+  '-c:a',
+  'aac',
+  '-shortest',
+  wide,
+]);
+const wideUpload = await call('upload?name=wide.mp4', { method: 'POST', body: fs.readFileSync(wide) });
+const cropped = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: wideUpload.data.id, format: 'mp4', crop: '48:32:0:0' }),
+});
+assert.equal(cropped.data.ok, true, JSON.stringify(cropped.data));
+assert.equal(cropped.data.job.copy, false, '几何选择禁用拷贝');
+const croppedDone = await waitJob(cropped.data.job);
+const croppedMeta = parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', croppedDone.out], { encoding: 'utf8' }).stderr);
+assert.equal(croppedMeta.video.width, 48, 'crop 后宽度');
+assert.equal(croppedMeta.video.height, 32, 'crop 后高度');
+
+const rotated = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: wideUpload.data.id, format: 'mp4', rotate: 90 }),
+});
+const rotatedDone = await waitJob(rotated.data.job);
+const rotatedMeta = parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', rotatedDone.out], { encoding: 'utf8' }).stderr);
+assert.equal(rotatedMeta.video.width, 64, '旋转 90° 宽高互换');
+assert.equal(rotatedMeta.video.height, 96);
+
+// 奇数 crop 在 plan 层报错，不丢给 ffmpeg。
+const oddCrop = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: wideUpload.data.id, format: 'mp4', crop: '49:32:0:0' }),
+});
+assert.equal(oddCrop.data.ok, false);
+assert.match(oddCrop.data.error, /偶数/);
+
+// 强制 remux：mpeg4 源（矩阵不支持 mp4）直接拷进 mp4，产物 codec 证明未重编码。
+const mpeg4avi = path.join(outDir, 'mpeg4.avi');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '1.5',
+  '-i',
+  'testsrc=size=64x64:rate=10',
+  '-f',
+  'lavfi',
+  '-t',
+  '1.5',
+  '-i',
+  'sine=frequency=440',
+  '-c:v',
+  'mpeg4',
+  '-q:v',
+  '5',
+  '-c:a',
+  'libmp3lame',
+  '-shortest',
+  mpeg4avi,
+]);
+const aviUpload = await call('upload?name=mpeg4.avi', { method: 'POST', body: fs.readFileSync(mpeg4avi) });
+const remuxed = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: aviUpload.data.id, format: 'mp4', remux: true }),
+});
+assert.equal(remuxed.data.ok, true, JSON.stringify(remuxed.data));
+const remuxedDone = await waitJob(remuxed.data.job);
+const remuxedMeta = parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', remuxedDone.out], { encoding: 'utf8' }).stderr);
+assert.equal(remuxedMeta.video.codec, 'mpeg4', 'remux 不重编码（codec 原样）');
+// remux 与裁剪互斥。
+const remuxTrim = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: aviUpload.data.id, format: 'mp4', remux: true, trim: { start: 0, end: 1 } }),
+});
+assert.equal(remuxTrim.data.ok, false);
+assert.match(remuxTrim.data.error, /remux（仅换封装）不支持裁剪/);
+
+// 放宽的拷贝矩阵：vp9+opus 源直接拷进 mp4。
+const vp9webm = path.join(outDir, 'vp9.webm');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-t',
+  '1.5',
+  '-i',
+  'testsrc=size=64x64:rate=10',
+  '-f',
+  'lavfi',
+  '-t',
+  '1.5',
+  '-i',
+  'sine=frequency=440',
+  '-c:v',
+  'libvpx-vp9',
+  '-crf',
+  '32',
+  '-b:v',
+  '0',
+  '-c:a',
+  'libopus',
+  '-shortest',
+  vp9webm,
+]);
+const webmUpload = await call('upload?name=vp9.webm', { method: 'POST', body: fs.readFileSync(vp9webm) });
+const vp9ToMp4 = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: webmUpload.data.id, format: 'mp4' }),
+});
+assert.equal(vp9ToMp4.data.job.copy, true, 'vp9 拷进 mp4 走直拷贝');
+const vp9Done = await waitJob(vp9ToMp4.data.job);
+const vp9Meta = parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', vp9Done.out], { encoding: 'utf8' }).stderr);
+assert.equal(vp9Meta.video.codec, 'vp9');
+
+// PTC 计划带几何：模型给出的 crop 进 binding 并真正生效。
+ptcFakePlanOverride = { files: [{ id: wideUpload.data.id, format: 'mp4', crop: '32:32:0:0' }] };
+const ptcGeo = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: wideUpload.data.id, format: 'mp4' }], ptc: true }),
+});
+const ptcGeoDone = await waitRun(ptcGeo.data.run);
+assert.equal(ptcGeoDone.items[0].state, 'done', ptcGeoDone.items[0].error || '');
+const ptcGeoMeta = parseMeta(
+  spawnSync(ffmpeg, ['-hide_banner', '-i', ptcGeoDone.items[0].result.file], { encoding: 'utf8' }).stderr,
+);
+assert.equal(ptcGeoMeta.video.width, 32, 'PTC 计划的几何在产物上生效');
+ptcFakePlanOverride = null;
+
+// 工具路径 crop。
+const toolCrop = await media.execute({ path: wide, action: 'convert', format: 'mp4', crop: '48:32:0:0' }, exec);
+const toolCropMeta = parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', toolCrop.file], { encoding: 'utf8' }).stderr);
+assert.equal(toolCropMeta.video.width, 48, '工具路径的几何生效');
+
 const probed = await media.execute({ path: clip, action: 'probe' }, exec);
 assert.equal(probed.kind, 'video');
 assert.ok(Math.abs(probed.duration - 2) < 0.3, `probed duration ${probed.duration}`);

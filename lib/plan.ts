@@ -359,8 +359,12 @@ const COPY_AUDIO: Record<string, string> = {
   aiff: 'pcm_s16be',
 };
 const COPY_VIDEO: Record<string, { video: string[]; audio: string[]; extra?: string[] }> = {
-  mp4: { video: ['h264', 'hevc'], audio: ['aac', 'mp3'], extra: ['-movflags', '+faststart'] },
-  mov: { video: ['h264', 'hevc'], audio: ['aac', 'mp3'] },
+  mp4: {
+    video: ['h264', 'hevc', 'vp9', 'av1'],
+    audio: ['aac', 'mp3', 'flac', 'alac', 'opus'],
+    extra: ['-movflags', '+faststart'],
+  },
+  mov: { video: ['h264', 'hevc'], audio: ['aac', 'mp3', 'alac'] },
   mkv: { video: ['h264', 'hevc', 'vp9', 'av1'], audio: ['aac', 'opus', 'vorbis', 'mp3', 'flac'] },
   webm: { video: ['vp8', 'vp9', 'av1'], audio: ['opus', 'vorbis'] },
   ts: { video: ['h264', 'hevc'], audio: ['aac', 'mp3'], extra: ['-f', 'mpegts'] },
@@ -580,6 +584,57 @@ export function applyAudioTune(args: string[], bitrate?: number, channels?: numb
   return args;
 }
 
+// The picture knobs a conversion can carry: a crop window, a rotation and a
+// flip. Canonical -vf order (crop -> transpose -> flip -> fps -> scale) is
+// built in buildArgs; this only validates.
+export interface VideoGeometry {
+  // 'w:h[:x[:y]]'
+  crop?: string;
+  // 90 / 180 / 270
+  rotate?: number;
+  // 'h' | 'v'
+  flip?: string;
+}
+
+// Truthy-but-malformed geometry is an error, not a silent drop: a wrong crop
+// string would otherwise "succeed" as a no-op and the user never knows.
+export function normalizeGeometry(raw: {
+  crop?: unknown;
+  rotate?: unknown;
+  flip?: unknown;
+}): VideoGeometry | undefined {
+  const out: VideoGeometry = {};
+  const crop = String(raw.crop || '').trim();
+  if (crop) {
+    if (!/^\d{1,5}:\d{1,5}(?::\d{1,5})?(?::\d{1,5})?$/.test(crop)) {
+      throw new Error(`crop 格式必须是 宽:高[:x[:y]]: ${crop}`);
+    }
+    const [w, h] = crop.split(':').map(Number);
+    if (w % 2 || h % 2) throw new Error(`crop 宽高必须是偶数（yuv420p 要求）: ${crop}`);
+    out.crop = crop;
+  }
+  const rotate = Number(raw.rotate);
+  if (rotate) {
+    if (rotate !== 90 && rotate !== 180 && rotate !== 270) throw new Error('rotate 只支持 90/180/270');
+    out.rotate = rotate;
+  }
+  const flip = String(raw.flip || '').trim();
+  if (flip) {
+    if (flip !== 'h' && flip !== 'v') throw new Error("flip 只支持 'h'（水平）/ 'v'（垂直）");
+    out.flip = flip;
+  }
+  return out.crop || out.rotate || out.flip ? out : undefined;
+}
+
+// The explicit remux escape hatch: copy whatever fits the target container
+// and let ffmpeg itself be the validator — an impossible combination is an
+// error row, never a silent re-encode.
+export function forceRemuxArgs(format: string): string[] {
+  const args = ['-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy'];
+  if (format === 'mp4') args.push('-movflags', '+faststart');
+  return args;
+}
+
 export function buildArgs(
   kind: MediaKind,
   format: string,
@@ -590,6 +645,7 @@ export function buildArgs(
   channels?: number,
   sampleRate?: number,
   codec?: unknown,
+  geometry?: VideoGeometry,
 ): string[] {
   const table = kind === 'audio' ? AUDIO : kind === 'image' ? IMAGE : VIDEO;
   // An explicit software pick swaps the recipe; an unsupported combination
@@ -630,14 +686,24 @@ export function buildArgs(
   // recipe untouched. GIF rebuilds its whole filter chain, so a missing value
   // falls back to the recipe's own 12fps/640px; the other recipes carry no -vf
   // and get one pushed with only what was asked.
-  if (supportsVideoTune(kind, format) && (Number(fps) > 0 || Number(width) > 0)) {
+  const geo = kind === 'video' ? geometry : undefined;
+  const geoParts: string[] = [];
+  if (geo) {
+    if (geo.crop) geoParts.push(`crop=${geo.crop}`);
+    if (geo.rotate === 90) geoParts.push('transpose=1');
+    else if (geo.rotate === 270) geoParts.push('transpose=2');
+    else if (geo.rotate === 180) geoParts.push('transpose=1,transpose=1');
+    if (geo.flip === 'h') geoParts.push('hflip');
+    else if (geo.flip === 'v') geoParts.push('vflip');
+  }
+  if (supportsVideoTune(kind, format) && (geoParts.length > 0 || Number(fps) > 0 || Number(width) > 0)) {
     if (format === 'gif') {
       const f = Number(fps) > 0 ? Math.min(30, Math.max(1, Math.round(Number(fps)))) : 12;
       const w = Number(width) > 0 ? Math.min(7680, Math.max(16, Math.round(Number(width)))) : 640;
       const at = args.indexOf('-vf');
-      if (at >= 0) args[at + 1] = `fps=${f},scale='min(${w},iw)':-2:flags=lanczos`;
+      if (at >= 0) args[at + 1] = [...geoParts, `fps=${f},scale='min(${w},iw)':-2:flags=lanczos`].join(',');
     } else {
-      const parts: string[] = [];
+      const parts: string[] = [...geoParts];
       if (Number(fps) > 0) parts.push(`fps=${Math.min(30, Math.max(1, Math.round(Number(fps))))}`);
       // trunc() keeps the capped width even: x264/vp9/wmv2 all force yuv420p
       // and reject an odd width, whether it comes from the source or the cap.

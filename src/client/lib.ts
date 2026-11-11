@@ -63,6 +63,12 @@ export interface ConvertRequest {
   audioTrack?: number;
   // Software encoder pick ('h264' | 'hevc' | 'av1'); absent = default recipe.
   codec?: string;
+  // Picture geometry: crop 'w:h[:x[:y]]' (even dims), rotate 90/180/270,
+  // flip 'h'/'v'; remux rewrites the container without re-encoding.
+  crop?: string;
+  rotate?: number;
+  flip?: string;
+  remux?: boolean;
   mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta';
   stream?: number;
   tags?: Record<string, string>;

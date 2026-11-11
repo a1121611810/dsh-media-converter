@@ -434,6 +434,14 @@ export interface JsonBody {
   // default selection. An explicit pick disables the container-copy fast path.
   videoTrack?: unknown;
   audioTrack?: unknown;
+  // Picture geometry: crop 'w:h[:x[:y]]' (even dims), rotate 90/180/270,
+  // flip 'h'/'v'. Any of them disables the copy fast path.
+  crop?: unknown;
+  rotate?: unknown;
+  flip?: unknown;
+  // Explicit container rewrite: copy whatever fits, never re-encode; ffmpeg
+  // itself rejects impossible combinations. Incompatible with trim.
+  remux?: unknown;
   // An extension preset reference ('x:<manifest>/<action>'); when set, the
   // plan comes from the extension table instead of the built-in recipe.
   preset?: unknown;
@@ -1695,10 +1703,14 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           // is a re-encode, costed as a copy it would dodge nothing but lie.
           channels: row.channels ?? channelMap.get(row.id),
           sampleRate: row.sampleRate ?? rateMap.get(row.id),
-          // A track pick flips the copy gate exactly like quality does; a
-          // copy-classified picked job would cost 200x and blow its group.
+          // A track pick or a geometry ask flips the copy gate exactly like
+          // quality does; a copy-classified job would cost 200x and blow
+          // its group.
           videoTrack: row.vtrack ?? 0,
           audioTrack: row.atrack ?? 0,
+          crop: row.crop,
+          rotate: row.rotate,
+          flip: row.flip,
           codec: row.codec,
           hardware,
         });
@@ -1759,6 +1771,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           // they belong in the estimate exactly like quality does.
           videoTrack: Number(a.vtrack || 0),
           audioTrack: Number(a.atrack || 0),
+          crop: a.crop !== undefined ? String(a.crop) : undefined,
+          rotate: Number(a.rotate || 0) || undefined,
+          flip: a.flip !== undefined ? String(a.flip) : undefined,
           preset: presetRef,
           hardware,
         });
@@ -1788,6 +1803,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                   codec: a.codec !== undefined ? String(a.codec) : entry?.codec,
                   videoTrack: Number(a.vtrack || 0),
                   audioTrack: Number(a.atrack || 0),
+                  crop: a.crop !== undefined ? String(a.crop) : undefined,
+                  rotate: Number(a.rotate || 0) || undefined,
+                  flip: a.flip !== undefined ? String(a.flip) : undefined,
                   preset: presetRef,
                   hardware,
                 },
@@ -1959,7 +1977,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         : []),
       '',
       '只返回一个 JSON 对象。不要代码、不要解释、不要 Markdown 代码块：',
-      '{"files":[{"id":"文件id","format":"输出格式","quality":90,"bitrate":128,"channels":1,"rate":22050,"fps":12,"width":640,"codec":"h264","vtrack":0,"atrack":0}]}',
+      '{"files":[{"id":"文件id","format":"输出格式","quality":90,"bitrate":128,"channels":1,"rate":22050,"fps":12,"width":640,"codec":"h264","vtrack":0,"atrack":0,"crop":"640:360:0:0","rotate":90,"flip":"h"}]}',
       '',
       '规则：',
       '1. 每个文件恰好一条，id 必须与上面完全一致；不能多、不能少、不能重复。',
@@ -1972,6 +1990,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       '8. 没有音轨的文件不要选纯音频格式。',
       '9. 批次走 GPU 硬编时，bitrate/channels/rate 对 mp4/mov/mkv/flv/ts 的输出音轨同样生效（不限于音频编码目标）。',
       '10. vtrack/atrack 是类型内轨序号（1=第二条，0 或省略=不选轨，走默认）；仅当该行 vtracks/atracks 大于 1 时才可指定对应值，超出范围的计划会被拒绝。',
+      '11. crop（宽:高[:x[:y]]，宽高偶数）、rotate（90/180/270）与 flip（h=水平/v=垂直）仅对视频目标有效，省略则不处理画面几何；任一存在即强制重编码（不会走拷贝）。',
     ].join('\n');
   };
 
@@ -2040,6 +2059,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         codec?: string;
         vtrack?: number;
         atrack?: number;
+        crop?: string;
+        rotate?: number;
+        flip?: string;
       } = {
         id: file.id,
         format,
@@ -2110,6 +2132,30 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         }
         if (value > 0) out[key] = value;
       }
+      // Picture geometry rides the plan row; the plan builder re-validates
+      // bounds (even crop dims etc.), so this only gates shape and type.
+      const rawRotate = row.rotate;
+      if (rawRotate !== undefined && rawRotate !== null) {
+        const value = Number(rawRotate);
+        if (value !== 90 && value !== 180 && value !== 270) {
+          throw new Error(`模型给 ${file.id} 的 rotate 不合法`);
+        }
+        out.rotate = value;
+      }
+      const rawCrop = row.crop;
+      if (rawCrop !== undefined && rawCrop !== null) {
+        const value = String(rawCrop).trim();
+        if (!/^\d{1,5}:\d{1,5}(?::\d{1,5})?(?::\d{1,5})?$/.test(value)) {
+          throw new Error(`模型给 ${file.id} 的 crop 不合法`);
+        }
+        out.crop = value;
+      }
+      const rawFlip = row.flip;
+      if (rawFlip !== undefined && rawFlip !== null) {
+        const value = String(rawFlip).trim();
+        if (value !== 'h' && value !== 'v') throw new Error(`模型给 ${file.id} 的 flip 不合法`);
+        out.flip = value;
+      }
       return out;
     });
   };
@@ -2167,6 +2213,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       codec?: string;
       vtrack?: number;
       atrack?: number;
+      crop?: string;
+      rotate?: number;
+      flip?: string;
     }[]
   > => {
     const llm = ctx.get('llm');
@@ -2503,6 +2552,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       // default. An explicit pick forces a re-encode (never a container copy).
       videoTrack: Number(a.videoTrack || 0),
       audioTrack: Number(a.audioTrack || 0),
+      // Picture geometry: crop 'w:h[:x[:y]]' (even dims), rotate 90/180/270,
+      // flip 'h'/'v'; any of them forces a re-encode. remux rewrites the
+      // container without re-encoding (ffmpeg rejects impossible combos).
+      crop: a.crop !== undefined ? String(a.crop) : undefined,
+      rotate: Number(a.rotate || 0) || undefined,
+      flip: a.flip !== undefined ? String(a.flip) : undefined,
+      remux: a.remux === true ? true : undefined,
       stream: Number(a.stream || 0),
       tags: (a.tags || {}) as Record<string, string>,
       trim: a.trim as { start?: unknown; end?: unknown } | undefined,
@@ -2644,6 +2700,25 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             type: 'number',
             description:
               '音轨序号（1=第二条，0 或不填走默认轨）：视频输出选源音轨，音频编码目标（mp3/m4a/aac/opus）选被编码的那条；超出范围报错，显式选择将禁用直接拷贝。',
+          },
+          crop: {
+            type: 'string',
+            description:
+              '画面裁剪 宽:高[:x[:y]]（宽高必须偶数，省略 x/y 从 0 起）；仅视频目标，与 rotate/flip 任一存在即强制重编码。',
+          },
+          rotate: {
+            type: 'number',
+            description: '画面旋转 90/180/270（度）；仅视频目标，强制重编码。',
+          },
+          flip: {
+            type: 'string',
+            enum: ['h', 'v'],
+            description: '画面翻转：h=水平（左右）、v=垂直（上下）；仅视频目标，强制重编码。',
+          },
+          remux: {
+            type: 'boolean',
+            description:
+              'true=仅换封装（直接拷贝到目标容器，绝不重编码；不兼容组合任务报错，与 trim 互斥）；不填按常规规则。',
           },
           tags: {
             type: 'object',

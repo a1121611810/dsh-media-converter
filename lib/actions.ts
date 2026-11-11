@@ -10,10 +10,12 @@ import {
   defaultBitrate,
   extOf,
   extractPlan,
+  forceRemuxArgs,
   formatsFor,
   hardwareFor,
   kindByExt,
   metaArgs,
+  normalizeGeometry,
   normalizeTrim,
   subtitlePlan,
   supportsAudioTune,
@@ -67,6 +69,21 @@ function convertPlan(
     if (count === 0) throw new Error('该文件没有音轨');
     if (atrack >= count) throw new Error(`音轨序号 ${atrack} 不存在（共 ${count} 条）`);
   }
+  // Geometry knobs validate here so every channel (panel, tool, PTC) fails
+  // identically on malformed input instead of drifting per caller.
+  const geometry = normalizeGeometry(body);
+  if (upload.kind !== 'video' && (geometry || body.crop || body.rotate || body.flip)) {
+    throw new Error('画面几何仅对视频目标有效');
+  }
+  // An explicit remux is a pure container rewrite: it wins over every tuned
+  // knob (a copy has nothing to tune) and never re-encodes — anything that
+  // would change the streams is rejected instead of silently dropped.
+  if (body.remux === true) {
+    if (trim) throw new Error('remux（仅换封装）不支持裁剪');
+    if (vtrack > 0 || atrack > 0) throw new Error('remux（仅换封装）不支持选轨');
+    if (geometry) throw new Error('remux（仅换封装）不支持画面几何');
+    return { ext: format, kind: kindByExt(format), args: forceRemuxArgs(format), copy: true };
+  }
   // An explicit quality choice means "re-encode to this quality": a container
   // copy would silently drop it. Rounded, so 89.6/90.4 (which buildArgs rounds
   // to the 90 default) do not force a pointless re-encode.
@@ -89,6 +106,9 @@ function convertPlan(
   // An explicit output size or frame rate is a real re-encode request: a
   // copied stream would silently keep the source's.
   const videoTuneTuned = supportsVideoTune(upload.kind, format) && (Number(body.fps) > 0 || Number(body.width) > 0);
+  // The same for picture geometry: a copied stream cannot be cropped,
+  // rotated or flipped.
+  const geometryTuned = Boolean(geometry);
   // An explicit track pick is a real re-encode request as well: the copy
   // path only ever carries the default streams, so a picked track would be
   // silently dropped.
@@ -111,6 +131,7 @@ function convertPlan(
     !codecTuned &&
     !audioTuned &&
     !videoTuneTuned &&
+    !geometryTuned &&
     !trackTuned &&
     !hwAudioTuned
   ) {
@@ -127,8 +148,9 @@ function convertPlan(
   // found a backend this machine can really run; elsewhere the hardware ask
   // silently gets the software plan instead of a doomed ffmpeg command. A
   // size/frame-rate ask never takes it: -vf would break the zero-copy path,
-  // and the bitrate estimate assumes the source resolution.
-  if (body.hardware && hwBackend && !videoTuneTuned) {
+  // and the bitrate estimate assumes the source resolution; picture
+  // geometry is the same -vf story.
+  if (body.hardware && hwBackend && !videoTuneTuned && !geometryTuned) {
     // hardwareFor whitelists the codec: 'hevc' outside mp4/mov/mkv/ts (or
     // any unknown value) quietly becomes H.264 instead of a failed encode.
     const hw = hardwareFor(
@@ -168,6 +190,7 @@ function convertPlan(
         body.channels,
         body.sampleRate,
         body.codec,
+        geometry,
       ),
     ],
     threads,

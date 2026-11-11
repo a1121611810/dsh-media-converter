@@ -456,8 +456,12 @@ const MUTANTS = [
     source: 'lib/actions.ts',
     dist: 'dist/lib/actions.js',
     apply: (s) =>
-      replaceOnce(s, 'if (body.hardware && hwBackend && !videoTuneTuned) {', 'if (body.hardware && hwBackend) {'),
-    distAnchor: 'if (body.hardware && hwBackend) {',
+      replaceOnce(
+        s,
+        'if (body.hardware && hwBackend && !videoTuneTuned && !geometryTuned) {',
+        'if (body.hardware && hwBackend && !geometryTuned) {',
+      ),
+    distAnchor: 'hwBackend && !geometryTuned) {',
     expect: '带 width/fps 的请求必须走软件编码，突变后（有后端时）job.hardware 变 true → 测试红',
   },
   {
@@ -471,8 +475,8 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        'if (supportsVideoTune(kind, format) && (Number(fps) > 0 || Number(width) > 0)) {',
-        'if (false && supportsVideoTune(kind, format) && (Number(fps) > 0 || Number(width) > 0)) {',
+        'if (supportsVideoTune(kind, format) && (geoParts.length > 0 || Number(fps) > 0 || Number(width) > 0)) {',
+        'if (false && supportsVideoTune(kind, format) && (geoParts.length > 0 || Number(fps) > 0 || Number(width) > 0)) {',
       ),
     distAnchor: 'false && supportsVideoTune',
     expect: '显式 fps/width 必须生成/重建 -vf（gif 与普通容器），突变后 gif 回默认、mp4 无滤镜 → 测试红',
@@ -966,11 +970,13 @@ const MUTANTS = [
         s,
         `        body.sampleRate,
         body.codec,
+        geometry,
       ),`,
         `        body.sampleRate,
+        geometry,
       ),`,
       ),
-    distAnchor: 'body.channels, body.sampleRate)',
+    distAnchor: 'body.sampleRate, geometry)',
     expect: 'codec=hevc 必须产出 libx265 配方，突变后回退默认 x264 → plan 断言红',
   },
   {
@@ -996,9 +1002,11 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        `  const args = ['-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy'];
+        `export function concatCopyArgs(format: string): string[] {
+  const args = ['-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy'];
   if (format === 'mp4') args.push('-movflags', '+faststart');`,
-        `  const args = ['-map', '0:v:0?', '-c', 'copy'];
+        `export function concatCopyArgs(format: string): string[] {
+  const args = ['-map', '0:v:0?', '-c', 'copy'];
   if (format === 'mp4') args.push('-movflags', '+faststart');`,
       ),
     distAnchor: "'-map', '0:v:0?', '-c', 'copy'",
@@ -1044,8 +1052,57 @@ const MUTANTS = [
         "if ((meta.video ? meta.video.codec : '') !== videoCodec) return '画面编码不一致';",
         "if ((meta.video ? meta.video.codec : '') === videoCodec) return '画面编码不一致';",
       ),
-    distAnchor: "=== videoCodec)",
+    distAnchor: '=== videoCodec)',
     expect: '编码一致的文件必须放行合并，反转后同类也被拒 → POST 层断言红',
+  },
+  // --- X 家族：画面几何与强制 remux（R4）--------------------------------------
+  {
+    id: 'X1',
+    name: '几何段被静默踢出 -vf 链',
+    // geo.rotate === 91 永假但保持对 geo 的读取（if(false) 形态会让
+    // tsrs 构建炸）；crop 永不入链而 rotate/flip 不受影响。
+    source: 'lib/plan.ts',
+    test: 'test/host.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(s, 'if (geo.crop) geoParts.push(', 'if (geo.crop && geo.rotate === 91) geoParts.push('),
+    distAnchor: 'geo.rotate === 91',
+    expect: 'crop 必须进入 -vf 链（产物 48x32），突变后原尺寸 → 反读断言红',
+  },
+  {
+    id: 'X2',
+    name: '强制 remux 分支被短路（退回重编码）',
+    source: 'lib/actions.ts',
+    test: 'test/host.test.mjs',
+    dist: 'dist/lib/actions.js',
+    apply: (s) => replaceOnce(s, 'if (body.remux === true) {', 'if (body.remux === false) {'),
+    distAnchor: 'body.remux === false',
+    expect: 'remux+trim 必须报互斥错误；突变后退回重编码成功 → 错误行断言红',
+  },
+  {
+    id: 'X3',
+    name: 'crop 偶数校验被 && 弱化',
+    source: 'lib/plan.ts',
+    test: 'test/host.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'if (w % 2 || h % 2) throw new Error(`crop 宽高必须是偶数（yuv420p 要求）: ${crop}`);',
+        'if (w % 2 && h % 2) throw new Error(`crop 宽高必须是偶数（yuv420p 要求）: ${crop}`);',
+      ),
+    distAnchor: 'w % 2 && h % 2',
+    expect: '奇宽偶高必须被 plan 层拒绝；突变后放行、x264 运行时炸 → 断言红',
+  },
+  {
+    id: 'X4',
+    name: '几何 copy 门禁被反转（不选几何也禁拷贝）',
+    source: 'lib/actions.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/actions.js',
+    apply: (s) => replaceOnce(s, '!geometryTuned &&', '!!geometryTuned &&'),
+    distAnchor: '!!geometryTuned &&',
+    expect: '未选几何的 mp4 直拷贝必须保留；突变后永不拷贝 → copy 断言红',
   },
 ];
 
