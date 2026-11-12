@@ -122,6 +122,9 @@ const ptcModelKey = ref('');
 const runStage = ref<'' | 'planning' | 'converting'>('');
 const runStartedAt = ref(0);
 const planningTick = ref(0);
+// Planning pages: which page the model is deciding, out of how many (from the Host).
+const planningPage = ref(0);
+const planningPages = ref(0);
 // Estimated wall time for the running batch (from the Host) and how long it
 // has been going, so the panel can show a live "about N left".
 const runEstimate = ref(0);
@@ -548,7 +551,14 @@ const finishedRunCount = computed(
 );
 const batchProgressText = computed(() => {
   if (!batchRunning.value) return '';
-  if (runStage.value === 'planning') return t('ptc.planning').replace('%s', String(planningTick.value));
+  if (runStage.value === 'planning') {
+    const text = t('ptc.planning').replace('%s', String(planningTick.value));
+    return planningPages.value > 1
+      ? text +
+          ' · ' +
+          t('ptc.planningPage').replace('%s', String(planningPage.value)).replace('%r', String(planningPages.value))
+      : text;
+  }
   const text = t('batch.running')
     .replace('%s', String(finishedRunCount.value))
     .replace('%s', String(runKeys.value.length));
@@ -1134,6 +1144,8 @@ function applyRun(run: RunInfo): void {
     planningTick.value = Math.max(0, Math.round((Date.now() - run.at) / 1000));
     runTick.value = planningTick.value;
     runEstimate.value = run.estimatedMs || 0;
+    planningPage.value = run.planningPage || 0;
+    planningPages.value = run.planningPages || 0;
     return;
   }
   activeRunId = '';
@@ -1141,6 +1153,8 @@ function applyRun(run: RunInfo): void {
   runStage.value = '';
   runEstimate.value = 0;
   runTick.value = 0;
+  planningPage.value = 0;
+  planningPages.value = 0;
   applyRunSummary(run);
 }
 

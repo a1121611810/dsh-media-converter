@@ -386,6 +386,9 @@ export interface RunInfo {
   // waves; `stage` tells a rebuilt page whether the model is still deciding.
   kind: 'plain' | 'ptc';
   stage?: 'planning' | 'converting';
+  // Planning progress across pages: which page the model is deciding, of how many.
+  planningPage?: number;
+  planningPages?: number;
   at: number;
   // When the run settled into a terminal state; a rebuilt panel restores the
   // batch summary (without touching rows) within a window counted from this.
@@ -1701,7 +1704,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       const model = await resolvePtcModel(requested);
       run.stage = 'planning';
       const modelStart = Date.now();
-      const plan = await collectPtcPlan(files, targets, bitrates, channelMap, rateMap, quality, model, controller);
+      const plan = await collectPtcPlan(run, files, targets, bitrates, channelMap, rateMap, quality, model, controller);
       run.modelMs = Date.now() - modelStart;
       for (const row of plan) {
         const item = run.items.find((candidate) => candidate.id === row.id);
@@ -1980,8 +1983,15 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // The panel hands a checked batch to the user's main model, which writes a
   // small program over this one binding. Conversions still go through the
   // same planFor/startJob path, so PTC changes scheduling, not the ffmpeg core.
+  // One planning call covers at most this many files: maxTokens 6000 with
+  // ~50-70 tokens per plan row leaves little headroom beyond it, so a bigger
+  // batch pages through several calls instead of one oversized prompt.
+  const PTC_PLAN_PAGE = 120;
+
   const ptcPlanPrompt = (
     files: Upload[],
+    pageNo: number,
+    pageCount: number,
     targets: Map<string, string>,
     bitrates: Map<string, number | undefined>,
     channelMap: Map<string, number | undefined>,
@@ -2002,7 +2012,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     );
     return [
       '你在为本地媒体工具箱调度一批转换任务。',
-      `文件（共 ${files.length} 个，每行已有该文件的 target，vtracks/atracks 是该文件探测到的画面/音轨条数）：`,
+      `文件（第 ${pageNo}/${pageCount} 页，本页 ${files.length} 个；每行已有该文件的 target，vtracks/atracks 是该文件探测到的画面/音轨条数）：`,
       ...lines,
       '',
       `质量默认：${quality}（1-100，90=默认）。对软件编码的视频映射为该编码的质量参数（x264/vp9 为 CRF，avi/wmv/ogv 为 qscale），对 GPU 硬编视频映射为目标码率倍率，对 jpg/webp/avif 图片生效；quality 不是 90 时已强制重编码（不会走拷贝）。`,
@@ -2229,6 +2239,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // The model only decides formats; the Host validates the JSON and builds the
   // program itself. A stalled stream is cut after three minutes.
   const collectPtcPlan = async (
+    run: RunInfo,
     files: Upload[],
     targets: Map<string, string>,
     bitrates: Map<string, number | undefined>,
@@ -2265,37 +2276,57 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     } catch {
       // The reasoning hint is optional; the model still runs with its default.
     }
-    let text = '';
-    let failure = '';
-    const modelTimer = setTimeout(() => controller.abort(), 180_000);
-    try {
-      for await (const chunk of llm.stream({
-        provider: model.provider,
-        model: model.modelId,
-        messages: [
-          {
-            role: 'user',
-            content: [{ type: 'text', text: ptcPlanPrompt(files, targets, bitrates, channelMap, rateMap, quality) }],
-          },
-        ],
-        maxTokens: 6000,
-        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-        signal,
-      })) {
-        if (chunk.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text;
-        else if (chunk.type === 'finish' && chunk.reason && chunk.reason.kind !== 'stop') {
-          failure = chunk.reason.failure?.message || chunk.reason.kind;
+    const collectPage = async (page: Upload[], pageNo: number, pageCount: number) => {
+      let text = '';
+      let failure = '';
+      const modelTimer = setTimeout(() => controller.abort(), 180_000);
+      try {
+        for await (const chunk of llm.stream({
+          provider: model.provider,
+          model: model.modelId,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: ptcPlanPrompt(page, pageNo, pageCount, targets, bitrates, channelMap, rateMap, quality),
+                },
+              ],
+            },
+          ],
+          maxTokens: 6000,
+          ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+          signal,
+        })) {
+          if (chunk.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text;
+          else if (chunk.type === 'finish' && chunk.reason && chunk.reason.kind !== 'stop') {
+            failure = chunk.reason.failure?.message || chunk.reason.kind;
+          }
         }
+      } catch (err) {
+        if (signal.aborted) throw new Error('模型调用超时或被取消');
+        throw new Error('模型调用失败：' + errorText(err));
+      } finally {
+        clearTimeout(modelTimer);
       }
-    } catch (err) {
-      if (signal.aborted) throw new Error('模型调用超时或被取消');
-      throw new Error('模型调用失败：' + errorText(err));
-    } finally {
-      clearTimeout(modelTimer);
+      if (failure) throw new Error('模型调用失败：' + failure);
+      if (!text.trim()) throw new Error('模型没有返回计划');
+      return parsePtcPlan(text, page);
+    };
+    // Pages: one planning call covers at most PTC_PLAN_PAGE files. A bigger
+    // batch pages through several calls; one page failing fails the batch, the
+    // same semantics the old single oversized call had.
+    const plan: Awaited<ReturnType<typeof parsePtcPlan>> = [];
+    const pageCount = Math.ceil(files.length / PTC_PLAN_PAGE);
+    run.planningPages = pageCount;
+    for (let start = 0; start < files.length; start += PTC_PLAN_PAGE) {
+      const pageNo = Math.floor(start / PTC_PLAN_PAGE) + 1;
+      run.planningPage = pageNo;
+      plan.push(...(await collectPage(files.slice(start, start + PTC_PLAN_PAGE), pageNo, pageCount)));
     }
-    if (failure) throw new Error('模型调用失败：' + failure);
-    if (!text.trim()) throw new Error('模型没有返回计划');
-    return parsePtcPlan(text, files);
+    run.planningPage = undefined;
+    return plan;
   };
 
   // One evaluation per group. The runtime refuses more than maxPendingCalls

@@ -243,6 +243,9 @@ const connection = {
 // Everything after the binding (plan, job, ffmpeg, response mapping) is real.
 let testUploadId = '';
 let ptcPrompt = '';
+const ptcPrompts = [];
+let ptcCallCount = 0;
+let ptcFailOnCall = 0;
 let ptcProgram = '';
 let ptcReasoning;
 // When set, the fake model returns this plan verbatim instead of echoing the
@@ -290,6 +293,9 @@ const llm = {
     // A plain string here would produce no completion in the real service.
     assert.ok(Array.isArray(options.messages[0].content), 'messages carry content blocks');
     ptcPrompt = options.messages[0].content[0].text;
+    ptcPrompts.push(ptcPrompt);
+    ptcCallCount += 1;
+    if (ptcFailOnCall && ptcCallCount === ptcFailOnCall) throw new Error('fake planning page failure');
     ptcReasoning = options.reasoningEffort;
     if (ptcFakePlanOverride) {
       yield { type: 'text-delta', index: 0, text: JSON.stringify(ptcFakePlanOverride) };
@@ -909,6 +915,47 @@ const ptcSkippedDone = await waitRun(ptcSkipped.data.run);
 assert.equal(ptcSkippedDone.items[0].state, 'done');
 assert.equal(ptcSkippedDone.items[1].state, 'skipped', 'a skipped row is not planned');
 assert.equal(ptcSkippedDone.items[1].error, 'hint.noAudio');
+
+// 125 files exceed one planning page (120), so planning makes two model calls —
+// pages, not groups: each prompt lists only its own files and the fake echoes
+// one row per listed file.
+const paged = [];
+for (let i = 0; i < 125; i += 1) {
+  const row = await call('upload?name=paged-' + i + '.png', { method: 'POST', body: fs.readFileSync(sample) });
+  assert.equal(row.data.ok, true, JSON.stringify(row.data));
+  paged.push(row.data.id);
+}
+ptcPrompts.length = 0;
+ptcCallCount = 0;
+const pagedStart = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: paged.map((id) => ({ id, format: 'jpg', quality: 60 })), quality: 60, ptc: true }),
+});
+assert.equal(pagedStart.data.ok, true, JSON.stringify(pagedStart.data));
+const pagedDone = await waitRun(pagedStart.data.run);
+assert.equal(pagedDone.state, 'done');
+assert.equal(pagedDone.items.filter((item) => item.state === 'done').length, 125);
+assert.equal(ptcPrompts.length, 2, '125 files plan in two model calls');
+const pageLines = ptcPrompts.map((prompt) => [...prompt.matchAll(/id=\S+ name=/g)].length);
+assert.deepEqual(pageLines, [120, 5], `page sizes: ${pageLines}`);
+assert.match(ptcPrompts[0], /第 1\/2 页/);
+assert.match(ptcPrompts[1], /第 2\/2 页/);
+// A failed page fails the batch: the second planning call blows up, so the
+// run settles into error instead of converting with a half-empty plan.
+ptcCallCount = 0;
+ptcFailOnCall = 2;
+const pageFailStart = await call('run', {
+  method: 'POST',
+  body: JSON.stringify({ items: paged.map((id) => ({ id, format: 'jpg' })), ptc: true }),
+});
+assert.equal(pageFailStart.data.ok, true, JSON.stringify(pageFailStart.data));
+const pageFailDone = await waitRun(pageFailStart.data.run);
+assert.equal(pageFailDone.state, 'error', 'a failed planning page fails the run');
+assert.ok(
+  pageFailDone.items.some((item) => item.error && item.error.includes('模型调用失败')),
+  'rows carry the page failure',
+);
+ptcFailOnCall = 0;
 
 // 41 files exceed one group (40 files), so the Host starts a second sandbox
 // evaluation with its own timeout instead of one 10-minute-capped run.

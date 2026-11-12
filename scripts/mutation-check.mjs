@@ -1328,6 +1328,25 @@ const MUTANTS = [
     expect:
       '已完成的 run 必须带 finishedAt，面板才能在 10 分钟窗口内恢复批次摘要；突变后窗口永不命中 → host finishedAt 断言红',
   },
+  {
+    id: 'H2',
+    name: '计划分页被关掉（页宽 120→1200，125 文件一次装完）',
+    apply: (s) => replaceOnce(s, 'const PTC_PLAN_PAGE = 120;', 'const PTC_PLAN_PAGE = 1200;'),
+    distAnchor: 'PTC_PLAN_PAGE = 1200',
+    expect: '125 文件必须分 2 次模型调用；突变后 1 次装完 → 分页用例 ptcPrompts.length 断言红',
+  },
+  {
+    id: 'H3',
+    name: '分页切片差一（首页 119 行、末页 6 行）',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'files.slice(start, start + PTC_PLAN_PAGE)',
+        'files.slice(start, Math.max(start + 1, start + PTC_PLAN_PAGE - 1))',
+      ),
+    distAnchor: 'Math.max(start + 1',
+    expect: '首页必须恰好 120 行；突变后 119 行 → 分页用例 pageLines 断言红',
+  },
 ];
 
 function build() {
