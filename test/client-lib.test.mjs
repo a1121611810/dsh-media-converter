@@ -31,6 +31,7 @@ import {
   isExpectedSource,
   makeNonce,
   preambleOf,
+  presetExtrasUnsupported,
 } from '../dist/src/client/lib.js';
 
 // --- extension packs: pure projections of the /status payload -----------------
@@ -611,3 +612,23 @@ ok(bridgeReplyOf(7, { ok: false, error: 'nope' }), { __mc: 1, id: 7, ok: false, 
   assert.notEqual(preambleOf(n1), preambleOf(n2), '不同 nonce 不同前导');
 }
 console.log('client-lib: 扩展页桥用例 ok');
+
+// --- preset save guard（评审修复）--------------------------------------------
+// 判别力：真值八条逐一带 + 假值四条（rotate:0 / speed:1 / 空串 / 全 undefined）——
+// 缺了假值组，「恒 true」的坏实现照样绿（mutation-check G10 就是打这个）。
+ok(presetExtrasUnsupported({}), false, '全缺省不拦截');
+ok(presetExtrasUnsupported({ crop: '640:360' }), true, 'crop 拦截');
+ok(presetExtrasUnsupported({ rotate: 90 }), true, 'rotate 拦截');
+ok(presetExtrasUnsupported({ flip: 'h' }), true, 'flip 拦截');
+ok(presetExtrasUnsupported({ remux: true }), true, 'remux 拦截');
+ok(presetExtrasUnsupported({ speed: 2 }), true, 'speed 拦截');
+ok(presetExtrasUnsupported({ loudnorm: true }), true, 'loudnorm 拦截');
+ok(presetExtrasUnsupported({ watermarkText: 'x' }), true, '水印拦截');
+ok(presetExtrasUnsupported({ burn: true }), true, '烧录拦截');
+ok(presetExtrasUnsupported({ rotate: 0 }), false, 'rotate 0 不拦截');
+// 契约边界：helper 只判「存在性」，各旋钮的中性值由调用方归一成 undefined
+//（App.vue 已把 speed!==1 才传入）；所以 speed:1 在 helper 层面算「有值」。
+ok(presetExtrasUnsupported({ speed: 1 }), true, 'speed 1 由调用方归一化，helper 只看存在性');
+ok(presetExtrasUnsupported({ speed: undefined, loudnorm: undefined }), false, 'undefined 不拦截');
+ok(presetExtrasUnsupported({ watermarkText: '' }), false, '空串不拦截');
+console.log('client-lib: 预设拦截用例 ok');

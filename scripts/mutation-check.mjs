@@ -1267,6 +1267,55 @@ const MUTANTS = [
     distAnchor: "'mc-flipped-reply'",
     expect: '成功回复必须 ok:true 带 status/json；突变后成功也回 ok:false → 封套用例红',
   },
+  {
+    id: 'G8',
+    name: '计划失败时 scratch 清理被摘除（burn srt 泄漏）',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'await Promise.all(scratch.map((f) => fsp.rm(f, { force: true }).catch(() => {})));',
+        'void scratch;',
+      ),
+    distAnchor: 'void scratch;',
+    expect: 'plan 抛错时 prepareBurn 的 srt 必须被清理；突变后只读不删 → burn 计数断言红',
+  },
+  {
+    id: 'G9',
+    name: '章节上限守卫失效（65 章静默切片）',
+    apply: (s) => replaceOnce(s, 'if (windows.length > 64) {', 'if (windows.length > 6400) {'),
+    distAnchor: 'windows.length > 6400',
+    expect: '65 章必须报错拒收；突变后静默切 64 → host 65 章用例红',
+  },
+  {
+    id: 'G10',
+    name: '预设拦截的假值白名单被掏空（rotate:0 也算拦截）',
+    source: 'src/client/lib.ts',
+    test: 'test/client-lib.test.mjs',
+    dist: 'dist/src/client/lib.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "return Object.values(extras).some((v) => v !== undefined && v !== null && v !== false && v !== '' && v !== 0);",
+        'return Object.values(extras).some((v) => v !== undefined);',
+      ),
+    distAnchor: 'some((v) => v !== undefined);',
+    expect: 'rotate:0/speed:1 等假值不得拦截；突变后全拦截 → client-lib 假值边界用例红',
+  },
+  {
+    id: 'G11',
+    name: '水印位置白名单校验反转（非法位置被放行）',
+    source: 'lib/actions.ts',
+    test: 'test/host.test.mjs',
+    dist: 'dist/lib/actions.js',
+    // 本机 homebrew ffmpeg 无 drawtext，水印 e2e 被能力门跳过（/status 如实
+    // 报告有 Y1 守着）——所以锚环境无关的 plan 层校验：非法位置必须在建计划
+    // 时被拒，与 ffmpeg 能力无关。
+    apply: (s) =>
+      replaceOnce(s, "if (!WM_POS_KEYS.includes(pos)) throw new Error('水印位置必须是 tl/tr/bl/br 之一');", "if (WM_POS_KEYS.includes(pos)) throw new Error('水印位置必须是 tl/tr/bl/br 之一');"),
+    // tsrs 对超长行在 emit 时折行：锚只取条件部分（基线是 !includes 形态，不会误撞）。
+    distAnchor: 'if (WM_POS_KEYS.includes(pos))',
+    expect: 'watermarkPos=center 必须在 plan 层被拒；突变后放行 → host 非法位置用例红',
+  },
 ];
 
 function build() {

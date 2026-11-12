@@ -743,6 +743,22 @@ const badSub = await call('convert', {
 assert.equal(badSub.data.ok, false);
 assert.match(badSub.data.error, /不支持的字幕格式/);
 
+// --- burn scratch cleanup: a failed plan must not leak the prepared srt ------
+// 判别力前提：带字幕轨的夹具（prepareBurn 成功落 srt）+ 非法格式（planFor 在
+// prepareBurn 之后才抛）；少了任一前提，有没有修复计数都不变 = 假绿。
+{
+  const tmpDir = path.join(os.tmpdir(), 'dsh-media-toolbox');
+  const countBurn = () => fs.readdirSync(tmpDir).filter((f) => f.startsWith('burn-')).length;
+  const before = countBurn();
+  const badBurn = await call('convert', {
+    method: 'POST',
+    body: JSON.stringify({ id: subsUpload.data.id, mode: 'convert', format: 'xyz', burn: 0 }),
+  });
+  assert.equal(badBurn.data.ok, false, '非法格式应报错');
+  assert.match(badBurn.data.error, /不支持的输出格式/);
+  assert.equal(countBurn(), before, 'plan 失败后 burn scratch 必须被清理');
+}
+
 // --- adding files by path (no browser upload) -----------------------------
 // The Host can read the disk itself: the panel browses a directory and
 // registers absolute paths, so a few hundred files never pass through the
@@ -2491,6 +2507,59 @@ assert.match(noChapters.data.error, /没有可分割的章节/);
 const toolSplit = await media.execute({ path: chaptered, action: 'split-chapters', chapterMode: 'copy' }, exec);
 assert.equal(toolSplit.files.length, 3, 'tool split returns every chapter file');
 
+// --- chapter cap: more than 64 windows is a refusal, not a silent slice ------
+// 65 个互不相同的窗口（0.2s 间隔），不用相同窗口——不排除 ffmpeg 去重造成假绿。
+{
+  const ffmeta65 = path.join(outDir, 'chapters65.txt');
+  fs.writeFileSync(
+    ffmeta65,
+    [
+      ';FFMETADATA1',
+      ...Array.from({ length: 65 }, (_, i) => [
+        '[CHAPTER]',
+        'TIMEBASE=1/1000',
+        `START=${200 * i}`,
+        `END=${200 * i + 100}`,
+        `title=c${i}`,
+      ]).flat(),
+    ].join('\n'),
+  );
+  const chaptered65 = path.join(outDir, 'chapters65.3gp');
+  execFileSync(ffmpeg, [
+    '-y',
+    '-loglevel',
+    'error',
+    '-f',
+    'lavfi',
+    '-i',
+    'testsrc=duration=13.2:size=320x240:rate=10',
+    '-f',
+    'lavfi',
+    '-i',
+    'sine=frequency=440',
+    '-i',
+    ffmeta65,
+    '-map_metadata',
+    '2',
+    '-c:v',
+    'libx264',
+    '-pix_fmt',
+    'yuv420p',
+    '-c:a',
+    'aac',
+    '-shortest',
+    chaptered65,
+  ]);
+  const up65 = await call('upload?name=chapters65.3gp', { method: 'POST', body: fs.readFileSync(chaptered65) });
+  assert.equal(up65.data.ok, true, JSON.stringify(up65.data));
+  const split65 = await call('convert', {
+    method: 'POST',
+    body: JSON.stringify({ id: up65.data.id, mode: 'split-chapters', chapterMode: 'copy' }),
+  });
+  assert.equal(split65.data.ok, false, '65 章必须拒收而不是静默切片');
+  assert.match(split65.data.error, /超过单次上限 64/);
+}
+
 // --- geometry & forced remux (R4) -------------------------------------------
 // 宽屏夹具：旋转 90° 后宽高互换，探针反读即可证明几何真的发生。
 const wide = path.join(outDir, 'wide.mp4');
@@ -2682,6 +2751,14 @@ assert.equal(swStatusNow.data.filters?.drawtext, /\bdrawtext\b/.test(filtersText
 assert.equal(swStatusNow.data.filters?.subtitles, /\bsubtitles\b/.test(filtersText), '/status 如实报告 subtitles 探测');
 // canary：scale 人人有，谎报必被抓（变异锚 Y1 的靶子）。
 assert.equal(swStatusNow.data.filters?.scale, /\bscale\b/.test(filtersText), '/status 如实报告 scale 探测');
+// 水印位置校验在 plan 层、与 ffmpeg 是否带 drawtext 无关（能力门只挡 e2e，
+// 不挡校验）——这条必须任何机器都跑（mutation-check G11 的靶子）。
+const badWmPos = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', watermarkText: 'x', watermarkPos: 'center' }),
+});
+assert.equal(badWmPos.data.ok, false, '非法水印位置必须被拒');
+assert.match(badWmPos.data.error, /水印位置必须是 tl\/tr\/bl\/br 之一/);
 const hasDrawtext = swStatusNow.data.filters?.drawtext === true;
 if (hasDrawtext) {
   const marked = await call('convert', {
@@ -2689,7 +2766,22 @@ if (hasDrawtext) {
     body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', watermarkText: 'hello: world', watermarkPos: 'tl' }),
   });
   assert.equal(marked.data.ok, true, JSON.stringify(marked.data));
-  await waitJob(marked.data.job);
+  const markedDone = await waitJob(marked.data.job);
+  // 帧哈希对照：只断言「任务成功」挡不住「滤镜没画上去」（G11 靶子）——
+  // 无 textfile 时 drawtext 静默空转。对照组必须同样重编码、且视频参数与
+  // 实验组完全一致：channels:2 只触发重编码不动视频编码参数（quality:91
+  // 会改 CRF、拷贝路径又有编解码差异，两种对照都绿 = 假绿）；md5  muxer
+  // 只哈希视频帧，音频变化不影响对照。
+  const noWm = await call('convert', {
+    method: 'POST',
+    body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', channels: 2 }),
+  });
+  const noWmDone = await waitJob(noWm.data.job);
+  const frameMd5 = (file) =>
+    spawnSync(ffmpeg, ['-loglevel', 'error', '-i', file, '-map', '0:v:0', '-frames:v', '1', '-f', 'md5', '-'], {
+      encoding: 'utf8',
+    }).stdout.trim();
+  assert.notEqual(frameMd5(markedDone.out), frameMd5(noWmDone.out), '水印必须真的画进画面');
   const toolMarked = await media.execute({ path: clip, action: 'convert', format: 'mp4', watermarkText: "a'b" }, exec);
   assert.ok(fs.existsSync(toolMarked.file), 'tool watermark lands');
 }
@@ -3970,6 +4062,12 @@ assert.deepEqual(
   ['extract-audio'],
   'the advertised enum follows the features whitelist',
 );
+assert.match(
+  featTools.get('media_toolbox').description,
+  /snapshot 截图/,
+  '工具描述必须讲 snapshot（schema 有的动作描述里不能漏）',
+);
+assert.match(featTools.get('media_toolbox').description, /watermarkText/, '工具描述必须讲水印旋钮');
 const featClip = path.join(featOut, 'clip.mp4');
 execFileSync(ffmpeg, [
   '-y',

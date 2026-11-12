@@ -577,6 +577,8 @@ export function upsertPresetPack(
 // a DOM.
 export const BRIDGE_PATH_PREFIX = '/api/media-convert';
 export const BRIDGE_MAX_BODY = 1024 * 1024;
+// One timeout on both sides of the bridge (preamble client + panel fetch).
+export const BRIDGE_TIMEOUT_MS = 30_000;
 
 export interface BridgeMessage {
   __mc: 1;
@@ -601,7 +603,9 @@ export function preambleOf(nonce: string): string {
     JSON.stringify(nonce) +
     ';(function(){var p={},n=0;' +
     'window.mcBridge={call:function(m,path,body){return new Promise(function(res,rej){var id=++n;' +
-    'var t=setTimeout(function(){delete p[id];rej(new Error("bridge timeout"))},30000);' +
+    'var t=setTimeout(function(){delete p[id];rej(new Error("bridge timeout"))},' +
+    BRIDGE_TIMEOUT_MS +
+    ');' +
     'p[id]={res:res,rej:rej,t:t};' +
     "parent.postMessage({__mc:1,token:window.__MC_TOKEN__,id:id,method:m,path:path,body:body==null?null:body},'*')})}};" +
     "addEventListener('message',function(e){var d=e.data;if(!d||d.__mc!==1||!p[d.id])return;" +
@@ -653,4 +657,21 @@ export function bridgeReplyOf(
   return result.ok
     ? { __mc: 1, id, ok: true, status: result.status, json: result.json }
     : { __mc: 1, id, ok: false, error: result.error };
+}
+
+// Presets (macros) carry only the classic knob set (format/quality/bitrate/
+// channels/sampleRate/fps/width/codec). Tuned extras — geometry, remux,
+// speed, loudnorm, watermark, burn — have nowhere to go in a macro, so the
+// save path must refuse them instead of silently dropping what the user set.
+export function presetExtrasUnsupported(extras: {
+  crop?: unknown;
+  rotate?: unknown;
+  flip?: unknown;
+  remux?: unknown;
+  speed?: unknown;
+  loudnorm?: unknown;
+  watermarkText?: unknown;
+  burn?: unknown;
+}): boolean {
+  return Object.values(extras).some((v) => v !== undefined && v !== null && v !== false && v !== '' && v !== 0);
 }

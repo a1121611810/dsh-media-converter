@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue';
 import {
+  BRIDGE_TIMEOUT_MS,
   allowedBridgeCall,
   bridgeReplyOf,
   isBridgeMessage,
@@ -34,7 +35,7 @@ async function onMessage(event: MessageEvent): Promise<void> {
     const resp = await fetch(call.path, {
       method: call.method,
       ...(call.body !== undefined ? { headers: { 'content-type': 'application/json' }, body: call.body } : {}),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(BRIDGE_TIMEOUT_MS),
     });
     const json = await readJson<unknown>(resp);
     frame.contentWindow?.postMessage(bridgeReplyOf(event.data.id, { ok: true, status: resp.status, json }), '*');

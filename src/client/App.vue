@@ -33,7 +33,7 @@ import {
   unavailableTarget,
   withoutKnownUploads,
 } from './lib.js';
-import { extensionActionItems, presetTargetsFor, upsertPresetPack } from './lib.js';
+import { extensionActionItems, presetExtrasUnsupported, presetTargetsFor, upsertPresetPack } from './lib.js';
 import type { ConvertRequest, ConvertibleKind, DecodedPayload, PresetParams, QueueRow, ServerJob } from './lib.js';
 import type { MediaKind, StreamMeta } from '../../lib/plan.js';
 import type {
@@ -750,6 +750,21 @@ watch(format, () => {
 async function savePreset() {
   const name = presetName.value.trim();
   if (!name || !file.value || !format.value || presetSaving.value) return;
+  if (
+    presetExtrasUnsupported({
+      crop: crop.value,
+      rotate: rotate.value,
+      flip: flip.value,
+      remux: remuxOnly.value,
+      speed: speed.value !== 1 ? speed.value : undefined,
+      loudnorm: loudnormOn.value,
+      watermarkText: wmText.value.trim() || undefined,
+      burn: burnTrack.value >= 0 ? true : undefined,
+    })
+  ) {
+    presetMessage.value = t('preset.noTuned');
+    return;
+  }
   const params: PresetParams = { format: format.value };
   if (usesQuality.value) params.quality = quality.value;
   if (usesBitrate.value && bitrate.value) params.bitrate = bitrate.value;
@@ -973,6 +988,9 @@ const extPages = computed<ExtPageTarget[]>(() => {
 const extPage = ref<ExtPageTarget | null>(null);
 function openExtList(): void {
   extPage.value = null;
+  // The settings card (shell) saves packs without touching this tree: refresh
+  // so newly imported pages appear without a panel reload.
+  void fetchStatus();
   view.value = 'ext';
 }
 

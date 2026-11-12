@@ -678,7 +678,7 @@ const CSS = `
       .mc-ext-card-sub { font-size: 12px; color: var(--dsw-alias-label-tertiary, rgba(128,128,128,0.7)); }
       .mc-ext-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
       .mc-ext-title { font-weight: 600; }
-      .mc-ext-frame { width: 100%; min-height: 60vh; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.3)); border-radius: 10px; background: #fff; }
+      .mc-ext-frame { width: 100%; min-height: 60vh; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.3)); border-radius: 10px; background: transparent; }
       .mc-history-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
       .mc-history-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
       .mc-history-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

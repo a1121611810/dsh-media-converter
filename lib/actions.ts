@@ -107,20 +107,18 @@ function convertPlan(
   if (Number(body.speed) > 0 && Number(body.speed) !== 1) filters.speed = Number(body.speed);
   if (body.loudnorm === true) filters.loudnorm = true;
   const wmText = String(body.watermarkText || '').trim();
+  // Validated now, written only on the software path below: a throw anywhere
+  // in between (burn checks, the copy/hw gates, buildArgs' own clamps) must
+  // never leak a scratch text file.
+  let wm: { fontFile: string; pos: string; size: number } | null = null;
   if (wmText) {
     if (upload.kind !== 'video' || kindByExt(format) !== 'video') throw new Error('水印仅对视频目标有效');
     const pos = String(body.watermarkPos || 'br');
     if (!WM_POS_KEYS.includes(pos)) throw new Error('水印位置必须是 tl/tr/bl/br 之一');
     const fontFile = fontCandidates(process.platform).find((candidate) => fs.existsSync(candidate));
     if (!fontFile) throw new Error('本机找不到可用系统字体（文字水印需要）');
-    const textFile = path.join(TMP_DIR, `wm-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.txt`);
-    fs.writeFileSync(textFile, wmText, 'utf8');
-    scratch.push(textFile);
     const width = upload.meta.video && upload.meta.video.width ? upload.meta.video.width : 640;
-    filters.extraVf = [
-      ...(filters.extraVf ?? []),
-      watermarkSegment({ fontFile, textFile, size: Math.min(96, Math.max(12, Math.round(width / 18))), pos }),
-    ];
+    wm = { fontFile, pos, size: Math.min(96, Math.max(12, Math.round(width / 18))) };
   }
   if (body.burn !== undefined && body.burn !== null && body.burn !== false) {
     if (upload.kind !== 'video' || kindByExt(format) !== 'video') throw new Error('字幕烧录仅对视频目标有效');
@@ -132,7 +130,9 @@ function convertPlan(
     // 烧录段排在链尾最前：字幕渲染在下，水印盖在最上。
     filters.extraVf = [burnSegment(body.burnFile, fontsDir), ...(filters.extraVf ?? [])];
   }
-  const filtersTuned = Boolean(filters.speed || filters.loudnorm || (filters.extraVf && filters.extraVf.length));
+  const filtersTuned = Boolean(
+    filters.speed || filters.loudnorm || wmText || (filters.extraVf && filters.extraVf.length),
+  );
   // An explicit quality choice means "re-encode to this quality": a container
   // copy would silently drop it. Rounded, so 89.6/90.4 (which buildArgs rounds
   // to the 90 default) do not force a pointless re-encode.
@@ -224,6 +224,15 @@ function convertPlan(
         hardware: true,
       };
     }
+  }
+  // The watermark text file materializes only here: every validation that can
+  // throw has already run, so this software-path return is the single
+  // scratch-writing point in the whole plan.
+  if (wm) {
+    const textFile = path.join(TMP_DIR, `wm-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.txt`);
+    fs.writeFileSync(textFile, wmText, 'utf8');
+    scratch.push(textFile);
+    filters.extraVf = [...(filters.extraVf ?? []), watermarkSegment({ ...wm, textFile })];
   }
   return {
     ext: format,

@@ -2607,7 +2607,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     // not quietly fall back to the CPU.
     if (body.hardware) await deviceVerdict(ffmpeg!);
     const toolScratch = await prepareBurn(upload, body);
-    const toolPlan = planFor(upload, body, 0);
+    const toolPlan = await planWithScratch(upload, body, toolScratch);
     if (toolPlan.scratch?.length) toolScratch.push(...toolPlan.scratch);
     const { job, done } = await startJob(upload, toolPlan, normalizeTrim(body.trim, upload.duration), '');
     if (toolScratch.length) {
@@ -2639,11 +2639,28 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       const ordinal = Math.max(0, Math.round(Number(body.burn) || 0));
       if (!upload.streams.subtitles[ordinal]) throw new Error('这条字幕轨不存在');
       const srtFile = path.join(tmpDir, `burn-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}.srt`);
-      await extractSubtitle(upload.path, ordinal, srtFile);
+      // A failed extraction must not leave a half-written srt behind.
+      try {
+        await extractSubtitle(upload.path, ordinal, srtFile);
+      } catch (err) {
+        await fsp.rm(srtFile, { force: true }).catch(() => {});
+        throw err;
+      }
       body.burnFile = srtFile;
       scratch.push(srtFile);
     }
     return scratch;
+  };
+
+  // A failed plan must not leave prepared scratch files behind: the route and
+  // the agent tool share this wrapper so the cleanup has exactly one home.
+  const planWithScratch = async (upload: Upload, body: JsonBody, scratch: string[]): Promise<ConvertPlan> => {
+    try {
+      return planFor(upload, body, 0);
+    } catch (err) {
+      await Promise.all(scratch.map((f) => fsp.rm(f, { force: true }).catch(() => {})));
+      throw err;
+    }
   };
 
   // Byte range support keeps the preview player's scrub bar working.
@@ -2697,7 +2714,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
         '③extract-audio 抽音轨、④extract-video 抽画面（不重编码，可带 stream 选类型内第几条轨）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）；⑦concat 合并多个同类型文件（paths[]，mode=copy 直接拷贝/encode 重编码）；⑧split-chapters 按章节分割为多个文件（默认 copy 关键帧裁剪，mode=encode 精确重编码，返回 files[]）。' +
-        'convert 可带 trim（秒，{start,end}）裁剪；视频转视频可带 videoTrack、带音频的输出可带 audioTrack（类型内轨序号，1=第二条，0 或不填走默认轨；显式选轨将禁用直接拷贝）；软件编码可选 codec（hevc=libx265、av1=libsvtav1，仅 mp4/mov/mkv，配 hardware=false 或缺省；缺编码器时任务报错，其它容器回退 H.264），指定 codec 而不填 hardware 视同请求 GPU 硬编（h264/hevc，hevc 限 mp4/mov/mkv/ts）；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale，x265/svt-av1 映射各自 CRF）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）。产物写在输出目录，返回新文件路径。',
+        'convert 可带 trim（秒，{start,end}）裁剪；视频转视频可带 videoTrack、带音频的输出可带 audioTrack（类型内轨序号，1=第二条，0 或不填走默认轨；显式选轨将禁用直接拷贝）；软件编码可选 codec（hevc=libx265、av1=libsvtav1，仅 mp4/mov/mkv，配 hardware=false 或缺省；缺编码器时任务报错，其它容器回退 H.264），指定 codec 而不填 hardware 视同请求 GPU 硬编（h264/hevc，hevc 限 mp4/mov/mkv/ts）；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale，x265/svt-av1 映射各自 CRF）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）；⑨snapshot 截图（at=秒处取帧，format=png/jpg）；convert 还可带 crop（宽:高[:x[:y]]、偶数）/rotate（90/180/270）/flip（h|v）做画面几何，remux:true 仅换封装，speed（0.25–4）变速，loudnorm:true 响度归一，watermarkText 与 watermarkPos（tl/tr/bl/br）文字水印，burn（字幕轨序号）烧录。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
         properties: {
@@ -3362,6 +3379,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               if (!features.includes('split-chapters')) return json(res, 200, errorPayload('该功能已停用'));
               const windows = chapterWindows(upload.meta);
               if (!windows.length) return json(res, 200, errorPayload('这个文件没有可分割的章节'));
+              if (windows.length > 64) {
+                return json(res, 200, errorPayload(`章节共 ${windows.length} 个，超过单次上限 64，请分批处理`));
+              }
               const how = String(body.chapterMode || 'copy') === 'encode' ? 'encode' : 'copy';
               const sourceExt = extOf(upload.name) || defaultFormat(upload.kind);
               const enc = formatsFor(upload.kind).includes(sourceExt) ? sourceExt : defaultFormat(upload.kind);
@@ -3401,7 +3421,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             // scratch srt, and every scratch file (burn srt, watermark text)
             // dies with the job.
             const scratch = await prepareBurn(upload, body);
-            const plan = planFor(upload, body, 0);
+            const plan = await planWithScratch(upload, body, scratch);
             if (plan.scratch?.length) scratch.push(...plan.scratch);
             const { job, done } = await startJob(
               upload,
