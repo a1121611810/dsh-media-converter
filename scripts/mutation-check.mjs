@@ -84,7 +84,11 @@ const MUTANTS = [
     id: 'A2',
     name: '/status 不回传真实 queueLimit（恒 0）',
     apply: (s) =>
-      replaceOnce(s, '  queueLimit,\n  nameTemplate,\n  instanceId,', '  queueLimit: queueLimit && 0,\n  nameTemplate,\n  instanceId,'),
+      replaceOnce(
+        s,
+        '  queueLimit,\n  nameTemplate,\n  instanceId,',
+        '  queueLimit: queueLimit && 0,\n  nameTemplate,\n  instanceId,',
+      ),
     distAnchor: 'queueLimit && 0',
     expect: '/status 的 queueLimit 必须是 2000，突变后为 0',
   },
