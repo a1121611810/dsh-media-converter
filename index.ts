@@ -87,6 +87,7 @@ import {
   probeCandidates,
   revealCommand,
   safeBaseName,
+  renderNameTemplate,
 } from './lib/platform.js';
 
 // The Cordis context of this plugin: only the webServer service and the tool
@@ -189,6 +190,7 @@ export interface Config {
   uploadTtlMinutes: number;
   queueLimit: number;
   extensions: string;
+  nameTemplate: string;
 }
 
 export const Config = Schema.object({
@@ -202,6 +204,7 @@ export const Config = Schema.object({
   uploadTtlMinutes: Schema.number().default(120).volatile(),
   queueLimit: Schema.number().default(2000).volatile(),
   extensions: Schema.string().default('').volatile(),
+  nameTemplate: Schema.string().default('').volatile(),
 });
 
 // The action panel's module keys, in their built-in order. A configured
@@ -477,6 +480,7 @@ export interface JsonBody {
   uploadTtlMinutes?: unknown;
   queueLimit?: unknown;
   extensions?: unknown;
+  nameTemplate?: unknown;
   ids?: unknown;
   // Concat run: the ordered upload ids and the chosen level ('copy'|'encode').
   concatIds?: unknown;
@@ -705,6 +709,7 @@ const statusPayload = (
   persistState: boolean,
   uploadTtlMinutes: number,
   queueLimit: number,
+  nameTemplate: string,
   instanceId: string,
   hardware: HardwareInfo,
   probeMode: 'ffprobe' | 'ffmpeg',
@@ -723,6 +728,7 @@ const statusPayload = (
   persistState,
   uploadTtlMinutes,
   queueLimit,
+  nameTemplate,
   instanceId,
   hardware,
   probeMode,
@@ -1048,6 +1054,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   let groups: string[] = [...GROUP_KEYS];
   let features: string[] = resolveFeatures('');
   let persistState = false;
+  let nameTemplate = '';
   let uploadTtlMs = DEFAULT_UPLOAD_TTL_MINUTES * 60 * 1000;
   let queueLimitN = DEFAULT_QUEUE_LIMIT;
   // User extensions (data-only manifests): parsed tolerantly at load — a bad
@@ -1074,6 +1081,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     groups = resolveGroups(unwrap(raw.groups));
     features = resolveFeatures(unwrap(raw.features));
     persistState = unwrap(raw.persistState) === true;
+    nameTemplate = String(unwrap(raw.nameTemplate) || '');
     const cfgTtl = unwrap(raw.uploadTtlMinutes);
     // Floor of 5 minutes: a smaller TTL deletes sources under running jobs.
     uploadTtlMs =
@@ -1227,6 +1235,21 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   };
 
   const uniqueOutput = async (name: string, extension: string, suffix = ''): Promise<string> => {
+    // A configured template renders the WHOLE file name (its {ext} placeholder
+    // carries the extension); rendering here re-validates at job time, so a
+    // hand-edited bad template errors the job instead of escaping the output
+    // directory. The default path is the sanitized source stem, untouched.
+    if (nameTemplate) {
+      const base = renderNameTemplate(nameTemplate, safeBaseName(name), extension) + suffix;
+      const candidate = path.join(outDir, base);
+      const taken = await fsp.stat(candidate).then(
+        () => true,
+        () => false,
+      );
+      return taken
+        ? path.join(outDir, `${base}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`)
+        : candidate;
+    }
     const stem = safeBaseName(name) + suffix;
     const candidate = path.join(outDir, `${stem}.${extension}`);
     const taken = await fsp.stat(candidate).then(
@@ -3023,6 +3046,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               persistState,
               Math.round(uploadTtlMs / 60000),
               queueLimitN,
+              nameTemplate,
               instanceId,
               info,
               ffprobe ? 'ffprobe' : 'ffmpeg',
@@ -3102,6 +3126,14 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               // Reject the whole batch: a half-installed pack is worse than a refused one.
               if (!parsed.ok) throw new Error(parsed.error);
               patch.extensions = body.extensions;
+            }
+            if (body.nameTemplate !== undefined) {
+              if (typeof body.nameTemplate !== 'string') throw new Error('nameTemplate 必须是字符串');
+              // Probe-render now: a template that cannot produce a bare file
+              // name is refused before it reaches the running state. Empty
+              // resets to the built-in naming.
+              if (body.nameTemplate) renderNameTemplate(body.nameTemplate, 'probe', 'mp4');
+              patch.nameTemplate = body.nameTemplate;
             }
             if (Object.keys(patch).length === 0) return json(res, 200, errorPayload('没有要保存的字段'));
             // No expectedRevision: last write wins; the service validates the

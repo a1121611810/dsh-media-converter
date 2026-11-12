@@ -148,6 +148,7 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
     maxUploadMb: '2048',
     uploadTtlMinutes: '120',
     queueLimit: '2000',
+    nameTemplate: '',
     composerButton: true,
     persistState: false,
   });
@@ -176,6 +177,7 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
             maxUploadMb: String(next.maxUploadMb),
             uploadTtlMinutes: String(next.uploadTtlMinutes),
             queueLimit: String(next.queueLimit),
+            nameTemplate: next.nameTemplate || '',
             composerButton: next.composerButton !== false,
             persistState: next.persistState === true,
           });
@@ -202,6 +204,7 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
         maxUploadMb: Number(form.maxUploadMb),
         uploadTtlMinutes: Number(form.uploadTtlMinutes),
         queueLimit: Number(form.queueLimit),
+        nameTemplate: form.nameTemplate,
         composerButton: form.composerButton,
         persistState: form.persistState,
         groups: rows
@@ -287,13 +290,13 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
     return h('div', { className: 'mc-settings' }, h('p', { className: 'mc-settings-hint' }, t('error.network')));
   }
   const set =
-    (key: 'outputDir' | 'ffmpegPath' | 'maxUploadMb' | 'uploadTtlMinutes' | 'queueLimit') =>
+    (key: 'outputDir' | 'ffmpegPath' | 'maxUploadMb' | 'uploadTtlMinutes' | 'queueLimit' | 'nameTemplate') =>
     (event: { target: { value: string } }) =>
       setForm((current) => ({ ...current, [key]: event.target.value }));
   const field = (
     label: string,
     hint: string,
-    key: 'outputDir' | 'ffmpegPath' | 'maxUploadMb' | 'uploadTtlMinutes' | 'queueLimit',
+    key: 'outputDir' | 'ffmpegPath' | 'maxUploadMb' | 'uploadTtlMinutes' | 'queueLimit' | 'nameTemplate',
     placeholder: string,
   ) =>
     h(
@@ -446,6 +449,12 @@ function SettingsPage({ t }: { t: (key: string) => string }) {
           `${t('settings.current')}: ${status.maxUploadMb}`,
           'maxUploadMb',
           String(status.maxUploadMb),
+        ),
+        field(
+          t('settings.field.nameTemplate'),
+          `${t('settings.current')}: ${status.nameTemplate || t('settings.field.nameTemplate.off')} · ${t('settings.field.nameTemplate.hint')}`,
+          'nameTemplate',
+          status.nameTemplate || '',
         ),
         h(
           'button',

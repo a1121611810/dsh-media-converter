@@ -136,6 +136,7 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 - `composerButton`：是否在输入框工具排显示「媒体工具箱」按钮（默认开）。
 - `extensions`：扩展包原文（JSON 文本），设置页的扩展管理卡读写；保存时整包校验，坏包拒收。包可带 `pages`（沙箱扩展页）：iframe 为不透明源、`sandbox="allow-scripts"`，够不到面板 DOM/cookie/存储，只能经白名单桥（`/api/media-convert/*`，POST ≤1MB，一次性 token 校验消息来源）调用本插件 API——页面脚本是特性不是威胁，但它在网络出口上不受 sandbox 限制，桥也不转发任何秘密。
 - `groups`：文件详情页动作模块的顺序与显隐（`convert,edit,view`，写进字符串的才显示）。
+- `nameTemplate`：输出文件命名模板，可用 `{name}`（源文件名）、`{ext}`、`{date}`（YYYYMMDD）、`{time}`（HHmmss）；留空用默认命名（源名.扩展名，撞名加时间戳）。保存时校验必须渲染为纯文件名，任务时再次校验（防手改配置文件路径穿越）。
 - `features`：功能白名单（逗号分隔的动作 id：`probe,convert,extract-audio,extract-video,subtitle,meta,base64`），留空全启用、未知 id 忽略；停用后对应入口（单任务转换、批量、Agent 工具、Base64）直接报「该功能已停用」，保存即生效。
 - 设置页右上角还有版本号显示与「刷新界面」（等同 Ctrl+R）。
 
@@ -221,6 +222,7 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位。`t` 由平台按槽�
 
 ## 限制
 
+- 输出命名默认「源名.扩展名」，撞名自动加时间戳；`nameTemplate` 可自定义（见配置节）。
 - Base64 单文件上限 24 MB。
 - 扩展：每包 ≤16 动作、合计 ≤32、一包单一 kind；配方只许白名单内的输出侧 ffmpeg 参数（禁 `-i`/`-filter_complex`/lavfi/路径），不支持新格式名；宏只在匹配 kind 的文件上出现。
 - 上传单文件上限 2048 MB（`maxUploadMb` 可调）。

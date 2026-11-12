@@ -142,6 +142,22 @@ export function safeBaseName(raw: string, platform = process.platform): string {
   return stem;
 }
 
+// Output-name template: {name} {ext} {date} {time}. The rendered string joins
+// the output directory directly, so anything that is not a bare file name —
+// separators, parent segments — is refused, here and again at save time.
+export function renderNameTemplate(template: string, name: string, ext: string, now = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const rendered = String(template || '')
+    .replaceAll('{name}', name)
+    .replaceAll('{ext}', ext)
+    .replaceAll('{date}', `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`)
+    .replaceAll('{time}', `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`);
+  if (!rendered || rendered !== path.basename(rendered) || rendered.includes('..')) {
+    throw new Error(`命名模板非法：必须渲染为纯文件名（可用 {name} {ext} {date} {time}）：${template}`);
+  }
+  return rendered;
+}
+
 // System font file for drawtext and font directory for the subtitles filter:
 // candidates in preference order, first existing wins (the Host checks
 // existence; the plan never guesses a path that is not there).

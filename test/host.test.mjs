@@ -3293,6 +3293,32 @@ const stacked = await call('status');
 assert.equal(stacked.data.maxUploadMb, 100, 'a later save applies too');
 assert.equal(stacked.data.composerButton, false, 'an earlier save is not clobbered by the merge');
 
+// A naming template renames outputs ({name}/{ext}/{date}/{time}); an illegal
+// one is refused at save time, and the job-time render re-validates so a
+// hand-edited profile cannot write outside the output dir. The stem carries a
+// run-unique suffix: the suite's outputDir test aims at the real
+// ~/Movies/converted, so leftovers from earlier runs must not collide.
+const tplStem = 'tpl-' + Date.now().toString(36);
+const badName = await call('config', { method: 'POST', body: JSON.stringify({ nameTemplate: '../{name}' }) });
+assert.equal(badName.data.ok, false, 'a traversal template is refused at save time');
+const tplUpload = await call('upload?name=' + tplStem + '.png', { method: 'POST', body: fs.readFileSync(sample) });
+assert.equal(tplUpload.data.ok, true, JSON.stringify(tplUpload.data));
+const defaultStart = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: tplUpload.data.id, format: 'jpg' }),
+});
+const defaultNamed = await waitJob(defaultStart.data.job);
+assert.match(defaultNamed.out, new RegExp(tplStem + '\\.jpg$'), 'default naming keeps the source stem');
+const goodName = await call('config', { method: 'POST', body: JSON.stringify({ nameTemplate: '{name}-n.{ext}' }) });
+assert.equal(goodName.data.ok, true, JSON.stringify(goodName.data));
+const namedStart = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: tplUpload.data.id, format: 'jpg' }),
+});
+const namedJob = await waitJob(namedStart.data.job);
+assert.match(namedJob.out, new RegExp(tplStem + '-n\\.jpg$'), 'the template renames the output');
+await call('config', { method: 'POST', body: JSON.stringify({ nameTemplate: '' }) });
+
 // --- group order resolution -------------------------------------------------
 assert.deepEqual(
   resolveGroups('view,convert'),

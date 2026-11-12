@@ -2,6 +2,7 @@
 // so the Windows branches are checked from any host.
 import assert from 'node:assert/strict';
 import {
+  renderNameTemplate,
   binaryNames,
   expandDirs,
   ffmpegCandidates,
@@ -203,5 +204,19 @@ assert.equal(
   'videotoolbox',
 );
 assert.equal(await pickBackend('linux', ALL_ENCODERS, ALL_ACCELS, async () => true), null, 'no Linux backend yet');
+
+// renderNameTemplate: placeholders expand; anything that is not a bare file
+// name is refused — the rendered string joins the output dir directly.
+const tplNow = new Date(2026, 10, 9, 8, 7, 6);
+assert.equal(renderNameTemplate('{name}-{date}-{time}.{ext}', 'clip', 'mp4', tplNow), 'clip-20261109-080706.mp4');
+assert.equal(renderNameTemplate('{name}', 'plain', 'jpg', tplNow), 'plain');
+for (const bad of ['../{name}', 'a/{name}', '{name}/..', '/{name}', '']) {
+  assert.throws(() => renderNameTemplate(bad, 'x', 'mp4', tplNow), /命名模板非法/, `template refused: ${bad}`);
+}
+assert.throws(
+  () => renderNameTemplate('{name}', 'a/b', 'mp4', tplNow),
+  /命名模板非法/,
+  'unsanitized {name} is refused too',
+);
 
 console.log('platform.test.mjs: ok');
