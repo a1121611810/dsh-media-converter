@@ -1311,7 +1311,11 @@ const MUTANTS = [
     // 报告有 Y1 守着）——所以锚环境无关的 plan 层校验：非法位置必须在建计划
     // 时被拒，与 ffmpeg 能力无关。
     apply: (s) =>
-      replaceOnce(s, "if (!WM_POS_KEYS.includes(pos)) throw new Error('水印位置必须是 tl/tr/bl/br 之一');", "if (WM_POS_KEYS.includes(pos)) throw new Error('水印位置必须是 tl/tr/bl/br 之一');"),
+      replaceOnce(
+        s,
+        "if (!WM_POS_KEYS.includes(pos)) throw new Error('水印位置必须是 tl/tr/bl/br 之一');",
+        "if (WM_POS_KEYS.includes(pos)) throw new Error('水印位置必须是 tl/tr/bl/br 之一');",
+      ),
     // tsrs 对超长行在 emit 时折行：锚只取条件部分（基线是 !includes 形态，不会误撞）。
     distAnchor: 'if (WM_POS_KEYS.includes(pos))',
     expect: 'watermarkPos=center 必须在 plan 层被拒；突变后放行 → host 非法位置用例红',
