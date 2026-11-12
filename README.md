@@ -24,7 +24,7 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | 音频参数 | 音频文件与视频转 mp3/m4a：可选码率（64-320k）、声道（单声道/立体声）与采样率（8k-48k 常用值），语音场景一键 mono + 22050 Hz |
 | 元数据 | 查看容器、章节、逐轨参数与全部标签；改写标题/作者/专辑/备注/日期/流派（另存为新文件） |
 | Base64 | 当前文件 → `data:` URL；或粘贴 Base64 还原成文件 / 文本 |
-| 扩展平台 | 设置页导入 JSON 扩展包（数据包，非代码）：宏 = 固定参数组合的新动作，出现在文件详情动作网格与批量目标里；配方 = 覆盖内置格式的 ffmpeg 参数（白名单校验，quality 滑杆可映射）；删除即恢复内置 |
+| 扩展平台 | 设置页导入 JSON 扩展包（数据包，非代码）：宏 = 固定参数组合的新动作，出现在文件详情动作网格与批量目标里；配方 = 覆盖内置格式的 ffmpeg 参数（白名单校验，quality 滑杆可映射）；页面 = 完整 HTML 页，在面板沙箱 iframe 里运行（不透明源、够不到面板 DOM 与 cookie，只能经白名单桥调用本插件 API；每包 ≤3 页、单页 ≤256KB、全包 html ≤1MB）；删除即恢复内置 |
 | 批量处理 | 按类型分组：视频/音频/图片各自一个目标；文本单独一段、不参与转换；读取中/未识别单独一段；逐组全选/质量、码率/声道采样率下拉，逐行进度/结果/取消 |
 | PTC 调度 | 批量转换可选：在 DSH 已注册模型里选一个（默认跟随主模型），模型只返回每文件 JSON 计划，宿主校验后交给 PTC 沙箱执行；整批按组多次求值，可超过单次 10 分钟上限；批次由宿主持有，切会话/关页面后继续；低推理档、分阶段进度；默认关，耗 token |
 | GPU / 直接拷贝 | 显卡硬编可勾选 GPU 编码（mp4/mov/mkv/flv/ts），探测到 HEVC 能力后还可选 H.264 / HEVC：macOS 走 VideoToolbox，Windows 走 NVENC / Intel Quick Sync / AMD AMF（自动探测后选一个）；兼容编码/容器直接 `-c copy`，不重编码 |
@@ -134,7 +134,7 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 - `ffmpegPath`：找不到 ffmpeg 时手动指定。
 - `maxUploadMb`：单次上传上限（默认 2048 MB），超了直接拒绝，不写盘。
 - `composerButton`：是否在输入框工具排显示「媒体工具箱」按钮（默认开）。
-- `extensions`：扩展包原文（JSON 文本），设置页的扩展管理卡读写；保存时整包校验，坏包拒收。
+- `extensions`：扩展包原文（JSON 文本），设置页的扩展管理卡读写；保存时整包校验，坏包拒收。包可带 `pages`（沙箱扩展页）：iframe 为不透明源、`sandbox="allow-scripts"`，够不到面板 DOM/cookie/存储，只能经白名单桥（`/api/media-convert/*`，POST ≤1MB，一次性 token 校验消息来源）调用本插件 API——页面脚本是特性不是威胁，但它在网络出口上不受 sandbox 限制，桥也不转发任何秘密。
 - `groups`：文件详情页动作模块的顺序与显隐（`convert,edit,view`，写进字符串的才显示）。
 - `features`：功能白名单（逗号分隔的动作 id：`probe,convert,extract-audio,extract-video,subtitle,meta,base64`），留空全启用、未知 id 忽略；停用后对应入口（单任务转换、批量、Agent 工具、Base64）直接报「该功能已停用」，保存即生效。
 - 设置页右上角还有版本号显示与「刷新界面」（等同 Ctrl+R）。

@@ -436,6 +436,11 @@ export interface ExtensionActionInfo {
   label: ExtensionLabel;
   format: string;
 }
+export interface ExtensionPageInfo {
+  ref: string;
+  title: ExtensionLabel;
+  html: string;
+}
 export interface ExtensionInfo {
   id: string;
   name: ExtensionLabel;
@@ -443,6 +448,7 @@ export interface ExtensionInfo {
   raw: string;
   description?: ExtensionLabel;
   actions: ExtensionActionInfo[];
+  pages?: ExtensionPageInfo[];
 }
 
 // A macro is a fixed-parameter convert: it shows as one tile for files of its
@@ -560,4 +566,91 @@ export function upsertPresetPack(
     packs.push({ version: 1, id: manifestId, name: kindLabel, actions: [action] });
   }
   return { ok: true, packs, ref: `x:${manifestId}/${slug}` };
+}
+
+// --- extension page bridge ----------------------------------------------------
+// Extension pages run in a sandboxed iframe with an opaque origin: they can
+// script, but reach neither the panel DOM nor its cookies. They call the Host
+// only through this bridge — iframe postMessage → panel validates source,
+// token, path, and body → panel fetches with the session cookie → reply.
+// Everything in this block is pure so the trust chain is unit-tested without
+// a DOM.
+export const BRIDGE_PATH_PREFIX = '/api/media-convert';
+export const BRIDGE_MAX_BODY = 1024 * 1024;
+
+export interface BridgeMessage {
+  __mc: 1;
+  token: string;
+  id: number;
+  method: 'GET' | 'POST';
+  path: string;
+  body: unknown;
+}
+
+export function makeNonce(): string {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
+// The document preamble the iframe srcdoc starts with: nonce plus the
+// mcBridge client, closed properly for embedding in a script element. The
+// call timeout lives on this side; a call that never gets an answer rejects
+// instead of hanging the page's script.
+export function preambleOf(nonce: string): string {
+  return (
+    '<script>window.__MC_TOKEN__=' +
+    JSON.stringify(nonce) +
+    ';(function(){var p={},n=0;' +
+    'window.mcBridge={call:function(m,path,body){return new Promise(function(res,rej){var id=++n;' +
+    'var t=setTimeout(function(){delete p[id];rej(new Error("bridge timeout"))},30000);' +
+    'p[id]={res:res,rej:rej,t:t};' +
+    "parent.postMessage({__mc:1,token:window.__MC_TOKEN__,id:id,method:m,path:path,body:body==null?null:body},'*')})}};" +
+    "addEventListener('message',function(e){var d=e.data;if(!d||d.__mc!==1||!p[d.id])return;" +
+    'var q=p[d.id];delete p[d.id];clearTimeout(q.t);' +
+    'd.ok?q.res(d.json):q.rej(new Error("bridge "+(d.error||d.status)))})})();</script>'
+  );
+}
+
+// Shape, token, method, and path in one gate. The nonce is compared here, not
+// in the DOM listener, so the check stays unit-testable; event.source is the
+// other half of identity (see isExpectedSource).
+export function isBridgeMessage(v: unknown, token: string): v is BridgeMessage {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  const m = v as Record<string, unknown>;
+  if (m.__mc !== 1) return false;
+  if (m.token !== token) return false;
+  if (!Number.isInteger(m.id) || (m.id as number) <= 0) return false;
+  if (m.method !== 'GET' && m.method !== 'POST') return false;
+  if (typeof m.path !== 'string' || !m.path.startsWith(BRIDGE_PATH_PREFIX + '/')) return false;
+  return true;
+}
+
+export type BridgeCall =
+  | { ok: true; method: 'GET' | 'POST'; path: string; body?: string }
+  | { ok: false; error: string };
+
+// Only meaningful after isBridgeMessage: turns a validated message into the
+// fetch the panel performs. POST bodies are JSON and capped, so a page cannot
+// make the panel buffer unbounded memory.
+export function allowedBridgeCall(m: BridgeMessage): BridgeCall {
+  if (m.method === 'POST') {
+    const text = JSON.stringify(m.body === undefined ? null : m.body);
+    if (text.length > BRIDGE_MAX_BODY) return { ok: false, error: `请求体超过 ${BRIDGE_MAX_BODY} 字符上限` };
+    return { ok: true, method: 'POST', path: m.path, body: text };
+  }
+  return { ok: true, method: 'GET', path: m.path };
+}
+
+// Opaque-origin iframes report origin 'null', so message identity is the
+// source object itself: anything that is not this iframe's window is refused.
+export function isExpectedSource(source: unknown, contentWindow: unknown): boolean {
+  return source === contentWindow && source !== null;
+}
+
+export function bridgeReplyOf(
+  id: number,
+  result: { ok: true; status: number; json: unknown } | { ok: false; error: string },
+): Record<string, unknown> {
+  return result.ok
+    ? { __mc: 1, id, ok: true, status: result.status, json: result.json }
+    : { __mc: 1, id, ok: false, error: result.error };
 }

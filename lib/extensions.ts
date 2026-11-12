@@ -60,12 +60,22 @@ export interface RecipeAction extends ActionBase {
 
 export type ExtensionAction = MacroAction | RecipeAction;
 
+export interface ExtensionPage {
+  id: string;
+  title: LocalizedText;
+  // The page document fragment. It renders inside a sandboxed iframe (opaque
+  // origin, no reach into the panel's DOM or cookies), so scripts here are
+  // the feature, not a threat; the panel carries no CSP that would block them.
+  html: string;
+}
+
 export interface ExtensionManifest {
   version: 1;
   id: string;
   name: LocalizedText;
   description?: LocalizedText;
   actions: ExtensionAction[];
+  pages?: ExtensionPage[];
 }
 
 // The runtime descriptor planFor resolves presets against; deliberately not
@@ -87,6 +97,9 @@ export const LIMITS = {
   MAX_MANIFESTS: 16,
   MAX_ACTIONS_PER_MANIFEST: 16,
   MAX_ACTIONS_TOTAL: 32,
+  MAX_PAGES_PER_MANIFEST: 3,
+  MAX_PAGE_HTML: 262144,
+  MAX_PAGES_HTML_TOTAL: 1048576,
 } as const;
 
 const ID_RE = /^[a-z0-9-]{1,32}$/;
@@ -292,6 +305,19 @@ function checkAction(raw: unknown, kind: ConvertKind | null, what: string): Exte
   return `${what}.type 必须是 macro 或 recipe`;
 }
 
+function checkPage(raw: unknown, what: string): ExtensionPage | string {
+  if (!isObject(raw)) return `${what} 必须是对象`;
+  const id = typeof raw.id === 'string' ? raw.id : '';
+  if (!ID_RE.test(id)) return `${what}.id 必须匹配 [a-z0-9-]{1,32}`;
+  const titleError = checkLocalized(raw.title, `${what}.title`, true);
+  if (titleError) return titleError;
+  const html = typeof raw.html === 'string' ? raw.html : '';
+  if (html.length < 1 || html.length > LIMITS.MAX_PAGE_HTML) {
+    return `${what}.html 必须是 1-${LIMITS.MAX_PAGE_HTML} 字符的字符串`;
+  }
+  return { id, title: raw.title as LocalizedText, html };
+}
+
 function checkManifest(raw: unknown): ExtensionManifest | string {
   if (!isObject(raw)) return '扩展必须是对象';
   if (raw.version !== 1) return 'version 必须是 1';
@@ -301,23 +327,45 @@ function checkManifest(raw: unknown): ExtensionManifest | string {
   if (nameError) return nameError;
   const descError = checkLocalized(raw.description, 'description', false, 200);
   if (descError) return descError;
-  if (!Array.isArray(raw.actions) || raw.actions.length === 0) return 'actions 必须是非空数组';
-  if (raw.actions.length > LIMITS.MAX_ACTIONS_PER_MANIFEST) {
-    return `actions 超过每包上限 ${LIMITS.MAX_ACTIONS_PER_MANIFEST}`;
-  }
+  // A pack contributes actions, pages, or both. The historical message is
+  // kept for the neither-nor case so existing rejections stay byte-identical.
   const actions: ExtensionAction[] = [];
-  const seen = new Set<string>();
-  for (const [index, item] of raw.actions.entries()) {
-    // A manifest's actions share one media kind: presets group by kind in the
-    // panel, and a mixed-kind pack would make the grouping arbitrary.
-    const action = checkAction(item, actions.length ? actions[0].kind : null, `actions[${index}]`);
-    if (typeof action === 'string') return action;
-    if (seen.has(action.id)) return `actions[${index}]：动作 id "${action.id}" 重复`;
-    seen.add(action.id);
-    actions.push(action);
+  if (raw.actions !== undefined) {
+    if (!Array.isArray(raw.actions) || raw.actions.length === 0) return 'actions 必须是非空数组';
+    if (raw.actions.length > LIMITS.MAX_ACTIONS_PER_MANIFEST) {
+      return `actions 超过每包上限 ${LIMITS.MAX_ACTIONS_PER_MANIFEST}`;
+    }
+    const seen = new Set<string>();
+    for (const [index, item] of raw.actions.entries()) {
+      // A manifest's actions share one media kind: presets group by kind in the
+      // panel, and a mixed-kind pack would make the grouping arbitrary.
+      const action = checkAction(item, actions.length ? actions[0].kind : null, `actions[${index}]`);
+      if (typeof action === 'string') return action;
+      if (seen.has(action.id)) return `actions[${index}]：动作 id "${action.id}" 重复`;
+      seen.add(action.id);
+      actions.push(action);
+    }
+  } else if (raw.pages === undefined) {
+    return 'actions 必须是非空数组';
+  }
+  const pages: ExtensionPage[] = [];
+  if (raw.pages !== undefined) {
+    if (!Array.isArray(raw.pages) || raw.pages.length === 0) return 'pages 必须是非空数组';
+    if (raw.pages.length > LIMITS.MAX_PAGES_PER_MANIFEST) {
+      return `pages 超过每包上限 ${LIMITS.MAX_PAGES_PER_MANIFEST}`;
+    }
+    const seenPages = new Set<string>();
+    for (const [index, item] of raw.pages.entries()) {
+      const page = checkPage(item, `pages[${index}]`);
+      if (typeof page === 'string') return page;
+      if (seenPages.has(page.id)) return `pages[${index}]：页面 id "${page.id}" 重复`;
+      seenPages.add(page.id);
+      pages.push(page);
+    }
   }
   const manifest: ExtensionManifest = { version: 1, id, name: raw.name as LocalizedText, actions };
   if (raw.description !== undefined) manifest.description = raw.description as LocalizedText;
+  if (pages.length) manifest.pages = pages;
   return manifest;
 }
 
@@ -365,6 +413,15 @@ export function parseExtensions(raw: unknown): ParseResult {
   if (refs.size > LIMITS.MAX_ACTIONS_TOTAL) {
     return { ok: false, error: `动作总数超过上限 ${LIMITS.MAX_ACTIONS_TOTAL}` };
   }
+  // Pages ride the /status payload, so their total size is bounded here — a
+  // pack set that ships megabytes of HTML would slow every panel load.
+  let pageHtml = 0;
+  for (const manifest of manifests) {
+    for (const page of manifest.pages ?? []) pageHtml += page.html.length;
+  }
+  if (pageHtml > LIMITS.MAX_PAGES_HTML_TOTAL) {
+    return { ok: false, error: `扩展页 html 总量超过上限 ${LIMITS.MAX_PAGES_HTML_TOTAL}` };
+  }
   return { ok: true, manifests };
 }
 
@@ -411,6 +468,7 @@ export function statusOf(manifests: ExtensionManifest[]): {
   raw: string;
   description?: LocalizedText;
   actions: { ref: string; type: 'macro' | 'recipe'; kind: ConvertKind; label: LocalizedText; format: string }[];
+  pages?: { ref: string; title: LocalizedText; html: string }[];
 }[] {
   return manifests.map((manifest) => ({
     id: manifest.id,
@@ -424,5 +482,14 @@ export function statusOf(manifests: ExtensionManifest[]): {
       label: action.label,
       format: action.type === 'macro' ? action.params.format : action.format,
     })),
+    ...(manifest.pages
+      ? {
+          pages: manifest.pages.map((page) => ({
+            ref: refOf(manifest.id, page.id),
+            title: page.title,
+            html: page.html,
+          })),
+        }
+      : {}),
   }));
 }

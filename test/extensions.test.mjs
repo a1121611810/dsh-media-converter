@@ -354,3 +354,69 @@ bad(
   '宏的非法 codec 被拒',
 );
 console.log('extensions: 宏 codec 用例 ok');
+
+// --- extension pages（R6，第 3 期）-------------------------------------------
+const pageManifest = {
+  version: 1,
+  id: 'page-pack',
+  name: { zh: '页面包', en: 'Page pack' },
+  pages: [{ id: 'dash', title: { zh: '看板', en: 'Dashboard' }, html: '<h1>hi</h1><script>1</script>' }],
+};
+good([pageManifest], 'pages-only 包');
+good([{ ...macroManifest, pages: pageManifest.pages }], 'actions+pages 共存');
+{
+  const { manifests } = good([pageManifest], '投影输入');
+  assert.equal(manifests[0].pages.length, 1, 'pages-only 包的 pages 保留');
+  const list = statusOf(manifests);
+  ok(list[0].pages.length, 1, 'statusOf 带 pages');
+  ok(list[0].pages[0].ref, 'x:page-pack/dash', '页面 ref');
+  ok(list[0].pages[0].html.includes('<h1>hi</h1>'), true, 'statusOf 带 html');
+}
+const pages = (patch) => [{ ...pageManifest, pages: patch }];
+bad(pages([]), 'manifests[0]：pages 必须是非空数组', '空 pages');
+bad(pages('x'), 'manifests[0]：pages 必须是非空数组', 'pages 非数组');
+bad(
+  pages(Array.from({ length: 4 }, (_, i) => ({ ...pageManifest.pages[0], id: `p${i}` }))),
+  'manifests[0]：pages 超过每包上限 3',
+  '每包页数上限',
+);
+bad(
+  pages([{ ...pageManifest.pages[0], id: 'UPPER' }]),
+  'manifests[0]：pages[0].id 必须匹配 [a-z0-9-]{1,32}',
+  '页面 id 字符集',
+);
+bad(
+  pages([{ ...pageManifest.pages[0], title: { zh: '看板' } }]),
+  'manifests[0]：pages[0].title.en 必须是 1-64 字的非空字符串',
+  'title.en 缺失',
+);
+bad(
+  pages([{ ...pageManifest.pages[0], html: '' }]),
+  'manifests[0]：pages[0].html 必须是 1-262144 字符的字符串',
+  'html 空',
+);
+bad(
+  pages([{ ...pageManifest.pages[0], html: 'x'.repeat(262145) }]),
+  'manifests[0]：pages[0].html 必须是 1-262144 字符的字符串',
+  'html 超限',
+);
+bad(pages([pageManifest.pages[0], pageManifest.pages[0]]), 'manifests[0]：pages[1]：页面 id "dash" 重复', '页 id 重复');
+bad(
+  [{ version: 1, id: 'empty-pack', name: { zh: '空', en: 'Empty' } }],
+  'manifests[0]：actions 必须是非空数组',
+  '无 actions 也无 pages 仍拒',
+);
+{
+  const packs = [];
+  for (let i = 0; i < 5; i += 1) {
+    packs.push({
+      ...pageManifest,
+      id: `pages-${i}`,
+      pages: [{ id: 'p', title: { zh: 't', en: 't' }, html: 'x'.repeat(210000) }],
+    });
+  }
+  const r = parseExtensions(JSON.stringify(packs));
+  assert.equal(r.ok, false, 'html 总量超上限应拒收');
+  ok(r.error, '扩展页 html 总量超过上限 1048576', 'html 总量上限');
+}
+console.log('extensions: 扩展页用例 ok');

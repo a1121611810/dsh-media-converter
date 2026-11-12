@@ -671,6 +671,14 @@ const CSS = `
       .mc-history-dot.is-done { background: var(--dsw-alias-state-success-primary, #2ba471); }
       .mc-history-dot.is-error { background: var(--dsw-alias-state-error-primary, #d5483f); }
       .mc-history-dot.is-cancelled { background: var(--dsw-alias-state-warn-primary, #d5763f); }
+      .mc-ext-list { display: flex; flex-direction: column; gap: 8px; }
+      .mc-ext-card { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.3)); border-radius: 10px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+      .mc-ext-card:hover { background: var(--dsw-alias-bg-layer-2, rgba(128,128,128,0.08)); }
+      .mc-ext-card-title { font-weight: 600; }
+      .mc-ext-card-sub { font-size: 12px; color: var(--dsw-alias-label-tertiary, rgba(128,128,128,0.7)); }
+      .mc-ext-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+      .mc-ext-title { font-weight: 600; }
+      .mc-ext-frame { width: 100%; min-height: 60vh; border: 1px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.3)); border-radius: 10px; background: #fff; }
       .mc-history-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
       .mc-history-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
       .mc-history-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

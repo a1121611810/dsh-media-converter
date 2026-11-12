@@ -25,6 +25,12 @@ import {
   extensionActionItems,
   presetTargetsFor,
   upsertPresetPack,
+  allowedBridgeCall,
+  bridgeReplyOf,
+  isBridgeMessage,
+  isExpectedSource,
+  makeNonce,
+  preambleOf,
 } from '../dist/src/client/lib.js';
 
 // --- extension packs: pure projections of the /status payload -----------------
@@ -530,3 +536,78 @@ const tooMany = upsertPresetPack(fullRaw, 'image', 'one-more', { format: 'jpg' }
 assert.equal(tooMany.ok, false, '满 16 拒绝追加');
 assert.match(tooMany.error, /已满/);
 console.log('client-lib: 存预设用例 ok');
+
+// --- extension page bridge（R6，第 3 期）-------------------------------------
+// 桥是纯函数的信任链：形状/令牌/路径/体积累积逐一断言，突变注入时
+// 必须在这里转红（mutation-check G 家族的防线就在这些断言上）。
+const ok = (actual, expected, what) => assert.deepEqual(actual, expected, what);
+const TOKEN = 'nonce123';
+const bridgeMsg = (patch) => ({
+  __mc: 1,
+  token: TOKEN,
+  id: 1,
+  method: 'GET',
+  path: '/api/media-convert/status',
+  ...patch,
+});
+ok(isBridgeMessage(bridgeMsg(), TOKEN), true, '桥消息合法');
+ok(isBridgeMessage(bridgeMsg({ token: 'forged-nonce' }), TOKEN), false, 'token 错配拒');
+ok(isBridgeMessage(bridgeMsg({ token: 123 }), TOKEN), false, 'token 非字符串拒');
+ok(isBridgeMessage(bridgeMsg({ id: 0 }), TOKEN), false, 'id 0 拒');
+ok(isBridgeMessage(bridgeMsg({ id: -3 }), TOKEN), false, 'id 负拒');
+ok(isBridgeMessage(bridgeMsg({ id: 1.5 }), TOKEN), false, 'id 非整数拒');
+ok(isBridgeMessage(bridgeMsg({ method: 'PUT' }), TOKEN), false, 'method 拒');
+ok(isBridgeMessage(bridgeMsg({ method: 'get' }), TOKEN), false, 'method 大小写拒');
+ok(isBridgeMessage(bridgeMsg({ path: '/api/other/x' }), TOKEN), false, '外部路径拒');
+ok(isBridgeMessage(bridgeMsg({ path: '/api/media-convert-evil/x' }), TOKEN), false, '前缀仿冒路径拒');
+ok(isBridgeMessage(bridgeMsg({ path: '/api/media-convert' }), TOKEN), false, '无尾斜杠拒');
+ok(isBridgeMessage(bridgeMsg({ path: '../api/media-convert/status' }), TOKEN), false, '相对路径拒');
+ok(isBridgeMessage(bridgeMsg({ path: 42 }), TOKEN), false, 'path 非字符串拒');
+ok(isBridgeMessage(bridgeMsg({ __mc: 2 }), TOKEN), false, '__mc 拒');
+ok(isBridgeMessage(null, TOKEN), false, 'null 拒');
+ok(isBridgeMessage('msg', TOKEN), false, '字符串拒');
+ok(isBridgeMessage([bridgeMsg()], TOKEN), false, '数组拒');
+{
+  const get = allowedBridgeCall(bridgeMsg());
+  ok(get.ok, true, 'GET 放行');
+  ok(get.method, 'GET', 'GET method');
+  ok(get.body, undefined, 'GET 无 body');
+  const post = allowedBridgeCall(
+    bridgeMsg({ id: 2, method: 'POST', path: '/api/media-convert/config', body: { a: 1 } }),
+  );
+  ok(post.ok, true, 'POST 放行');
+  ok(post.body, '{"a":1}', 'POST body 序列化');
+  const noBody = allowedBridgeCall(bridgeMsg({ method: 'POST', body: undefined }));
+  ok(noBody.ok, true, 'POST 无 body 放行');
+  ok(noBody.body, 'null', 'POST 无 body 序列化为 null');
+  // 边界用绝对字面量而不是 BRIDGE_MAX_BODY 推导：测试的期望必须与常数
+  // 无关，突变把上限改大时这些用例才会真的转红（mutation-check G6 的防线）。
+  const big = allowedBridgeCall(bridgeMsg({ method: 'POST', body: { x: 'y'.repeat(1048576) } }));
+  ok(big.ok, false, 'body 超限拒');
+  const at = allowedBridgeCall(bridgeMsg({ method: 'POST', body: { x: 'y'.repeat(1048566) } }));
+  ok(at.ok, true, 'body 边界内放行');
+}
+{
+  const win = { name: 'iframe' };
+  ok(isExpectedSource(win, win), true, '同源对象放行');
+  ok(isExpectedSource({}, win), false, '不同对象拒');
+  ok(isExpectedSource(null, null), false, 'null===null 也拒');
+  ok(isExpectedSource('mc-forged-source', win), false, '伪造源字面量拒');
+}
+ok(
+  bridgeReplyOf(7, { ok: true, status: 200, json: { a: 1 } }),
+  { __mc: 1, id: 7, ok: true, status: 200, json: { a: 1 } },
+  '成功封套',
+);
+ok(bridgeReplyOf(7, { ok: false, error: 'nope' }), { __mc: 1, id: 7, ok: false, error: 'nope' }, '失败封套');
+{
+  const n1 = makeNonce();
+  const n2 = makeNonce();
+  assert.notEqual(n1, n2, 'nonce 唯一');
+  assert.ok(n1.length >= 8, 'nonce 长度');
+  ok(preambleOf(TOKEN).includes(JSON.stringify(TOKEN)), true, '前导脚本含 nonce');
+  ok(preambleOf(TOKEN).includes('mcBridge'), true, '前导脚本含桥');
+  ok(preambleOf(TOKEN).includes('</script>'), true, '前导脚本自闭合');
+  assert.notEqual(preambleOf(n1), preambleOf(n2), '不同 nonce 不同前导');
+}
+console.log('client-lib: 扩展页桥用例 ok');

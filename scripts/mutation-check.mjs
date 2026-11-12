@@ -1177,6 +1177,96 @@ const MUTANTS = [
     distAnchor: "'-frames:v', '2'",
     expect: 'png 单帧容器收到第 2 帧必报错；突变后截图任务失败 → e2e 断言红',
   },
+  // --- G 家族：扩展页沙箱桥（R6，第 3 期）------------------------------------
+  // 桥的安全面全部落在纯函数上（src/client/lib.ts），测试读的是
+  // dist/src/client/lib.js——build() 的 tsrs 每次都会重编它，无需改构建链。
+  {
+    id: 'G1',
+    name: '桥路径白名单放宽（前缀仿冒放行）',
+    source: 'src/client/lib.ts',
+    test: 'test/client-lib.test.mjs',
+    dist: 'dist/src/client/lib.js',
+    apply: (s) =>
+      replaceOnce(s, "!m.path.startsWith(BRIDGE_PATH_PREFIX + '/')", "!m.path.startsWith('/api/media-convert')"),
+    distAnchor: "'/api/media-convert')",
+    expect: '/api/media-convert-evil 前缀仿冒必须拒，突变后放行 → client-lib 桥用例红',
+  },
+  {
+    id: 'G2',
+    name: '桥 token 校验被绕过（错配令牌放行）',
+    source: 'src/client/lib.ts',
+    test: 'test/client-lib.test.mjs',
+    dist: 'dist/src/client/lib.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'if (m.token !== token) return false;',
+        "if (m.token !== token && String(m.token).startsWith('mc-forged')) return false;",
+      ),
+    distAnchor: "'mc-forged'",
+    expect: '错配 token 必须拒；突变后仅拒 mc-forged 前缀 → 错配用例红',
+  },
+  {
+    id: 'G3',
+    name: '扩展页 html 单页上限失效（256KB → 25MB）',
+    source: 'lib/extensions.ts',
+    test: 'test/extensions.test.mjs',
+    dist: 'dist/lib/extensions.js',
+    apply: (s) => replaceOnce(s, 'MAX_PAGE_HTML: 262144,', 'MAX_PAGE_HTML: 26214400,'),
+    distAnchor: 'MAX_PAGE_HTML: 26214400',
+    expect: '超 256KB 的页面必须拒收，突变后放行 → extensions html 超限用例红',
+  },
+  {
+    id: 'G4',
+    name: '扩展页每包页数上限失效（3 → 300）',
+    source: 'lib/extensions.ts',
+    test: 'test/extensions.test.mjs',
+    dist: 'dist/lib/extensions.js',
+    apply: (s) => replaceOnce(s, 'MAX_PAGES_PER_MANIFEST: 3,', 'MAX_PAGES_PER_MANIFEST: 300,'),
+    distAnchor: 'MAX_PAGES_PER_MANIFEST: 300',
+    expect: '每包超过 3 页必须拒收，突变后放行 → extensions 页数上限用例红',
+  },
+  {
+    id: 'G5',
+    name: '桥消息来源校验被绕过',
+    source: 'src/client/lib.ts',
+    test: 'test/client-lib.test.mjs',
+    dist: 'dist/src/client/lib.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'return source === contentWindow && source !== null;',
+        "return source === contentWindow && source !== null || source === 'mc-forged-source';",
+      ),
+    distAnchor: "'mc-forged-source'",
+    expect: '非本 iframe 窗口的来源必须拒；突变后伪造字面量放行 → isExpectedSource 用例红',
+  },
+  {
+    id: 'G6',
+    name: '桥 POST body 上限失效（1MB → 64MB）',
+    source: 'src/client/lib.ts',
+    test: 'test/client-lib.test.mjs',
+    dist: 'dist/src/client/lib.js',
+    apply: (s) =>
+      replaceOnce(s, 'export const BRIDGE_MAX_BODY = 1024 * 1024;', 'export const BRIDGE_MAX_BODY = 1024 * 1024 * 64;'),
+    distAnchor: '1024 * 1024 * 64',
+    expect: '超 1MB 的请求体必须拒，突变后 64MB 内全放行 → body 超限用例红',
+  },
+  {
+    id: 'G7',
+    name: '桥回复封套 ok 映射被翻转',
+    source: 'src/client/lib.ts',
+    test: 'test/client-lib.test.mjs',
+    dist: 'dist/src/client/lib.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        '? { __mc: 1, id, ok: true, status: result.status, json: result.json }',
+        "? { __mc: 1, id, ok: false, error: 'mc-flipped-reply' }",
+      ),
+    distAnchor: "'mc-flipped-reply'",
+    expect: '成功回复必须 ok:true 带 status/json；突变后成功也回 ok:false → 封套用例红',
+  },
 ];
 
 function build() {

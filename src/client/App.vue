@@ -56,13 +56,14 @@ import BatchCard from './vue/BatchCard.vue';
 import QueueGroup from './vue/QueueGroup.vue';
 import PathPicker from './vue/PathPicker.vue';
 import ActionGrid from './vue/ActionGrid.vue';
+import ExtPage from './vue/ExtPage.vue';
 
 const props = defineProps({
   t: { type: Function as PropType<((key: string) => string) | null>, default: null },
 });
 const t = (key: string): string => (props.t ? props.t(key) : key);
 
-type View = 'queue' | 'detail' | 'history';
+type View = 'queue' | 'detail' | 'history' | 'ext';
 type Operation = 'convert' | 'audio' | 'video';
 type ItemState = 'uploading' | 'ready' | 'converting' | 'cancelling' | 'cancelled' | 'done' | 'error' | 'skipped';
 type Phase = 'idle' | 'uploading' | 'converting' | 'ready' | 'done';
@@ -952,6 +953,29 @@ const presetLabelMap = computed(() => {
   }
   return map;
 });
+// Extension pages (sandboxed iframes) offered by installed packs; the page
+// list derives entirely from the /status projection, same as preset tiles.
+interface ExtPageTarget {
+  ref: string;
+  label: string;
+  sub: string;
+  html: string;
+}
+const extPages = computed<ExtPageTarget[]>(() => {
+  const out: ExtPageTarget[] = [];
+  for (const ext of status.value?.extensions ?? []) {
+    for (const page of ext.pages ?? []) {
+      out.push({ ref: page.ref, label: pickExtLabel(page.title), sub: pickExtLabel(ext.name), html: page.html });
+    }
+  }
+  return out;
+});
+const extPage = ref<ExtPageTarget | null>(null);
+function openExtList(): void {
+  extPage.value = null;
+  view.value = 'ext';
+}
+
 const persistOn = computed(() => status.value?.persistState === true);
 
 interface ServerQueueItem {
@@ -2344,6 +2368,9 @@ watch([action, panelOpen], async () => {
         <p class="mc-sub">{{ t('page.subtitle') }}</p>
         <div class="mc-tools">
           <button type="button" class="mc-btn mc-btn-ghost" @click="openHistory">{{ t('history.open') }}</button>
+          <button v-if="extPages.length" type="button" class="mc-btn mc-btn-ghost" @click="openExtList">
+            {{ t('ext.open') }}
+          </button>
         </div>
       </div>
 
@@ -2601,6 +2628,29 @@ watch([action, panelOpen], async () => {
       >
         {{ t('history.loadMore') }}
       </button>
+    </template>
+
+    <template v-else-if="view === 'ext'">
+      <div class="mc-head">
+        <h2 class="mc-title">{{ t('ext.open') }}</h2>
+        <div class="mc-tools">
+          <button type="button" class="mc-btn mc-btn-ghost" @click="view = 'queue'">{{ t('ext.back') }}</button>
+        </div>
+      </div>
+      <div v-if="!extPage" class="mc-ext-list">
+        <p v-if="!extPages.length" class="mc-muted mc-empty-actions">{{ t('ext.empty') }}</p>
+        <button v-for="page in extPages" :key="page.ref" type="button" class="mc-ext-card" @click="extPage = page">
+          <span class="mc-ext-card-title">{{ page.label }}</span>
+          <span class="mc-ext-card-sub">{{ page.sub }}</span>
+        </button>
+      </div>
+      <div v-else class="mc-ext-body">
+        <div class="mc-ext-bar">
+          <button type="button" class="mc-btn mc-btn-ghost" @click="extPage = null">{{ t('ext.back') }}</button>
+          <span class="mc-ext-title">{{ extPage.label }}</span>
+        </div>
+        <ExtPage :key="extPage.ref" :html="extPage.html" />
+      </div>
     </template>
 
     <template v-else-if="detailItem">
