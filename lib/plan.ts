@@ -89,6 +89,8 @@ export interface ConvertPlan {
   copy?: boolean;
   // True when the video encoder runs on the graphics card.
   hardware?: boolean;
+  // Appended on the software-decode retry (see HwBackend.retryArgs).
+  retryArgs?: string[];
   // 0 / undefined lets ffmpeg pick its own thread count.
   threads?: number;
   stemSuffix?: string;
@@ -468,7 +470,7 @@ export function copyArgs(kind: MediaKind, format: string, meta: MediaMeta | null
 // probe picks the first row this machine can really run; the row itself says
 // which encoder to call, how to keep the frames on the GPU, and the few rate
 // control options the encoder needs before -b:v means anything.
-export type HwBackendId = 'videotoolbox' | 'nvenc' | 'qsv' | 'amf';
+export type HwBackendId = 'videotoolbox' | 'nvenc' | 'qsv' | 'amf' | 'vaapi';
 
 export interface HwBackend {
   id: HwBackendId;
@@ -484,6 +486,9 @@ export interface HwBackend {
   decodeArgs: string[];
   // Encoder options that make -b:v/-maxrate mean what they say.
   rateArgs: string[];
+  // Args the software-decode retry adds: VAAPI-family encoders only eat
+  // device-memory frames, so the retry (which drops -hwaccel) must upload them.
+  retryArgs?: string[];
 }
 
 export const HW_BACKENDS: Record<HwBackendId, HwBackend> = {
@@ -529,6 +534,19 @@ export const HW_BACKENDS: Record<HwBackendId, HwBackend> = {
     // AMF would otherwise run constant QP and ignore -b:v entirely.
     rateArgs: ['-rc', 'vbr_peak'],
   },
+  vaapi: {
+    id: 'vaapi',
+    label: 'VAAPI',
+    encoder: 'h264_vaapi',
+    hevcEncoder: 'hevc_vaapi',
+    hwaccel: 'vaapi',
+    decodeArgs: ['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi'],
+    // Without an explicit mode VAAPI runs constant QP and ignores -b:v.
+    rateArgs: ['-rc_mode', 'VBR'],
+    retryArgs: ['-vf', 'format=nv12|vaapi,hwupload'],
+
+
+  },
 };
 
 // Hardware H.264. Only the containers that currently use libx264 are
@@ -568,7 +586,7 @@ export function hardwareFor(
   bitrate?: number,
   channels?: number,
   sampleRate?: number,
-): { args: string[]; inputArgs: string[] } | null {
+): { args: string[]; inputArgs: string[]; retryArgs?: string[] } | null {
   const audio = HW_AUDIO[format];
   if (kind !== 'video' || !audio) return null;
   const wantHevc = codec === 'hevc' && HEVC_FORMATS.has(format);
@@ -578,6 +596,7 @@ export function hardwareFor(
   const videoKbps = Math.min(12000, Math.max(1500, Math.round((totalKbps - 192) * hwFactorOf(q))));
   return {
     inputArgs: [...backend.decodeArgs],
+    ...(backend.retryArgs ? { retryArgs: backend.retryArgs } : {}),
     args: [
       '-c:v',
       encoder,

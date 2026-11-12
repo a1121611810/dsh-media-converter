@@ -27,7 +27,7 @@ DeepSeek Harness 的本地多媒体工具箱插件：转换、裁剪、提取音
 | 扩展平台 | 设置页导入 JSON 扩展包（数据包，非代码）：宏 = 固定参数组合的新动作，出现在文件详情动作网格与批量目标里；配方 = 覆盖内置格式的 ffmpeg 参数（白名单校验，quality 滑杆可映射）；页面 = 完整 HTML 页，在面板沙箱 iframe 里运行（不透明源、够不到面板 DOM 与 cookie，只能经白名单桥调用本插件 API；每包 ≤3 页、单页 ≤256KB、全包 html ≤1MB，上限均按字符计（CJK 内容字节约为 3 倍））；删除即恢复内置 |
 | 批量处理 | 按类型分组：视频/音频/图片各自一个目标；文本单独一段、不参与转换；读取中/未识别单独一段；逐组全选/质量、码率/声道采样率下拉，逐行进度/结果/取消 |
 | PTC 调度 | 批量转换可选：在 DSH 已注册模型里选一个（默认跟随主模型），模型只返回每文件 JSON 计划，宿主校验后交给 PTC 沙箱执行；整批按组多次求值，可超过单次 10 分钟上限；批次由宿主持有，切会话/关页面后继续；低推理档、分阶段进度；默认关，耗 token |
-| GPU / 直接拷贝 | 显卡硬编可勾选 GPU 编码（mp4/mov/mkv/flv/ts），探测到 HEVC 能力后还可选 H.264 / HEVC：macOS 走 VideoToolbox，Windows 走 NVENC / Intel Quick Sync / AMD AMF（自动探测后选一个）；兼容编码/容器直接 `-c copy`，不重编码 |
+| GPU / 直接拷贝 | 显卡硬编可勾选 GPU 编码（mp4/mov/mkv/flv/ts），探测到 HEVC 能力后还可选 H.264 / HEVC：macOS 走 VideoToolbox，Windows 走 NVENC / Intel Quick Sync / AMD AMF，Linux 走 VAAPI（自动探测后选一个；VAAPI 逐个尝试 /dev/dri/renderD* 设备节点）；兼容编码/容器直接 `-c copy`，不重编码 |
 | 取消 | 批量中途取消停当前 ffmpeg 并不再排队；单文件任务可随时取消；上传中也能中断传输 |
 
 界面分两层：**队列**是首页，负责一次处理多个文件；点某一行进入**文件详情**，那里是单个文件的操作页。
@@ -241,7 +241,7 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位。`t` 由平台按槽�
 - 批量提取只处理视频；不适用或没有音轨的行标「跳过」，不算失败。
 - 固定规则批量按车道并行（软编视频 1 路、GPU 3 路、轻任务 ≤4 路）；PTC 批量走自适应 CPU 队列（1–4 路，GPU 另限 2 路），并按组多次沙箱求值；上传中或处理中不能增删文件。
 - PTC 只用于批量转换且至少 2 个文件；默认关，开关不随页面保存。可选已注册模型；模型只返回每文件计划；计划按页调用主模型（每页最多 120 个文件，超过自动分页，消耗 token）；单次求值默认 2 分钟、最长 10 分钟；整批会拆成多组，因此可以超过 10 分钟。
-- PTC 不提供合并或 remux 参数；视频目标可调输出宽度上限与帧率（`fps`/`width`，gif 与普通视频容器，不放大；带尺寸/帧率的请求走软件编码，不骑 GPU 硬编）；GPU 覆盖 mp4/mov/mkv/flv/ts 的 H.264，探测到 HEVC 能力后同格式可选 HEVC（自动补 `hvc1` 标签；macOS 用 VideoToolbox，Windows 用 NVENC/QSV/AMF 三者之一）；直接拷贝只覆盖兼容的编码/容器矩阵，显式调 quality/bitrate/channels/sampleRate/fps/width/codec 任一即禁用拷贝走重编码。
+- PTC 不提供合并或 remux 参数；视频目标可调输出宽度上限与帧率（`fps`/`width`，gif 与普通视频容器，不放大；带尺寸/帧率的请求走软件编码，不骑 GPU 硬编）；GPU 覆盖 mp4/mov/mkv/flv/ts 的 H.264，探测到 HEVC 能力后同格式可选 HEVC（自动补 `hvc1` 标签；macOS 用 VideoToolbox，Windows 用 NVENC/QSV/AMF 三者之一，Linux 用 VAAPI）；直接拷贝只覆盖兼容的编码/容器矩阵，显式调 quality/bitrate/channels/sampleRate/fps/width/codec 任一即禁用拷贝走重编码。
 - 上传的临时副本保留 2 小时后自动删除。
 - Windows 上「在资源管理器中显示」用 `explorer /select,`，macOS 用 `open -R`，Linux 用 `xdg-open`（打开所在目录）。
 

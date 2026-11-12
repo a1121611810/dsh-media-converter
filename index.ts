@@ -557,11 +557,28 @@ function execRunner(ffmpeg: string): FfmpegRunner {
 // GPU, no driver), so only a real encode proves the machine can use it. The
 // rate options ride along: an option name this ffmpeg does not know fails the
 // check here instead of in the middle of a user's batch.
-function deviceArgs(backend: HwBackend, encoder: string): string[] {
+// Linux render nodes for VAAPI, in probe order. Absent /dev/dri (a container,
+// a GPU-less VM) yields an empty list: the probe then makes one plain attempt
+// and the switch stays hidden on failure — fail closed.
+function listVaapiDevices(): string[] {
+  try {
+    return fs
+      .readdirSync('/dev/dri')
+      .filter((name) => /^renderD\d+$/.test(name))
+      .map((name) => path.join('/dev/dri', name));
+  } catch {
+    return [];
+  }
+}
+
+function deviceArgs(backend: HwBackend, encoder: string, device = ''): string[] {
   return [
     '-hide_banner',
     '-loglevel',
     'error',
+    // Headless Linux owns no default VAAPI device: the caller hands over the
+    // render nodes it found and the probe encodes once per candidate.
+    ...(backend.id === 'vaapi' && device ? ['-vaapi_device', device] : []),
     '-f',
     'lavfi',
     '-i',
@@ -621,30 +638,35 @@ export async function probeFfmpegDevice(
   platform: string,
   build: FfmpegBuild,
   run: FfmpegRunner,
+  vaapiDevices: string[] = [],
 ): Promise<{ backend: HwBackend; hevc: boolean } | null> {
   // The first backend this machine can really run wins: a laptop with an
   // Intel GPU and an NVIDIA card uses the NVIDIA encoder. Only a real encode
   // counts — an encoder the binary carries but the GPU cannot run must not
   // put a GPU switch in front of the user.
-  const backend = await pickBackend(platform, build.encoders, build.hwaccels, async (candidate) => {
-    try {
-      await run(deviceArgs(candidate, candidate.encoder), DEVICE_TIMEOUT_MS);
-      return true;
-    } catch {
-      return false;
+  // VAAPI needs an explicit render node on headless machines: try each one
+  // the caller found, then once without the flag. Other backends attempt once.
+  const encodeWorks = async (candidate: HwBackend, encoder: string): Promise<boolean> => {
+    const devices = candidate.id === 'vaapi' ? [...vaapiDevices, ''] : [''];
+    for (const device of devices) {
+      try {
+        await run(deviceArgs(candidate, encoder, device), DEVICE_TIMEOUT_MS);
+        return true;
+      } catch {
+        // next render node, or the plain attempt
+      }
     }
-  });
+    return false;
+  };
+  const backend = await pickBackend(platform, build.encoders, build.hwaccels, (candidate) =>
+    encodeWorks(candidate, candidate.encoder),
+  );
   if (!backend) return null;
   // The HEVC check is gated on the encoder list: a binary that does not even
   // carry hevc_nvenc cannot gain the codec by passing a device check.
   let hevc = false;
   if (build.encoders.includes(backend.hevcEncoder)) {
-    try {
-      await run(deviceArgs(backend, backend.hevcEncoder), DEVICE_TIMEOUT_MS);
-      hevc = true;
-    } catch {
-      hevc = false;
-    }
+    hevc = await encodeWorks(backend, backend.hevcEncoder);
   }
   return { backend, hevc };
 }
@@ -1009,7 +1031,19 @@ export async function runJobAttempts(
   out: string,
   shouldStop: () => boolean,
 ): Promise<{ ok: boolean; size: number; error: string; ms: number; tries: number }> {
-  const plans = plan.hardware ? [plan, { ...plan, inputArgs: undefined }] : [plan];
+  // The retry drops the hardware decoder (a codec the GPU cannot decode must
+  // not sink the job); a backend's retryArgs ride along for encoders that
+  // need frames uploaded on the software-decode attempt (VAAPI).
+  const plans = plan.hardware
+    ? [
+        plan,
+        {
+          ...plan,
+          inputArgs: undefined,
+          args: plan.retryArgs ? [...plan.args, ...plan.retryArgs] : plan.args,
+        },
+      ]
+    : [plan];
   let lastError = '';
   let tries = 0;
   for (const next of plans) {
@@ -1119,7 +1153,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   const startDeviceProbe = (bin: string, build: FfmpegBuild): Promise<HwBackend | null> => {
     let pending = deviceCache.get(bin);
     if (!pending) {
-      pending = probeFfmpegDevice(process.platform, build, execRunner(bin)).catch(() => null);
+      pending = probeFfmpegDevice(process.platform, build, execRunner(bin), listVaapiDevices()).catch(() => null);
       deviceCache.set(bin, pending);
     }
     // The cache outlives the instance: whoever asks adopts the verdict, so a

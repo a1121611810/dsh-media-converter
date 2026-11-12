@@ -189,6 +189,7 @@ export function fontDirCandidates(platform: string): string[] {
 export function hardwareBackendsFor(platform: string): HwBackendId[] {
   if (platform === 'darwin') return ['videotoolbox'];
   if (platform === 'win32') return ['nvenc', 'amf', 'qsv'];
+  if (platform === 'linux') return ['vaapi'];
   return [];
 }
 

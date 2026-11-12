@@ -784,6 +784,16 @@ assert.deepEqual(toolActions([]), []);
 assert.deepEqual(ptcFormats('video', ['convert']), FORMATS.video);
 assert.deepEqual(ptcFormats('video', ['extract-audio']), []);
 
+// VAAPI rides the same table: the software-decode retry gets its frame-upload
+// args, and HEVC stays inside its container whitelist.
+const vaapiPlan = hardwareFor(HW_BACKENDS.vaapi, 'video', 'mp4', 10 * 1048576, 60);
+assert.ok(
+  vaapiPlan && (vaapiPlan.retryArgs || []).join(' ').includes('hwupload'),
+  'vaapi arms the retry upload filter',
+);
+const vaapiHevc = hardwareFor(HW_BACKENDS.vaapi, 'video', 'mkv', 10 * 1048576, 60, 90, 'hevc');
+assert.ok(vaapiHevc && vaapiHevc.args.includes('hevc_vaapi'), 'the hevc sibling encoder is chosen');
+
 console.log('plan.test.mjs: ok');
 
 // --- 选轨（R1）：convert 的 videoTrack/audioTrack ------------------------------

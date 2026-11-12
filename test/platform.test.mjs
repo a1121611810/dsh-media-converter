@@ -14,6 +14,7 @@ import {
   revealCommand,
   safeBaseName,
 } from '../dist/lib/platform.js';
+import { probeFfmpegDevice } from '../dist/index.js';
 
 // --- ffmpeg discovery ------------------------------------------------------
 assert.deepEqual(binaryNames('win32'), ['ffmpeg.exe']);
@@ -127,7 +128,7 @@ assert.equal(safeBaseName('.png', 'darwin'), 'output', 'a name that is only an e
 // whether this machine can really run one of them.
 assert.deepEqual(hardwareBackendsFor('darwin'), ['videotoolbox']);
 assert.deepEqual(hardwareBackendsFor('win32'), ['nvenc', 'amf', 'qsv']);
-assert.deepEqual(hardwareBackendsFor('linux'), [], 'no Linux backend yet');
+assert.deepEqual(hardwareBackendsFor('linux'), ['vaapi']);
 
 // --- picking the backend this machine can really run -------------------------
 // The device check is injected, so the decision is checked on any host.
@@ -218,5 +219,32 @@ assert.throws(
   /命名模板非法/,
   'unsanitized {name} is refused too',
 );
+
+// VAAPI probes walk the render-node list: one encode per candidate until one
+// answers, and a plain attempt last. No list at all = a single plain attempt.
+const vaapiBuild = { encoders: ['h264_vaapi', 'hevc_vaapi'], hwaccels: ['vaapi'], filters: [] };
+const vaapiAttempts = [];
+const vaapiChosen = await probeFfmpegDevice(
+  'linux',
+  vaapiBuild,
+  async (args) => {
+    vaapiAttempts.push(args);
+  },
+  ['/dev/dri/renderD128', '/dev/dri/renderD129'],
+);
+assert.equal(vaapiChosen.backend.id, 'vaapi');
+assert.ok(vaapiChosen.hevc, 'the hevc sibling passes its own device encode');
+assert.deepEqual(
+  vaapiAttempts[0].slice(vaapiAttempts[0].indexOf('-vaapi_device'), vaapiAttempts[0].indexOf('-vaapi_device') + 2),
+  ['-vaapi_device', '/dev/dri/renderD128'],
+  'the first candidate render node is tried with -vaapi_device',
+);
+const plainAttempts = [];
+await probeFfmpegDevice('linux', vaapiBuild, async (args) => {
+  plainAttempts.push(args);
+});
+const plainH264 = plainAttempts.filter((a) => a.includes('h264_vaapi'));
+assert.equal(plainH264.length, 1, 'no device list = one plain attempt per encoder');
+assert.ok(!plainH264[0].includes('-vaapi_device'), 'the plain attempt carries no device flag');
 
 console.log('platform.test.mjs: ok');

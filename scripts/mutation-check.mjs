@@ -168,8 +168,8 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        '      await run(deviceArgs(candidate, candidate.encoder), DEVICE_TIMEOUT_MS);\n      return true;\n    } catch {\n      return false;\n    }',
-        '      await run(deviceArgs(candidate, candidate.encoder), DEVICE_TIMEOUT_MS);\n      return true;\n    } catch {\n      return candidate.encoder.length > 0;\n    }',
+        '      } catch {\n        // next render node, or the plain attempt\n      }\n    }\n    return false;\n  };',
+        '      } catch {\n        // next render node, or the plain attempt\n      }\n    }\n    return candidate.encoder.length > 0;\n  };',
       ),
     distAnchor: 'candidate.encoder.length > 0',
     expect: '显卡不能编码时不得给用户 GPU 开关，突变后坏设备也报 nvenc → 测试红',
@@ -210,8 +210,8 @@ const MUTANTS = [
     apply: (s) =>
       replaceOnce(
         s,
-        'await run(deviceArgs(candidate, candidate.encoder), DEVICE_TIMEOUT_MS);',
-        'await run(deviceArgs(candidate, candidate.encoder), Math.max(DEVICE_TIMEOUT_MS, FFMPEG_TIMEOUT_MS));',
+        'await run(deviceArgs(candidate, encoder, device), DEVICE_TIMEOUT_MS);',
+        'await run(deviceArgs(candidate, encoder, device), Math.max(DEVICE_TIMEOUT_MS, FFMPEG_TIMEOUT_MS));',
       ),
     distAnchor: 'Math.max(DEVICE_TIMEOUT_MS',
     expect: '设备检查必须用比编码器列表更短的时钟，突变后驱动挂住会拖住面板 → 测试红',
@@ -243,7 +243,7 @@ const MUTANTS = [
         s,
         `    let pending = deviceCache.get(bin);
     if (!pending) {
-      pending = probeFfmpegDevice(process.platform, build, execRunner(bin)).catch(() => null);
+      pending = probeFfmpegDevice(process.platform, build, execRunner(bin), listVaapiDevices()).catch(() => null);
       deviceCache.set(bin, pending);
     }
     // The cache outlives the instance: whoever asks adopts the verdict, so a
@@ -256,7 +256,7 @@ const MUTANTS = [
     });`,
         `    let pending = deviceCache.get(bin);
     if (!pending) {
-      pending = probeFfmpegDevice(process.platform, build, execRunner(bin))
+      pending = probeFfmpegDevice(process.platform, build, execRunner(bin), listVaapiDevices())
         .catch(() => null)
         .then((verdict) => {
           hwBackend = verdict ? verdict.backend : null;
@@ -1363,6 +1363,28 @@ const MUTANTS = [
       ),
     distAnchor: 'const base = safeBaseName(name) + suffix;',
     expect: '模板命名必须生效；突变后恒用源名 → host tpl-n.jpg 断言红',
+  },
+  {
+    id: 'H5',
+    name: 'Linux 显卡后端被摘除（VAAPI 不出现）',
+    source: 'lib/platform.ts',
+    test: 'test/platform.test.mjs',
+    dist: 'dist/lib/platform.js',
+    apply: (s) =>
+      replaceOnce(s, "  if (platform === 'linux') return ['vaapi'];", "  if (platform === 'linux') return [];"),
+    distAnchor: "if (platform === 'linux')\n        return [];",
+    expect: 'linux 必须有 vaapi 后端；突变后回退空表 → platform.test linux 断言红',
+  },
+  {
+    id: 'H6',
+    name: 'VAAPI 软解重试的帧上传被摘除',
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    delete: true,
+    apply: (s) => replaceOnce(s, "    retryArgs: ['-vf', 'format=nv12|vaapi,hwupload'],\n", ''),
+    distAnchor: 'hwupload',
+    expect: 'vaapi retryArgs 必须存在；摘除后 plan.test 的 hwupload 断言红',
   },
 ];
 

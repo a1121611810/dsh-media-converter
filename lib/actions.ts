@@ -221,6 +221,7 @@ function convertPlan(
         kind: kindByExt(format),
         args: [...trackMaps, ...hw.args],
         inputArgs: hw.inputArgs,
+        ...(hw.retryArgs ? { retryArgs: hw.retryArgs } : {}),
         hardware: true,
       };
     }
