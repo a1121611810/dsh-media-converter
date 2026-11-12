@@ -544,8 +544,6 @@ export const HW_BACKENDS: Record<HwBackendId, HwBackend> = {
     // Without an explicit mode VAAPI runs constant QP and ignores -b:v.
     rateArgs: ['-rc_mode', 'VBR'],
     retryArgs: ['-vf', 'format=nv12|vaapi,hwupload'],
-
-
   },
 };
 
