@@ -1386,6 +1386,21 @@ const MUTANTS = [
     distAnchor: 'hwupload',
     expect: 'vaapi retryArgs 必须存在；摘除后 plan.test 的 hwupload 断言红',
   },
+  {
+    id: 'H7',
+    name: '恢复决策被翻成一律采用（文件被改过也信旧元数据）',
+    source: 'lib/state.ts',
+    test: 'test/state.test.mjs',
+    dist: 'dist/lib/state.js',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        "if (stored.mTimeMs === undefined || stat.mtimeMs !== stored.mTimeMs || stat.size !== stored.size) return 'reprobe';",
+        "if (stored.mTimeMs === undefined || stat.mtimeMs !== stored.mTimeMs || stat.size !== stored.size) return 'adopt';",
+      ),
+    distAnchor: "return 'adopt';",
+    expect: '被改动的文件必须重探测；突变后照旧采用 → host 重探测用例红（kind 仍是 image）',
+  },
 ];
 
 function build() {

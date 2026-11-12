@@ -28,6 +28,7 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import Schema from '@deepseek-ai/schemastery';
 import { decodeBase64Payload } from './lib/base64.js';
+import { parseState, restoreDecision, serializeState } from './lib/state.js';
 import { actionFor, ptcFormats, resolveFeatures, toolActions } from './lib/actions.js';
 import { applyQualityMap, entriesOf, parseExtensions, statusOf } from './lib/extensions.js';
 import type { ExtensionEntry, ExtensionManifest } from './lib/extensions.js';
@@ -405,6 +406,9 @@ export interface RunInfo {
   // chosen level live here, items carries the single display row.
   concatIds?: string[];
   concatHow?: 'copy' | 'encode';
+  // The batch knobs a restart resume needs (POST /run stashes them here).
+  quality?: number;
+  hardware?: boolean;
   items: RunItemInfo[];
 }
 
@@ -419,6 +423,9 @@ export interface Upload {
   kind: MediaKind;
   duration: number;
   size: number;
+  // File mtime at probe time; the restart restore matches it against the live
+  // file to decide whether the stored metadata is still fresh.
+  mTimeMs?: number;
   streams: StreamInfo;
   meta: MediaMeta;
   at: number;
@@ -1209,6 +1216,90 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   >();
   const children = new Set<ReturnType<typeof spawn>>();
 
+  // --- cross-restart state (R5) ---------------------------------------------
+  const stateFile = process.env.MEDIA_TOOLBOX_STATE || path.join(os.homedir(), '.media-toolbox-state.json');
+  const interruptedOuts = new Set<string>();
+  // Restored rows were created by a previous instance: their tmp copies must
+  // survive THIS one's unload (deleting them here is what broke the main
+  // instance's queue whenever a second apply disposed in the same process).
+  const restoredIds = new Set<string>();
+  const saveState = (): void => {
+    try {
+      const snapshot = {
+        schemaVersion: 1 as const,
+        uploads: [...uploads.values()].map((entry) => ({ ...entry })),
+        runs: [...runs.values()].filter((entry) => entry.state === 'running').map((entry) => ({ ...entry })),
+        latestRun,
+        ptcRates: { ...ptcRates },
+        interrupted: [...interruptedOuts].map((out) => ({ out })),
+      };
+      // Atomic: a crash mid-write must never leave a truncated state file.
+      const tmp = `${stateFile}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, serializeState(snapshot));
+      fs.renameSync(tmp, stateFile);
+    } catch {
+      // State is a courtesy, never a failure: a full disk must not sink a job.
+    }
+  };
+  const persist = (): void => saveState();
+  const resumedRuns: RunInfo[] = [];
+  try {
+    if (fs.existsSync(stateFile)) {
+      const parsed = parseState(fs.readFileSync(stateFile, 'utf8'));
+      if (parsed) {
+        for (const item of parsed.interrupted) {
+          // The job died with the host; its half-written output must not survive it.
+          fs.rmSync(item.out, { force: true });
+        }
+        for (const stored of parsed.uploads) {
+          const stat = fs.existsSync(stored.path) ? fs.statSync(stored.path) : null;
+          const decision = restoreDecision(stored, stat);
+          if (decision === 'drop') continue;
+          if (decision === 'reprobe' && ffmpeg && stat) {
+            restoredIds.add(stored.id);
+            void probeFile(stored.path, ffmpeg, ffprobe).then((fresh) => {
+              if (fresh) uploads.set(stored.id, { ...stored, ...fresh, size: stat.size, mTimeMs: stat.mtimeMs });
+            });
+            continue;
+          }
+          restoredIds.add(stored.id);
+          uploads.set(stored.id, stored);
+        }
+        for (const run of parsed.runs) {
+          for (const item of run.items) {
+            if (item.state === 'converting' || item.state === 'waiting') {
+              // ffmpeg cannot resume mid-frame: interrupted rows requeue whole.
+              item.state = 'waiting';
+              item.percent = null;
+            }
+          }
+          runs.set(run.id, run);
+          resumedRuns.push(run);
+        }
+        latestRun = parsed.latestRun;
+        Object.assign(ptcRates, parsed.ptcRates);
+      } else {
+        // Keep the corrupt file for forensics, start empty — never refuse to boot.
+        fs.renameSync(stateFile, `${stateFile}.corrupt-${Date.now().toString(36)}`);
+      }
+    }
+  } catch {
+    // Defense in depth: a broken state file never blocks startup.
+  }
+  // The executors are const-defined below: resume on the next tick, when apply
+  // has finished and every helper exists.
+  const resumeTimer = setTimeout(() => {
+    for (const run of resumedRuns) {
+      if (run.state !== 'running') continue;
+      if (run.concatIds) void executeConcatRun(run, run.quality ?? 90);
+      else if (run.kind === 'ptc') void executePtcRun(run, null, run.quality ?? 90, run.hardware ?? false, true);
+      else void executeRun(run, run.quality ?? 90, run.hardware ?? false);
+    }
+  }, 0);
+  resumeTimer.unref();
+  const stateTimer = setInterval(saveState, 60_000);
+  stateTimer.unref();
+
   const webServer = ctx.get('webServer');
   if (!webServer) {
     // inject should make this impossible; say so loudly if it ever happens.
@@ -1317,6 +1408,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             : '';
     if (!key) return;
     ptcRates[key] = blendPtcRate(ptcRates[key], mediaSeconds, wallMs);
+    persist();
   };
 
   const startJob = async (
@@ -1327,6 +1419,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   ): Promise<{ job: Job; done: Promise<void> }> => {
     await fsp.mkdir(outDir, { recursive: true });
     const out = await uniqueOutput(name || upload.name, plan.ext, plan.stemSuffix || '');
+    interruptedOuts.add(out);
     const job: Job = {
       id: `j${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
       uploadId: upload.id,
@@ -1406,6 +1499,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           spawnError = String((err && err.message) || err);
         });
         child.on('close', async (code) => {
+          interruptedOuts.delete(out);
           children.delete(child);
           const entry = controllers.get(job.id);
           if (entry && entry.killTimer) clearTimeout(entry.killTimer);
@@ -1510,6 +1604,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   const settleRun = (run: RunInfo, state: RunState): void => {
     run.state = state;
     run.finishedAt = Date.now();
+    persist();
   };
 
   const executeConcatRun = async (run: RunInfo, quality: number): Promise<void> => {
@@ -1725,6 +1820,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     requested: { provider: string; model: string } | null,
     quality: number,
     hardware: boolean,
+    restored = false,
   ): Promise<void> => {
     // The backend must be settled before the plans are built, or a batch
     // that asked for hardware encoding would quietly fall back to the CPU.
@@ -1758,11 +1854,29 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       const bitrates = new Map(planned.map((item) => [item.id, item.bitrate]));
       const channelMap = new Map(planned.map((item) => [item.id, item.channels]));
       const rateMap = new Map(planned.map((item) => [item.id, item.sampleRate]));
-      const model = await resolvePtcModel(requested);
+      // A restored run already carries its formats and knobs (persisted after
+      // the model merged them, before the restart): planning replays them
+      // instead of spending another model call.
+      const model = restored ? null : await resolvePtcModel(requested);
       run.stage = 'planning';
       const modelStart = Date.now();
-      const plan = await collectPtcPlan(run, files, targets, bitrates, channelMap, rateMap, quality, model, controller);
-      run.modelMs = Date.now() - modelStart;
+      let plan: Awaited<ReturnType<typeof collectPtcPlan>>;
+      if (restored) {
+        plan = planned.map((item) => ({
+          id: item.id,
+          format: item.preset || item.format,
+          ...(item.quality !== undefined ? { quality: item.quality } : {}),
+          ...(item.bitrate !== undefined ? { bitrate: item.bitrate } : {}),
+          ...(item.channels !== undefined ? { channels: item.channels } : {}),
+          ...(item.sampleRate !== undefined ? { sampleRate: item.sampleRate } : {}),
+          ...(item.fps !== undefined ? { fps: item.fps } : {}),
+          ...(item.width !== undefined ? { width: item.width } : {}),
+          ...(item.codec !== undefined ? { codec: item.codec } : {}),
+        }));
+      } else {
+        plan = await collectPtcPlan(run, files, targets, bitrates, channelMap, rateMap, quality, model!, controller);
+      }
+      run.modelMs = restored ? run.modelMs : Date.now() - modelStart;
       for (const row of plan) {
         const item = run.items.find((candidate) => candidate.id === row.id);
         if (item) {
@@ -3214,7 +3328,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             await pipeline(req, counter, fs.createWriteStream(file));
             // A body that stops early would only fail later as an
             // "unrecognisable media file", so compare it with what was promised.
-            const written = (await fsp.stat(file)).size;
+            const probeStat = await fsp.stat(file);
+            const written = probeStat.size;
             const expected = announced;
             if (expected && written !== expected) {
               await fsp.rm(file, { force: true }).catch(() => {});
@@ -3239,11 +3354,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               kind: probed.kind,
               duration: probed.duration,
               size: written,
+              mTimeMs: probeStat.mtimeMs,
               streams: probed.streams,
               meta: probed.meta,
               at: Date.now(),
             };
             uploads.set(id, upload);
+            persist();
             json(
               res,
               200,
@@ -3436,6 +3553,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                   kind: result.kind,
                   duration: result.duration,
                   size: stat.size,
+                  mTimeMs: stat.mtimeMs,
                   streams: result.streams,
                   meta: result.meta,
                   at: Date.now(),
@@ -3456,6 +3574,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               }
             });
             await Promise.all(workers);
+            persist();
             // Four workers finish in any order; the panel shows the rows in
             // the order it receives them, so answer in path order.
             uploadsOut.sort((a, b) => a.path.localeCompare(b.path));
@@ -3476,6 +3595,16 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             const body = await readJson(req);
             const upload = body.id ? uploads.get(body.id) : undefined;
             if (!upload) return json(res, 200, errorPayload('文件已失效，请重新选择'));
+            // The tmp copy can outlive its file (TTL sweep, a host restart that
+            // could not restore it): fail here with a sentence, not inside
+            // ffmpeg's stderr.
+            if (
+              !(await fsp.stat(upload.path).then(
+                () => true,
+                () => false,
+              ))
+            )
+              return json(res, 200, errorPayload('文件已被清理（临时副本有 2 小时保留期），请重新选择'));
             // Concat is a run-level job (see /run): a bare /convert ask gets a
             // pointer instead of the plan-less registry entry's generic error.
             if (String(body.mode || '') === 'concat') {
@@ -3691,6 +3820,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                 at: Date.now(),
                 concatIds,
                 concatHow: how,
+                quality: Number(body.quality ?? 90),
+                hardware: false,
                 items: [
                   {
                     id: list[0].id,
@@ -3713,6 +3844,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               };
               runs.set(run.id, run);
               latestRun = run.id;
+              persist();
               json(res, 200, { ok: true, run });
               void executeRun(run, Number(body.quality ?? 90), false);
               return;
@@ -3782,6 +3914,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               kind: ptc ? 'ptc' : 'plain',
               ...(ptc ? { stage: 'planning' as const } : {}),
               at: Date.now(),
+              quality: Number(body.quality ?? 90),
+              hardware: Boolean(body.hardware),
               items,
             };
             runs.set(run.id, run);
@@ -4131,12 +4265,14 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       }),
     ];
     return () => {
+      persist();
+      clearInterval(stateTimer);
       clearInterval(pruneTimer);
       disposers.forEach((dispose) => dispose());
       for (const child of children) child.kill('SIGTERM');
       if (cpuTimer) clearInterval(cpuTimer);
       for (const upload of uploads.values()) {
-        if (upload.owned) fs.rm(upload.path, { force: true }, () => {});
+        if (upload.owned && !restoredIds.has(upload.id)) fs.rm(upload.path, { force: true }, () => {});
       }
       uploads.clear();
       jobs.clear();

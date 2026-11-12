@@ -243,6 +243,7 @@ React 只剩一个壳：把 `<media-panel>` 挂进槽位。`t` 由平台按槽�
 - PTC 只用于批量转换且至少 2 个文件；默认关，开关不随页面保存。可选已注册模型；模型只返回每文件计划；计划按页调用主模型（每页最多 120 个文件，超过自动分页，消耗 token）；单次求值默认 2 分钟、最长 10 分钟；整批会拆成多组，因此可以超过 10 分钟。
 - PTC 不提供合并或 remux 参数；视频目标可调输出宽度上限与帧率（`fps`/`width`，gif 与普通视频容器，不放大；带尺寸/帧率的请求走软件编码，不骑 GPU 硬编）；GPU 覆盖 mp4/mov/mkv/flv/ts 的 H.264，探测到 HEVC 能力后同格式可选 HEVC（自动补 `hvc1` 标签；macOS 用 VideoToolbox，Windows 用 NVENC/QSV/AMF 三者之一，Linux 用 VAAPI）；直接拷贝只覆盖兼容的编码/容器矩阵，显式调 quality/bitrate/channels/sampleRate/fps/width/codec 任一即禁用拷贝走重编码。
 - 上传的临时副本保留 2 小时后自动删除。
+- DSH 重启后队列与未完成的批次自动恢复（状态存 `~/.media-toolbox-state.json`）：中断的转换从头重跑（ffmpeg 无法断点续转），半成品会被清理；文件被改动的行重新探测，损坏的状态文件改名保留、空状态启动。
 - Windows 上「在资源管理器中显示」用 `explorer /select,`，macOS 用 `open -R`，Linux 用 `xdg-open`（打开所在目录）。
 
 ## 排查

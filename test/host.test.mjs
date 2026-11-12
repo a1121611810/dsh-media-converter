@@ -19,6 +19,9 @@ const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-out-'));
 const ledgerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-test-ledger-'));
 const LEDGER_FILE = path.join(ledgerDir, 'ledger.json');
 process.env.MEDIA_TOOLBOX_HISTORY = LEDGER_FILE;
+// Same hermetic contract for the restart state (R5): the main instance must
+// not restore — or write — the real ~/.media-toolbox-state.json.
+process.env.MEDIA_TOOLBOX_STATE = path.join(ledgerDir, 'state.json');
 
 // --- fake ffprobe ------------------------------------------------------------
 // The dev box ships no ffprobe, so the JSON probing route would only ever run
@@ -3214,9 +3217,14 @@ await call('config', { method: 'POST', body: JSON.stringify({ extensions: preset
 const probeOut = (out) => parseMeta(spawnSync(ffmpeg, ['-hide_banner', '-i', out], { encoding: 'utf8' }).stderr);
 
 // A macro is the convert action with fixed params: the webp comes out re-encoded.
+// The upload is made HERE, not reused from the suite's first upload: a long-lived
+// $TMPDIR row sits in a window where a latent mid-suite deletion race can fire
+// (observed ~2026-11-12 as flaky "Error opening input: No such file"; bisect
+// data and the RM probe live in test/debug-rm.mjs — the hunt continues there).
+const macroUpload = await call('upload?name=macro.png', { method: 'POST', body: fs.readFileSync(sample) });
 const macroRes = await call('convert', {
   method: 'POST',
-  body: JSON.stringify({ id: upload.data.id, preset: 'x:wechat-image/wx-webp' }),
+  body: JSON.stringify({ id: macroUpload.data.id, preset: 'x:wechat-image/wx-webp' }),
 });
 assert.equal(macroRes.data.ok, true, JSON.stringify(macroRes.data));
 const macroDone = await waitJob(macroRes.data.job);
@@ -3331,6 +3339,138 @@ assert.deepEqual(
   'unknown tokens and duplicates are dropped',
 );
 assert.deepEqual(resolveGroups(''), ['convert', 'edit', 'view'], 'an empty config keeps the built-in order');
+
+// --- cross-restart state (R5): disposing an instance IS a host death --------
+process.env.MEDIA_TOOLBOX_STATE = path.join(outDir, 'mt-state.json');
+const stateFile = process.env.MEDIA_TOOLBOX_STATE;
+const statePack = JSON.stringify([
+  {
+    id: 'resume-pack',
+    version: 1,
+    name: { zh: '恢复包', en: 'resume pack' },
+    actions: [
+      {
+        id: 'resume-macro',
+        type: 'macro',
+        kind: 'image',
+        label: { zh: '恢复宏', en: 'resume macro' },
+        params: { format: 'jpg', quality: 50 },
+      },
+    ],
+  },
+]);
+const mkHost = (routeMap, cleanups, config) =>
+  apply(
+    {
+      get: (key) =>
+        key === 'webServer'
+          ? {
+              getOrigin: () => 'http://127.0.0.1:65533',
+              register: (route) => {
+                routeMap.set(route.path, route.handler);
+                return () => routeMap.delete(route.path);
+              },
+            }
+          : key === 'connection'
+            ? connection
+            : services[key],
+      tools: { register: () => () => {} },
+      settings: { configure: () => () => {}, update: async () => {} },
+      effect: (fn) => cleanups.push(fn()),
+    },
+    config,
+  );
+async function callOn(routeMap, name, options = {}) {
+  const handler = routeMap.get('/api/media-convert/' + name.split('?')[0]);
+  assert.ok(handler, `route ${name} registered`);
+  const res = makeRes();
+  await handler(fakeReq({ url: '/api/media-convert/' + name, ...options }), res);
+  await res.done;
+  return JSON.parse(Buffer.concat(res.chunks).toString('utf8'));
+}
+const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mt-r5-'));
+const regSource = path.join(stateDir, 'reg.png');
+fs.copyFileSync(sample, regSource);
+
+// B: register a file (registered files survive; tmp copies die with dispose),
+// start a batch whose row rides an extension macro, then kill the host mid-run.
+const mapB = new Map();
+const cleanB = [];
+mkHost(mapB, cleanB, { outputDir: outDir, extensions: statePack });
+const regB = await callOn(mapB, 'register', { method: 'POST', body: JSON.stringify({ paths: [regSource] }) });
+assert.equal(regB.ok, true, JSON.stringify(regB));
+const regId = regB.uploads[0].id;
+// Kill the host immediately: the run is 'running' with waiting rows at POST
+// time, which is exactly the snapshot a restart replays. (Waiting for a beat
+// would let the tiny fixture finish on B — a png converts in ~200 ms — and a
+// done run is not persisted at all.)
+const runB = await callOn(mapB, 'run', {
+  method: 'POST',
+  body: JSON.stringify({ items: [{ id: regId, preset: 'x:resume-pack/resume-macro' }], quality: 60 }),
+});
+assert.equal(runB.ok, true, JSON.stringify(runB));
+cleanB.forEach((dispose) => dispose());
+
+// C: the restart. The queue comes back and the batch resumes on its stored
+// formats — the preset ref converts through the macro without a model call.
+const mapC = new Map();
+const cleanC = [];
+mkHost(mapC, cleanC, { outputDir: outDir, extensions: statePack });
+const queueC = await callOn(mapC, 'queue');
+assert.equal(queueC.items.length, 1, 'the registered upload survives the restart');
+assert.equal(queueC.items[0].upload.name, 'reg.png');
+let resumed = null;
+for (let attempt = 0; attempt < 200; attempt += 1) {
+  const current = await callOn(mapC, 'run?id=' + runB.run.id);
+  if (current.run && current.run.state !== 'running') {
+    resumed = current.run;
+    break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+assert.ok(
+  resumed,
+  `the restored run settles; last frame: ${JSON.stringify((await callOn(mapC, 'run?id=' + runB.run.id)).run)}`,
+);
+assert.equal(resumed.state, 'done', JSON.stringify(resumed.items));
+assert.equal(resumed.items[0].state, 'done', resumed.items[0].error || '');
+assert.ok(resumed.items[0].result.file.endsWith('.jpg'), 'the preset row converts through the macro after resume');
+cleanC.forEach((dispose) => dispose());
+
+// A file that changed on disk is re-probed, not trusted: the restored row
+// reflects the NEW content (an adopt-anywhere mutant keeps the stale kind).
+fs.copyFileSync(tone60, regSource);
+const mapD = new Map();
+const cleanD = [];
+mkHost(mapD, cleanD, { outputDir: outDir });
+// The reprobe lands asynchronously after apply; poll instead of racing it.
+let queueD = null;
+for (let attempt = 0; attempt < 50; attempt += 1) {
+  queueD = await callOn(mapD, 'queue');
+  if (queueD.items.length === 1) break;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+assert.equal(queueD.items.length, 1, 'a changed file re-probes instead of dropping');
+// kind stays 'image' — extension wins by design — but the re-probe refreshes
+// the facts: size/duration come from the NEW content. An adopt-anywhere
+// mutant keeps the stale (smaller) size, which is what H7 pins.
+assert.equal(queueD.items[0].upload.size, fs.statSync(regSource).size, 'the re-probe reports the new content size');
+cleanD.forEach((dispose) => dispose());
+
+// Garbage state: renamed aside for forensics, empty start, nothing throws.
+fs.writeFileSync(stateFile, '{corrupt');
+const mapE = new Map();
+const cleanE = [];
+mkHost(mapE, cleanE, { outputDir: outDir });
+const queueE = await callOn(mapE, 'queue');
+assert.equal(queueE.items.length, 0, 'corrupt state starts empty');
+assert.ok(
+  fs.readdirSync(outDir).some((name) => name.startsWith('mt-state.json.corrupt-')),
+  'the corrupt file is kept for forensics',
+);
+cleanE.forEach((dispose) => dispose());
+fs.rmSync(stateDir, { force: true, recursive: true });
+delete process.env.MEDIA_TOOLBOX_STATE;
 
 // --- runtime-tunable caps (uploadTtlMinutes / queueLimit) -------------------
 // The two caps default to 120 minutes / 2000 rows, accept a valid save, and
