@@ -83,7 +83,8 @@ const MUTANTS = [
   {
     id: 'A2',
     name: '/status 不回传真实 queueLimit（恒 0）',
-    apply: (s) => replaceOnce(s, '  queueLimit,\n  instanceId,', '  queueLimit: queueLimit && 0,\n  instanceId,'),
+    apply: (s) =>
+      replaceOnce(s, '  queueLimit,\n  nameTemplate,\n  instanceId,', '  queueLimit: queueLimit && 0,\n  nameTemplate,\n  instanceId,'),
     distAnchor: 'queueLimit && 0',
     expect: '/status 的 queueLimit 必须是 2000，突变后为 0',
   },
@@ -1347,6 +1348,18 @@ const MUTANTS = [
     distAnchor: 'Math.max(start + 1',
     expect: '首页必须恰好 120 行；突变后 119 行 → 分页用例 pageLines 断言红',
   },
+  {
+    id: 'H4',
+    name: '命名模板被旁路（输出仍用源名）',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'const base = renderNameTemplate(nameTemplate, safeBaseName(name), extension) + suffix;',
+        'const base = safeBaseName(name) + suffix;',
+      ),
+    distAnchor: 'const base = safeBaseName(name) + suffix;',
+    expect: '模板命名必须生效；突变后恒用源名 → host tpl-n.jpg 断言红',
+  },
 ];
 
 function build() {
@@ -1397,7 +1410,10 @@ function clearBackup() {
 /** @param {string} testFile @returns {{ code: number, out: string }} */
 function runTest(testFile) {
   try {
-    execFileSync('node', [testFile], { cwd: ROOT, stdio: 'pipe' });
+    // 12 minutes: a scheduling-breaking mutant can make the heavy suites walk
+    // nearly serially, but a true hang must not stall the whole run — kill it
+    // and let the loop record the failure.
+    execFileSync('node', [testFile], { cwd: ROOT, stdio: 'pipe', timeout: 12 * 60 * 1000, killSignal: 'SIGKILL' });
     return { code: 0, out: '' };
   } catch (err) {
     return {
@@ -1417,7 +1433,28 @@ function firstAssertion(out) {
 // red is reported as a broken baseline instead of a mutant that did its job.
 const baselineTests = [...new Set([DEFAULTS.test, ...MUTANTS.map((m) => m.test || DEFAULTS.test)])];
 
+// DRYRUN=1: prove every attack still lands on the current source. A stale
+// anchor is an attack-script bug; this finds the whole class in seconds
+// instead of after a full run.
+if (process.env.DRYRUN) {
+  const stale = [];
+  for (const m of MUTANTS) {
+    try {
+      m.apply(originalOf(pathOf(m, 'source')));
+    } catch (err) {
+      stale.push(`${m.id}(${m.name}): ${err.message}`);
+    }
+  }
+  if (stale.length) {
+    console.error(`[mutation] ${stale.length} 个源码锚点已失效：\n${stale.join('\n')}`);
+    process.exit(1);
+  }
+  console.log('[mutation] DRYRUN：全部源码锚点可命中');
+  process.exit(0);
+}
+
 let failures = 0;
+const failed = [];
 try {
   if (prepareSources()) {
     console.log('[mutation] 上一次运行被中断，已从备份恢复源码');
@@ -1451,6 +1488,7 @@ try {
     } catch (err) {
       console.error(`[mutation] ${m.id} 源码锚点断言失败（攻击脚本本身坏了，不许弱化被测代码）：${err.message}`);
       failures += 1;
+      failed.push(`${m.id} 源码锚点失效`);
       continue;
     }
     writeFileRobust(source, mutated);
@@ -1459,6 +1497,7 @@ try {
     } catch {
       console.error(`[mutation] ${m.id} 构建失败——攻击形态会让 TS 编译炸（如 TS6133 参数未用），换等价语义突变`);
       failures += 1;
+      failed.push(`${m.id} 构建失败`);
       // 必须当场恢复：残留的坏突变会让后续所有用例连坐构建失败（B1 曾
       // 拖垮 B2–B8），把一处攻击脚本问题放大成一片。
       writeFileRobust(source, original);
@@ -1469,6 +1508,7 @@ try {
     if (m.delete ? present : !present) {
       console.error(`[mutation] ${m.id} dist 层断言失败：产物${present ? '仍含' : '不含'}锚点，测试读的不是这份构建`);
       failures += 1;
+      failed.push(`${m.id} dist 锚点`);
       continue;
     }
     // test is already absolute (pathOf); joining ROOT again would hand node a
@@ -1482,11 +1522,13 @@ try {
     } else if (result.code !== 0) {
       console.error(`[mutation] ${m.id} 非断言失败（崩溃/超时），视同攻击形态错误：${firstAssertion(result.out)}`);
       failures += 1;
+      failed.push(`${m.id} 非断言失败`);
     } else {
       console.error(`[mutation] ${m.id} 假绿 ✗  ${m.name}`);
       console.error(`         ${m.expect}`);
       console.error(`         突变后测试仍全绿——该用例没有守护住行为！\n`);
       failures += 1;
+      failed.push(`${m.id} 假绿`);
     }
     writeFileRobust(source, original);
   }
@@ -1499,6 +1541,7 @@ try {
     if (finalRun.code !== 0) {
       console.error(`[mutation] 恢复后基线不绿（${test}）！${firstAssertion(finalRun.out)}`);
       failures += 1;
+      failed.push(`恢复后基线 ${test}`);
     }
   }
 } finally {
@@ -1508,6 +1551,7 @@ try {
 
 if (failures > 0) {
   console.error(`[mutation] ${failures} 处失败：存在假绿或攻击脚本自身问题`);
+  console.error(`[mutation] 失败清单：${failed.join('；')}`);
   process.exit(1);
 }
 console.log('[mutation] 全部突变按预期转红，基线复绿。测试是真的在守护行为。');
