@@ -33,7 +33,14 @@ import {
   unavailableTarget,
   withoutKnownUploads,
 } from './lib.js';
-import { extensionActionItems, presetExtrasUnsupported, presetTargetsFor, upsertPresetPack } from './lib.js';
+import {
+  extensionActionItems,
+  presetExtrasUnsupported,
+  presetTargetsFor,
+  runSummary,
+  SUMMARY_WINDOW_MS,
+  upsertPresetPack,
+} from './lib.js';
 import type { ConvertRequest, ConvertibleKind, DecodedPayload, PresetParams, QueueRow, ServerJob } from './lib.js';
 import type { MediaKind, StreamMeta } from '../../lib/plan.js';
 import type {
@@ -1070,12 +1077,30 @@ async function restoreRun() {
   } catch {
     return;
   }
-  // Only a live run is restored: a finished one is already reflected in the
-  // per-row jobs /queue returned, and re-applying it could overwrite a newer
-  // conversion the user started afterwards.
-  if (disposed || !run || run.state !== 'running') return;
-  applyRun(run);
-  void pollRun(run.id);
+  // Only a live run is restored wholesale: a finished one is already reflected
+  // in the per-row jobs /queue returned, and re-applying it could overwrite a
+  // newer conversion the user started afterwards.
+  if (disposed || !run) return;
+  if (run.state === 'running') {
+    applyRun(run);
+    void pollRun(run.id);
+    return;
+  }
+  // A batch that finished within the window: restore the summary line only,
+  // never the rows — they may already carry newer conversions the user ran
+  // afterwards (the same reason a finished run is not re-applied above).
+  if (run.finishedAt && Date.now() - run.finishedAt < SUMMARY_WINDOW_MS) applyRunSummary(run);
+}
+
+// What a finished run leaves on screen: timing, the error line, and the
+// done/failed/skipped/cancelled counts. Shared by the live poll's final apply
+// and by a rebuilt page, which restores the summary only — never the rows.
+function applyRunSummary(run: RunInfo): void {
+  if (run.kind === 'ptc' && (run.modelMs !== undefined || run.runMs !== undefined)) {
+    ptcTiming.value = { modelMs: run.modelMs, runMs: run.runMs };
+  }
+  if (run.error) batchError.value = run.error;
+  lastRun.value = runSummary(run.items);
 }
 
 // One server run -> the rows on screen. `waiting` items are the batch's queue,
@@ -1116,17 +1141,7 @@ function applyRun(run: RunInfo): void {
   runStage.value = '';
   runEstimate.value = 0;
   runTick.value = 0;
-  if (run.kind === 'ptc' && (run.modelMs !== undefined || run.runMs !== undefined)) {
-    ptcTiming.value = { modelMs: run.modelMs, runMs: run.runMs };
-  }
-  if (run.error) batchError.value = run.error;
-  const count = (state: string) => run.items.filter((item) => item.state === state).length;
-  lastRun.value = {
-    done: count('done'),
-    failed: count('error'),
-    skipped: count('skipped'),
-    cancelled: count('cancelled'),
-  };
+  applyRunSummary(run);
 }
 
 async function pollRun(id: string): Promise<void> {

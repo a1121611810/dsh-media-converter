@@ -14,6 +14,7 @@ import {
   previewMime,
   rowPlan,
   runItemPatch,
+  runSummary,
   trimWindow,
   withoutKnownUploads,
   unavailableTarget,
@@ -470,6 +471,22 @@ assert.deepEqual(runItemPatch(runItem({ state: 'cancelled' })), {
   jobAction: '',
   result: null,
 });
+
+// A finished batch's summary line counts terminal item states only; the
+// rebuilt panel shows it inside a freshness window keyed off the server stamp.
+assert.deepEqual(
+  runSummary([
+    { state: 'done' },
+    { state: 'done' },
+    { state: 'error' },
+    { state: 'skipped' },
+    { state: 'cancelled' },
+    { state: 'waiting' },
+  ]),
+  { done: 2, failed: 1, skipped: 1, cancelled: 1 },
+  'waiting items are not terminal and must not count',
+);
+assert.deepEqual(runSummary([]), { done: 0, failed: 0, skipped: 0, cancelled: 0 }, 'an empty batch sums to zero');
 
 console.log('client-lib.test.mjs: ok');
 

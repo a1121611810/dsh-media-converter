@@ -387,6 +387,9 @@ export interface RunInfo {
   kind: 'plain' | 'ptc';
   stage?: 'planning' | 'converting';
   at: number;
+  // When the run settled into a terminal state; a rebuilt panel restores the
+  // batch summary (without touching rows) within a window counted from this.
+  finishedAt?: number;
   modelMs?: number;
   runMs?: number;
   // Estimated wall time for the whole batch, from the measured throughput.
@@ -1442,6 +1445,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // blocks the other lanes behind it.
   // A concat run is ONE ffmpeg over the concat list file; the display item is
   // the first upload's row, and cancel/restore ride the generic run paths.
+  // Every road to a terminal run state passes here: the stamp doubles as the
+  // rebuilt panel's window for restoring the batch summary only.
+  const settleRun = (run: RunInfo, state: RunState): void => {
+    run.state = state;
+    run.finishedAt = Date.now();
+  };
+
   const executeConcatRun = async (run: RunInfo, quality: number): Promise<void> => {
     const item = run.items[0];
     try {
@@ -1516,7 +1526,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       item.percent = null;
       if (item.state === 'error') item.error = errorText(err);
     }
-    if (run.state === 'running') run.state = 'done';
+    if (run.state === 'running') settleRun(run, 'done');
   };
 
   const executeRun = async (run: RunInfo, quality: number, hardware: boolean): Promise<void> => {
@@ -1639,7 +1649,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       };
       const lightCap = Math.max(1, Math.min(4, cpus));
       await Promise.all([runLane(softwareVideos, 1), runLane(hardwareJobs, 3), runLane(lightJobs, lightCap)]);
-      if (run.state === 'running') run.state = 'done';
+      if (run.state === 'running') settleRun(run, 'done');
     } finally {
       runControllers.delete(run.id);
     }
@@ -1918,11 +1928,11 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       }
       run.runMs = Date.now() - runStart;
       run.stage = undefined;
-      if (run.state === 'running') run.state = 'done';
+      if (run.state === 'running') settleRun(run, 'done');
     } catch (err) {
       run.stage = undefined;
       if (run.state === 'running') {
-        run.state = signal.aborted ? 'cancelled' : 'error';
+        settleRun(run, signal.aborted ? 'cancelled' : 'error');
         run.error = signal.aborted ? '' : errorText(err);
       }
       for (const item of run.items) {
@@ -2937,7 +2947,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
         // A finished run is kept for the same reason: a page that comes back
         // still restores the batch it started.
         for (const [id, run] of runs) {
-          if (run.state !== 'running' && now - run.at > 30 * 60 * 1000) runs.delete(id);
+          // A finished run ages from its stamp, not its birth: a two-hour batch
+          // must not vanish before its summary window even closes.
+          if (run.state !== 'running' && now - (run.finishedAt ?? run.at) > 30 * 60 * 1000) runs.delete(id);
         }
       },
       10 * 60 * 1000,
@@ -3696,7 +3708,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             const run = runs.get(String(body.id || ''));
             if (!run) return json(res, 200, errorPayload('任务不存在'));
             if (run.state === 'running') {
-              run.state = 'cancelled';
+              settleRun(run, 'cancelled');
               for (const item of run.items) if (item.state === 'waiting') item.state = 'cancelled';
               // Both run kinds stop through their own signal: the PTC sandbox
               // ends, and the plain-run lanes kill the ffmpeg jobs they already

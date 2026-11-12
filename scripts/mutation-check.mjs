@@ -1320,6 +1320,14 @@ const MUTANTS = [
     distAnchor: 'if (WM_POS_KEYS.includes(pos))',
     expect: 'watermarkPos=center 必须在 plan 层被拒；突变后放行 → host 非法位置用例红',
   },
+  {
+    id: 'H1',
+    name: '完成时间戳被摘除（面板摘要窗口永不命中）',
+    apply: (s) => replaceOnce(s, 'run.finishedAt = Date.now();', 'run.finishedAt = 0;'),
+    distAnchor: 'run.finishedAt = 0',
+    expect:
+      '已完成的 run 必须带 finishedAt，面板才能在 10 分钟窗口内恢复批次摘要；突变后窗口永不命中 → host finishedAt 断言红',
+  },
 ];
 
 function build() {

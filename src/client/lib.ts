@@ -243,6 +243,22 @@ export function runItemPatch(entry: RunItemInfo): RunItemPatch {
   return { state: entry.state, percent: entry.percent, error: '', jobAction: '', result: null };
 }
 
+// A finished batch's one-line summary: counts per terminal item state. The
+// display order lives in the panel; this only counts.
+export function runSummary(items: { state: string }[]): {
+  done: number;
+  failed: number;
+  skipped: number;
+  cancelled: number;
+} {
+  const count = (state: string) => items.filter((item) => item.state === state).length;
+  return { done: count('done'), failed: count('error'), skipped: count('skipped'), cancelled: count('cancelled') };
+}
+
+// A finished run's summary restores for this long after settling; older runs
+// are already reflected in the rows themselves.
+export const SUMMARY_WINDOW_MS = 10 * 60 * 1000;
+
 // What a restored row should take from a server job. A running job always
 // wins; a finished one only rewrites a row that was itself mid-run when the
 // snapshot was taken, so an old result cannot reappear on a reset row.

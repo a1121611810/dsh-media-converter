@@ -2024,6 +2024,7 @@ const runCancelled = await call('run/cancel', {
 });
 assert.equal(runCancelled.data.ok, true, JSON.stringify(runCancelled.data));
 assert.equal(runCancelled.data.run.state, 'cancelled');
+assert.ok(runCancelled.data.run.finishedAt > 0, 'a cancelled run carries its finish stamp');
 let cancelledRunState = runCancelled.data.run;
 for (let attempt = 0; attempt < 100 && cancelledRunState.items[0].state === 'converting'; attempt += 1) {
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -2122,6 +2123,7 @@ const lightRun = await call('run', {
 assert.equal(lightRun.data.ok, true, JSON.stringify(lightRun.data));
 const lightSample = await sampleRun(lightRun.data.run.id);
 assert.equal(lightSample.run.state, 'done', 'the light-lane run finishes');
+assert.ok(lightSample.run.finishedAt > 0, 'a finished run carries its finish stamp');
 assert.ok(lightSample.maxConverting >= 2, `light jobs overlap (max ${lightSample.maxConverting} converting)`);
 assert.ok(
   lightSample.run.items.every((item) => item.state === 'done'),
