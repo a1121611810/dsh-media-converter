@@ -540,6 +540,10 @@ export const HW_BACKENDS: Record<HwBackendId, HwBackend> = {
     encoder: 'h264_vaapi',
     hevcEncoder: 'hevc_vaapi',
     hwaccel: 'vaapi',
+    // shortcut: real-job decode carries no -vaapi_device (the probe finds one
+    // but plumbing it through needs per-job device state), so multi-GPU /
+    // headless boxes fail the first attempt by design — the hwupload retry
+    // catches it. Upgrade when a Linux user complains about the wasted try.
     decodeArgs: ['-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi'],
     // Without an explicit mode VAAPI runs constant QP and ignores -b:v.
     rateArgs: ['-rc_mode', 'VBR'],

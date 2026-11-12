@@ -37,6 +37,18 @@ export function parseState(text: string): PersistedState | null {
     if (!raw || raw.schemaVersion !== 1) return null;
     if (!Array.isArray(raw.uploads) || !Array.isArray(raw.runs) || !Array.isArray(raw.interrupted)) return null;
     if (typeof raw.latestRun !== 'string' || !raw.ptcRates || typeof raw.ptcRates !== 'object') return null;
+    // A shape-valid file can still be type-poisoned (a hand edit writing
+    // "fast" into a rate): NaN rates would silently corrupt every PTC
+    // estimate, so bad numbers reject the whole document.
+    const rates = raw.ptcRates as Partial<import('./schedule.js').PtcRates>;
+    if (
+      !Number.isFinite(rates.copy) ||
+      !Number.isFinite(rates.hardware) ||
+      !Number.isFinite(rates.video) ||
+      !Number.isFinite(rates.audio) ||
+      !Number.isFinite(rates.imageMs)
+    )
+      return null;
     return raw as PersistedState;
   } catch {
     return null;

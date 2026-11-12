@@ -18,6 +18,11 @@ const good = {
   interrupted: [],
 };
 assert.deepEqual(parseState(serializeState(good)), good, 'a v1 document round-trips');
+assert.equal(
+  parseState(JSON.stringify({ ...good, ptcRates: { copy: 1, hardware: 1, video: 'fast', audio: 1, imageMs: 1 } })),
+  null,
+  'type-poisoned rates reject the whole document',
+);
 
 // restoreDecision: gone → drop; touched → reprobe; untouched → adopt.
 assert.equal(restoreDecision({ size: 10, mTimeMs: 5 }, null), 'drop');

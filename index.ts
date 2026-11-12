@@ -1223,6 +1223,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // survive THIS one's unload (deleting them here is what broke the main
   // instance's queue whenever a second apply disposed in the same process).
   const restoredIds = new Set<string>();
+  let saveStateWarned = false;
   const saveState = (): void => {
     try {
       const snapshot = {
@@ -1237,11 +1238,29 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       const tmp = `${stateFile}.${process.pid}.tmp`;
       fs.writeFileSync(tmp, serializeState(snapshot));
       fs.renameSync(tmp, stateFile);
-    } catch {
-      // State is a courtesy, never a failure: a full disk must not sink a job.
+    } catch (err) {
+      // State is a courtesy, never a failure: a full disk must not sink a
+      // conversion — but a persist that ALWAYS fails (AV lock on Windows,
+      // permissions) must be visible at least once.
+      if (!saveStateWarned) {
+        saveStateWarned = true;
+        console.error('[dsh-media-converter] state persist failed:', errorText(err));
+      }
     }
   };
   const persist = (): void => saveState();
+  // Hot paths (per-upload, per-finished-job) debounce: a bulk drop of a few
+  // hundred files must not stringify the whole queue once per file. Run
+  // lifecycle stays write-through — a lost batch is worse than a lost row.
+  let persistPending: NodeJS.Timeout | null = null;
+  const persistSoon = (): void => {
+    if (persistPending) return;
+    persistPending = setTimeout(() => {
+      persistPending = null;
+      saveState();
+    }, 500);
+    persistPending.unref();
+  };
   const resumedRuns: RunInfo[] = [];
   try {
     if (fs.existsSync(stateFile)) {
@@ -1395,6 +1414,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       if (wallMs >= 50 && wallMs < 60_000) {
         ptcRates.imageMs = Math.max(50, ptcRates.imageMs * 0.6 + wallMs * 0.4);
       }
+      persistSoon();
       return;
     }
     const key = job.copy
@@ -1408,7 +1428,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             : '';
     if (!key) return;
     ptcRates[key] = blendPtcRate(ptcRates[key], mediaSeconds, wallMs);
-    persist();
+    persistSoon();
   };
 
   const startJob = async (
@@ -3360,7 +3380,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
               at: Date.now(),
             };
             uploads.set(id, upload);
-            persist();
+            persistSoon();
             json(
               res,
               200,
@@ -4267,6 +4287,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     return () => {
       persist();
       clearInterval(stateTimer);
+      clearTimeout(resumeTimer);
       clearInterval(pruneTimer);
       disposers.forEach((dispose) => dispose());
       for (const child of children) child.kill('SIGTERM');

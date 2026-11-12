@@ -1383,7 +1383,7 @@ const MUTANTS = [
     dist: 'dist/lib/plan.js',
     delete: true,
     apply: (s) => replaceOnce(s, "    retryArgs: ['-vf', 'format=nv12|vaapi,hwupload'],\n", ''),
-    distAnchor: 'hwupload',
+    distAnchor: 'format=nv12|vaapi',
     expect: 'vaapi retryArgs 必须存在；摘除后 plan.test 的 hwupload 断言红',
   },
   {
@@ -1400,6 +1400,16 @@ const MUTANTS = [
       ),
     distAnchor: "return 'adopt';",
     expect: '被改动的文件必须重探测；突变后照旧采用 → host 重探测用例红（kind 仍是 image）',
+  },
+  {
+    id: 'H8',
+    name: 'ptcRates 数值校验被掏空（video 投毒照单全收）',
+    source: 'lib/state.ts',
+    test: 'test/state.test.mjs',
+    dist: 'dist/lib/state.js',
+    apply: (s) => replaceOnce(s, '!Number.isFinite(rates.video) ||', '!Number.isFinite(rates.video) &&'),
+    distAnchor: '!Number.isFinite(rates.video) &&',
+    expect: '非数值 rate 必须整份拒收；突变后 video 投毒漏检 → state.test 投毒用例红',
   },
 ];
 
