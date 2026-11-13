@@ -1144,6 +1144,16 @@ const MUTANTS = [
     expect: 'speed=4 必须拆 atempo=2,atempo=2；突变后第二段 atempo=4 非法 → plan 断言红',
   },
   {
+    id: 'Y6',
+    name: 'loudnorm 注入条件反转（响度归一化静默丢失）',
+    source: 'lib/plan.ts',
+    test: 'test/plan.test.mjs',
+    dist: 'dist/lib/plan.js',
+    apply: (s) => replaceOnce(s, 'filters?.loudnorm === true', 'filters?.loudnorm !== true'),
+    distAnchor: 'filters?.loudnorm !== true',
+    expect: 'loudnorm: true 时 -af 链必须含 loudnorm=I=-16:TP=-1.5:LRA=11；突变后恒空 → plan.test 链序断言红',
+  },
+  {
     id: 'Y3',
     name: '水印 textfile 退回内联 text=（转义地狱回归）',
     source: 'lib/plan.ts',
@@ -1504,6 +1514,10 @@ if (process.env.DRYRUN) {
   process.exit(0);
 }
 
+// ONLY=Y2,Y6: 只跑名单内突变（新锚点入库的单点验证），基线仍全跑。
+const ONLY = process.env.ONLY ? new Set(String(process.env.ONLY).split(',')) : null;
+const RUN = ONLY ? MUTANTS.filter((m) => ONLY.has(m.id)) : MUTANTS;
+
 let failures = 0;
 const failed = [];
 try {
@@ -1519,7 +1533,7 @@ try {
       process.exit(2);
     }
   }
-  for (const m of MUTANTS.filter((x) => x.delete)) {
+  for (const m of RUN.filter((x) => x.delete)) {
     const baselineDist = fs.readFileSync(pathOf(m, 'dist'), 'utf8');
     if (!baselineDist.includes(m.distAnchor)) {
       console.error(`[mutation] 突变 ${m.id} 的 dist 锚点本就不在产物里，攻击无效`);
@@ -1528,7 +1542,7 @@ try {
   }
   console.log('[mutation] 基线绿。开始逐突变注入…\n');
 
-  for (const m of MUTANTS) {
+  for (const m of RUN) {
     const source = pathOf(m, 'source');
     const test = pathOf(m, 'test');
     const dist = pathOf(m, 'dist');
