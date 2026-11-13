@@ -29,7 +29,7 @@ import { pipeline } from 'node:stream/promises';
 import Schema from '@deepseek-ai/schemastery';
 import { decodeBase64Payload } from './lib/base64.js';
 import { parseState, restoreDecision, serializeState } from './lib/state.js';
-import { actionFor, ptcFormats, resolveFeatures, toolActions } from './lib/actions.js';
+import { ACTIONS, actionFor, ptcFormats, resolveFeatures, toolActions } from './lib/actions.js';
 import { applyQualityMap, entriesOf, parseExtensions, statusOf } from './lib/extensions.js';
 import type { ExtensionEntry, ExtensionManifest } from './lib/extensions.js';
 import {
@@ -1135,7 +1135,19 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     uploadLimit = maxUploadBytes >= 1048576 ? `${Math.round(maxUploadBytes / 1048576)} MB` : `${maxUploadBytes} B`;
     composerButton = unwrap(raw.composerButton) !== false;
     groups = resolveGroups(unwrap(raw.groups));
-    features = resolveFeatures(unwrap(raw.features));
+    // Extensions parse BEFORE features: the whitelist's known ids include the
+    // extension refs, so a configured list can disable an extension action by
+    // its own 'x:<manifest>/<action>' token just like a built-in id.
+    const parsedExtensions = parseExtensions(unwrap(raw.extensions));
+    if (!parsedExtensions.ok) {
+      console.error(`[dsh-media-converter] extensions 配置无效，已忽略：${parsedExtensions.error}`);
+    }
+    extensionManifests = parsedExtensions.ok ? parsedExtensions.manifests : [];
+    extensionEntries = entriesOf(extensionManifests);
+    features = resolveFeatures(unwrap(raw.features), [
+      ...ACTIONS.map((entry) => entry.id),
+      ...extensionEntries.map((entry) => entry.ref),
+    ]);
     persistState = unwrap(raw.persistState) === true;
     nameTemplate = String(unwrap(raw.nameTemplate) || '');
     const cfgTtl = unwrap(raw.uploadTtlMinutes);
@@ -1145,12 +1157,6 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     const cfgQueueLimit = unwrap(raw.queueLimit);
     // Floor of 10: a /queue cap near zero would restore an empty page.
     queueLimitN = Math.max(10, Math.round(cfgQueueLimit === undefined ? DEFAULT_QUEUE_LIMIT : Number(cfgQueueLimit)));
-    const parsedExtensions = parseExtensions(unwrap(raw.extensions));
-    if (!parsedExtensions.ok) {
-      console.error(`[dsh-media-converter] extensions 配置无效，已忽略：${parsedExtensions.error}`);
-    }
-    extensionManifests = parsedExtensions.ok ? parsedExtensions.manifests : [];
-    extensionEntries = entriesOf(extensionManifests);
   };
   resolveConfig(cfg);
   // The backend this machine can really run. planFor() is synchronous, so the
@@ -2165,6 +2171,9 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   const planForPreset = (upload: Upload, body: JsonBody, ref: string, threads: number): ConvertPlan => {
     const entry = extensionEntries.find((e) => e.ref === ref);
     if (!entry) throw new Error(`扩展预设不存在：${ref}`);
+    // The whitelist governs extension actions by their own ref; 'convert'
+    // stays the macro prerequisite.
+    if (!features.includes(ref)) throw new Error('该功能已停用');
     if (!features.includes('convert')) throw new Error('该功能已停用');
     if (entry.type === 'macro') {
       const convert = actionFor('convert');

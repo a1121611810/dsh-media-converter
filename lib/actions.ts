@@ -376,13 +376,17 @@ export function actionFor(mode: string): ActionEntry | undefined {
 // A configured `features` string is a whitelist of enabled action ids: empty
 // enables everything, unknown tokens are dropped (same mental model as
 // resolveGroups for the panel's action groups).
-export function resolveFeatures(raw: unknown): string[] {
+// A configured `features` string is a whitelist of enabled action ids: empty
+// enables everything, unknown tokens are dropped (same mental model as
+// resolveGroups). knownIds extends the grammar beyond built-in actions so a
+// caller can whitelist extension refs ('x:<manifest>/<action>') too.
+export function resolveFeatures(raw: unknown, knownIds: string[] = ACTIONS.map((entry) => entry.id)): string[] {
   const tokens = String(raw ?? '')
     .split(',')
     .map((token) => token.trim())
-    .filter((token) => ACTIONS.some((entry) => entry.id === token));
+    .filter((token) => knownIds.includes(token));
   const known = [...new Set(tokens)];
-  return known.length ? known : ACTIONS.map((entry) => entry.id);
+  return known.length ? known : knownIds;
 }
 
 export function toolActions(enabled: string[] = ACTIONS.map((entry) => entry.id)): string[] {

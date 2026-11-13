@@ -3378,6 +3378,35 @@ assert.match(ptcPrompt, /x:wechat-image\/wx-webp/, 'the prompt offers the instal
 // The agent tool resolves presets through the same table.
 const toolPreset = await media.execute({ path: sample, action: 'convert', preset: 'x:wechat-image/wx-webp' }, exec);
 assert.ok(toolPreset.file.endsWith('.' + macroFormat), 'the tool converts through the preset');
+
+// WP3: the features whitelist governs extension actions by their own ref —
+// same grammar as built-in ids ('x:<manifest>/<action>' is a valid token).
+await call('config', { method: 'POST', body: JSON.stringify({ features: 'probe,convert' }) });
+const blockedPreset = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: macroUpload.data.id, preset: 'x:wechat-image/wx-webp' }),
+});
+assert.equal(blockedPreset.data.ok, false, 'a whitelist without the ref blocks the extension action');
+assert.equal(blockedPreset.data.error, '该功能已停用');
+// Built-in actions on the same whitelist are untouched.
+const builtinStill = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4' }),
+});
+assert.equal(builtinStill.data.ok, true, JSON.stringify(builtinStill.data));
+await waitJob(builtinStill.data.job);
+// Whitelisting the ref enables it again.
+await call('config', {
+  method: 'POST',
+  body: JSON.stringify({ features: 'probe,convert,x:wechat-image/wx-webp' }),
+});
+const allowedPreset = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: macroUpload.data.id, preset: 'x:wechat-image/wx-webp' }),
+});
+assert.equal(allowedPreset.data.ok, true, JSON.stringify(allowedPreset.data));
+await waitJob(allowedPreset.data.job);
+await call('config', { method: 'POST', body: JSON.stringify({ features: '' }) });
 await call('config', { method: 'POST', body: JSON.stringify({ extensions: '' }) });
 
 // The save applies to the running instance: the very next status read serves

@@ -137,7 +137,7 @@ dsh plugin add github:a1121611810/dsh-media-converter --profile <profile>
 - `extensions`：扩展包原文（JSON 文本），设置页的扩展管理卡读写；保存时整包校验，坏包拒收。包可带 `pages`（沙箱扩展页）：iframe 为不透明源、`sandbox="allow-scripts"`，够不到面板 DOM/cookie/存储，只能经白名单桥（`/api/media-convert/*`，POST ≤1MB，一次性 token 校验消息来源）调用本插件 API——页面脚本是特性不是威胁，但它在网络出口上不受 sandbox 限制，桥也不转发任何秘密。
 - `groups`：文件详情页动作模块的顺序与显隐（`convert,edit,view`，写进字符串的才显示）。
 - `nameTemplate`：输出文件命名模板，可用 `{name}`（源文件名）、`{ext}`、`{date}`（YYYYMMDD）、`{time}`（HHmmss）；留空用默认命名（源名.扩展名，撞名加时间戳）。保存时校验必须渲染为纯文件名，任务时再次校验（防手改配置文件路径穿越）。
-- `features`：功能白名单（逗号分隔的动作 id：`probe,convert,extract-audio,extract-video,subtitle,meta,base64`），留空全启用、未知 id 忽略；停用后对应入口（单任务转换、批量、Agent 工具、Base64）直接报「该功能已停用」，保存即生效。
+- `features`：功能白名单（逗号分隔的动作 id：`probe,convert,extract-audio,extract-video,subtitle,meta,base64`，扩展动作写 ref `x:<包id>/<动作id>`），留空全启用、未知 id 忽略；停用后对应入口（单任务转换、批量、Agent 工具、Base64、扩展预设）直接报「该功能已停用」，保存即生效。
 - 设置页右上角还有版本号显示与「刷新界面」（等同 Ctrl+R）。
 
 插件导出 `Config` schema 供宿主的 settings 服务投影表单（这是唯一的运行时依赖 `@deepseek-ai/schemastery`，由 npm 正常安装）。

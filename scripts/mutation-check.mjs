@@ -757,14 +757,24 @@ const MUTANTS = [
     source: 'lib/actions.ts',
     dist: 'dist/lib/actions.js',
     test: 'test/plan.test.mjs',
+    apply: (s) => replaceOnce(s, 'return known.length ? known : knownIds;', 'return known.length ? known : [];'),
+    distAnchor: 'return known.length ? known : [];',
+    expect: '空 features 必须全启用，突变后默认全禁用 → resolveFeatures 单测红',
+  },
+  {
+    id: 'F5',
+    name: 'features 白名单不再认扩展 ref（扩展停用失效）',
+    source: 'lib/actions.ts',
+    dist: 'dist/lib/actions.js',
+    test: 'test/host.test.mjs',
     apply: (s) =>
       replaceOnce(
         s,
-        'return known.length ? known : ACTIONS.map((entry) => entry.id);',
-        'return known.length ? known : [];',
+        'filter((token) => knownIds.includes(token))',
+        'filter((token) => ACTIONS.some((entry) => entry.id === token))',
       ),
-    distAnchor: 'return known.length ? known : [];',
-    expect: '空 features 必须全启用，突变后默认全禁用 → resolveFeatures 单测红',
+    distAnchor: 'ACTIONS.some((entry) => entry.id === token)',
+    expect: "features 含 'x:wechat-image/wx-webp' 时必须放行该预设；突变后 token 被丢 → WP3 恢复用例红",
   },
   {
     id: 'F3',
@@ -772,8 +782,7 @@ const MUTANTS = [
     source: 'lib/actions.ts',
     dist: 'dist/lib/actions.js',
     test: 'test/plan.test.mjs',
-    apply: (s) =>
-      replaceOnce(s, '.filter((token) => ACTIONS.some((entry) => entry.id === token));', '.filter(() => true);'),
+    apply: (s) => replaceOnce(s, '.filter((token) => knownIds.includes(token));', '.filter(() => true);'),
     distAnchor: '.filter(() => true);',
     expect: '未知 token 必须被丢弃，突变后混入白名单 → resolveFeatures 单测红',
   },
