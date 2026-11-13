@@ -1,5 +1,8 @@
 // Self-check for the pure planner: `node test/plan.test.mjs`.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   FORMATS,
   HW_BACKENDS,
@@ -1073,7 +1076,7 @@ const wm = watermarkSegment({
 });
 assert.ok(wm.includes("textfile='/tmp/wm.txt'"), '水印走 textfile');
 assert.ok(!wm.includes(':text='), '不用内联 text=');
-assert.ok(wm.includes('x=w-tw-24:y=h-th-24'), 'br 位置表达式');
+assert.ok(wm.includes('x=w-text_w-24:y=h-text_h-24'), 'br 位置表达式（drawtext 用 text_w/text_h）');
 assert.ok(
   watermarkSegment({
     fontFile: 'C:\\Windows\\Fonts\\arial.ttf',
@@ -1188,3 +1191,90 @@ const gpuEq = convertEntry.plan(trackUpload(1), { format: 'mp4', brightness: 0.2
 });
 assert.ok(!gpuEq.hardware, '画质滤镜请求不走 GPU 路径');
 console.log('plan: WP1 滤镜/变调用例 ok');
+
+// --- WP2：图片水印 -----------------------------------------------------------
+// existsSync 只查存在，内容随意；路径在临时目录，与任何真实文件无关。
+const wmPngPath = path.join(os.tmpdir(), 'mc-plan-wm.png');
+fs.writeFileSync(wmPngPath, 'badge');
+// 图结构：overlay 走 filter_complex，线性链在前、图片叠后；空链用 null 占位；
+// labeled -map 之后必须显式把音轨放回来。
+const ovArgs = buildArgs('video', 'mp4', 90, 0, 0, 0, 0, 0, undefined, undefined, { overlay: { pos: 'tr' } });
+const fc = ovArgs[ovArgs.indexOf('-filter_complex') + 1];
+assert.equal(fc, '[0:v]null[mcbase];[mcbase][1:v]overlay=main_w-overlay_w-24:24[mcv]', '空链 overlay：' + fc);
+assert.deepEqual(ovArgs.slice(ovArgs.indexOf('-map')), ['-map', '[mcv]', '-map', '0:a?']);
+const ovChain = buildArgs(
+  'video',
+  'mp4',
+  90,
+  0,
+  0,
+  0,
+  0,
+  0,
+  undefined,
+  { crop: '32:32:0:0' },
+  { overlay: { pos: 'bl', width: 100 } },
+);
+assert.equal(
+  ovChain[ovChain.indexOf('-filter_complex') + 1],
+  '[1:v]scale=100:-1[mcwm];[0:v]crop=32:32:0:0[mcbase];[mcbase][mcwm]overlay=24:main_h-overlay_h-24[mcv]',
+  '带裁剪+缩放的图结构',
+);
+// 文字水印在链内、图片叠在链顶。
+const ovText = buildArgs('video', 'mp4', 90, 0, 0, 0, 0, 0, undefined, undefined, {
+  extraVf: ['drawtext=foo'],
+  overlay: { pos: 'br' },
+});
+const fcText = ovText[ovText.indexOf('-filter_complex') + 1];
+assert.ok(
+  fcText.includes('drawtext=foo[mcbase]') && fcText.endsWith('overlay=main_w-overlay_w-24:main_h-overlay_h-24[mcv]'),
+  '文字在链内、图片在链顶：' + fcText,
+);
+// 注册表层：校验、门禁、extraInputs、拒绝组合。
+const wmUp = trackUpload(1);
+wmUp.meta.audio.sampleRate = 44100;
+const ovPlan = convertEntry.plan(wmUp, { format: 'mp4', watermarkImage: wmPngPath }, 0, null);
+assert.ok(!ovPlan.copy, '图片水印禁拷贝');
+assert.deepEqual(ovPlan.extraInputs, [wmPngPath], '水印图进 extraInputs');
+assert.ok(ovPlan.args.includes('-filter_complex'), 'overlay 计划带 filter_complex');
+assert.throws(() => convertEntry.plan(wmUp, { format: 'gif', watermarkImage: wmPngPath }, 0, null), /不适用于 GIF/);
+assert.throws(
+  () => convertEntry.plan(wmUp, { format: 'mp4', watermarkImage: '/nonexistent-dir/x.png' }, 0, null),
+  /水印图片不存在/,
+);
+assert.throws(
+  () => convertEntry.plan(wmUp, { format: 'mp4', watermarkImage: '/tmp/x.txt' }, 0, null),
+  /必须是 png\/jpg\/webp/,
+);
+assert.throws(
+  () => convertEntry.plan(trackUpload(1, 2), { format: 'mp4', watermarkImage: wmPngPath, videoTrack: 1 }, 0, null),
+  /暂不支持选轨/,
+);
+const ovGpu = convertEntry.plan(wmUp, { format: 'mp4', watermarkImage: wmPngPath, hardware: true }, 0, {
+  id: 'videotoolbox',
+  label: 'Apple VideoToolbox',
+  encoder: 'h264_videotoolbox',
+  hevcEncoder: 'hevc_videotoolbox',
+  hwaccel: 'videotoolbox',
+  decodeArgs: [],
+  rateArgs: [],
+});
+assert.ok(!ovGpu.hardware, '图片水印不走 GPU 零拷贝路径');
+// remux 门的一致性（R5 曾静默忽略，现在必须响亮相拒）。
+assert.throws(
+  () => convertEntry.plan(wmUp, { format: 'mp4', remux: true, speed: 2 }, 0, null),
+  /remux（仅换封装）不支持变速/,
+);
+assert.throws(
+  () => convertEntry.plan(wmUp, { format: 'mp4', remux: true, loudnorm: true }, 0, null),
+  /remux（仅换封装）不支持响度归一/,
+);
+assert.throws(
+  () => convertEntry.plan(wmUp, { format: 'mp4', remux: true, watermarkText: 'x' }, 0, null),
+  /remux（仅换封装）不支持水印/,
+);
+assert.throws(
+  () => convertEntry.plan(wmUp, { format: 'mp4', remux: true, watermarkImage: wmPngPath }, 0, null),
+  /remux（仅换封装）不支持图片水印/,
+);
+console.log('plan: WP2 图片水印用例 ok');

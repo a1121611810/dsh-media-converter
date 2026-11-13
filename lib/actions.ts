@@ -113,6 +113,7 @@ function convertPlan(
     pitch = { value: pitchValue, sampleRate: rate };
   }
   const fxTuned = eqAsked || denoiseAsked || sharpenAsked || pitchAsked;
+  const wmText = String(body.watermarkText || '').trim();
   // An explicit remux is a pure container rewrite: it wins over every tuned
   // knob (a copy has nothing to tune) and never re-encodes — anything that
   // would change the streams is rejected instead of silently dropped.
@@ -122,6 +123,15 @@ function convertPlan(
     if (geometry) throw new Error('remux（仅换封装）不支持画面几何');
     if (eqAsked || denoiseAsked || sharpenAsked) throw new Error('remux（仅换封装）不支持画质滤镜');
     if (pitchAsked) throw new Error('remux（仅换封装）不支持变调');
+    // R5 knobs predate the remux gate and used to be silently dropped; an
+    // explicit ask must fail loudly instead (same doctrine as the copy gate).
+    if (String(body.watermarkImage || '').trim()) throw new Error('remux（仅换封装）不支持图片水印');
+    if (wmText) throw new Error('remux（仅换封装）不支持水印');
+    if (Number(body.speed) > 0 && Number(body.speed) !== 1) throw new Error('remux（仅换封装）不支持变速');
+    if (body.loudnorm === true) throw new Error('remux（仅换封装）不支持响度归一');
+    if (body.burn !== undefined && body.burn !== null && body.burn !== false) {
+      throw new Error('remux（仅换封装）不支持字幕烧录');
+    }
     return { ext: format, kind: kindByExt(format), args: forceRemuxArgs(format), copy: true };
   }
   // R5 knobs: speed / loudnorm / watermark / burn are all real re-encode
@@ -143,7 +153,6 @@ function convertPlan(
   if (denoiseAsked) filters.denoise = Number(body.denoise);
   if (sharpenAsked) filters.sharpen = Number(body.sharpen);
   if (pitch) filters.pitch = pitch;
-  const wmText = String(body.watermarkText || '').trim();
   // Validated now, written only on the software path below: a throw anywhere
   // in between (burn checks, the copy/hw gates, buildArgs' own clamps) must
   // never leak a scratch text file.
@@ -157,6 +166,23 @@ function convertPlan(
     const width = upload.meta.video && upload.meta.video.width ? upload.meta.video.width : 640;
     wm = { fontFile, pos, size: Math.min(96, Math.max(12, Math.round(width / 18))) };
   }
+  // WP2 image watermark: validated here (target, GIF, track picks, extension,
+  // existence) and fenced by planFor against the allowed directories. The
+  // image renders ABOVE the linear chain (burn < text < image).
+  const wmImage = String(body.watermarkImage || '').trim();
+  let wmImg: { path: string; pos: string; width: number } | null = null;
+  if (wmImage) {
+    // GIF first: it is the common mistake and deserves its own message.
+    if (format === 'gif') throw new Error('图片水印不适用于 GIF');
+    if (upload.kind !== 'video' || kindByExt(format) !== 'video') throw new Error('图片水印仅对视频目标有效');
+    if (vtrack > 0 || atrack > 0) throw new Error('图片水印暂不支持选轨');
+    const imageExt = extOf(wmImage);
+    if (!['png', 'jpg', 'jpeg', 'webp'].includes(imageExt)) throw new Error('水印图片必须是 png/jpg/webp');
+    if (!fs.existsSync(wmImage)) throw new Error('水印图片不存在');
+    const imagePos = String(body.watermarkPos || 'br');
+    if (!WM_POS_KEYS.includes(imagePos)) throw new Error('水印位置必须是 tl/tr/bl/br 之一');
+    wmImg = { path: wmImage, pos: imagePos, width: Math.round(Number(body.watermarkImageWidth) || 0) };
+  }
   if (body.burn !== undefined && body.burn !== null && body.burn !== false) {
     if (upload.kind !== 'video' || kindByExt(format) !== 'video') throw new Error('字幕烧录仅对视频目标有效');
     const ordinal = Math.max(0, Math.round(Number(body.burn) || 0));
@@ -168,7 +194,7 @@ function convertPlan(
     filters.extraVf = [burnSegment(body.burnFile, fontsDir), ...(filters.extraVf ?? [])];
   }
   const filtersTuned = Boolean(
-    filters.speed || filters.loudnorm || wmText || (filters.extraVf && filters.extraVf.length) || fxTuned,
+    filters.speed || filters.loudnorm || wmText || (filters.extraVf && filters.extraVf.length) || fxTuned || wmImg,
   );
   // An explicit quality choice means "re-encode to this quality": a container
   // copy would silently drop it. Rounded, so 89.6/90.4 (which buildArgs rounds
@@ -272,6 +298,8 @@ function convertPlan(
     scratch.push(textFile);
     filters.extraVf = [...(filters.extraVf ?? []), watermarkSegment({ ...wm, textFile })];
   }
+  if (wmImg) filters.overlay = { pos: wmImg.pos, width: wmImg.width };
+  if (wmImg) filters.overlay = { pos: wmImg.pos, width: wmImg.width };
   return {
     ext: format,
     kind: kindByExt(format),
@@ -291,6 +319,7 @@ function convertPlan(
         filters,
       ),
     ],
+    ...(wmImg ? { extraInputs: [wmImg.path] } : {}),
     ...(scratch.length ? { scratch } : {}),
     threads,
   };

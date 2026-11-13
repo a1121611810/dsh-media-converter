@@ -315,6 +315,9 @@ const fxSaturation = ref(1);
 const fxDenoise = ref(0);
 const fxSharpen = ref(0);
 const pitch = ref(1);
+// WP2: image overlay watermark (absolute path) + optional display width.
+const wmImage = ref('');
+const wmImageWidth = ref(0);
 const snapAt = ref(0);
 const snapFormat = ref('png');
 const trimStart = ref('');
@@ -749,6 +752,7 @@ const showSpeedLoud = computed(
 const showWatermark = computed(
   () => showSpeedLoud.value && file.value?.kind === 'video' && status.value?.filters?.drawtext === true,
 );
+const showImageWm = computed(() => showVideoFx.value && format.value !== 'gif');
 const showBurn = computed(
   () =>
     (currentAction.value?.id.startsWith('fmt:') || currentAction.value?.id === 'trim') &&
@@ -782,6 +786,8 @@ watch(format, () => {
   fxDenoise.value = 0;
   fxSharpen.value = 0;
   pitch.value = 1;
+  wmImage.value = '';
+  wmImageWidth.value = 0;
 });
 
 // Save the current form state as a macro in the reserved per-kind pack; the
@@ -805,6 +811,8 @@ async function savePreset() {
       denoise: fxDenoise.value || undefined,
       sharpen: fxSharpen.value || undefined,
       pitch: pitch.value !== 1 ? pitch.value : undefined,
+      watermarkImage: wmImage.value.trim() || undefined,
+      watermarkImageWidth: wmImageWidth.value || undefined,
     })
   ) {
     presetMessage.value = t('preset.noTuned');
@@ -2054,6 +2062,8 @@ function convert() {
       pitch: pitch.value !== 1 ? pitch.value : undefined,
       watermarkText: wmText.value.trim() || undefined,
       watermarkPos: wmPos.value,
+      watermarkImage: wmImage.value.trim() || undefined,
+      watermarkImageWidth: wmImageWidth.value || undefined,
       burn: burnTrack.value >= 0 ? burnTrack.value : undefined,
     },
     'fmt:' + format.value,
@@ -2108,6 +2118,8 @@ function applyTrim() {
       pitch: pitch.value !== 1 ? pitch.value : undefined,
       watermarkText: wmText.value.trim() || undefined,
       watermarkPos: wmPos.value,
+      watermarkImage: wmImage.value.trim() || undefined,
+      watermarkImageWidth: wmImageWidth.value || undefined,
       burn: burnTrack.value >= 0 ? burnTrack.value : undefined,
       trim: { start: window.start, end: window.end },
     },
@@ -3066,6 +3078,31 @@ watch([action, panelOpen], async () => {
                 <option value="bl">{{ t('wm.bl') }}</option>
                 <option value="br">{{ t('wm.br') }}</option>
               </select>
+            </div>
+            <div v-if="showImageWm" class="mc-row">
+              <span class="mc-muted">{{ t('wm.image') }}</span>
+              <input
+                class="mc-name-input"
+                v-model="wmImage"
+                :disabled="busy"
+                :placeholder="t('wm.imagePlaceholder')"
+                :aria-label="t('wm.image')"
+                @input="resetResult"
+              />
+              <span class="mc-muted">{{ t('wm.imageWidth') }}</span>
+              <input
+                class="mc-name-input"
+                style="width: 72px"
+                type="number"
+                min="0"
+                max="7680"
+                step="10"
+                v-model.number="wmImageWidth"
+                :disabled="busy || !wmImage.trim()"
+                :aria-label="t('wm.imageWidth')"
+                @input="resetResult"
+              />
+              <span class="mc-muted">{{ t('wm.imageHint') }}</span>
             </div>
             <div v-if="showBurn" class="mc-row">
               <span class="mc-muted">{{ t('burn.label') }}</span>

@@ -85,6 +85,9 @@ export interface ConvertPlan {
   // Overrides the input path (the concat list file); duration and progress
   // still come from the upload view the caller hands to startJob.
   input?: string;
+  // Extra input files appended as further -i arguments (the image overlay's
+  // watermark picture); paths are validated by the caller, never by plan.ts.
+  extraInputs?: string[];
   // True when the job only rewrites the container.
   copy?: boolean;
   // True when the video encoder runs on the graphics card.
@@ -375,19 +378,29 @@ export function pitchSegment(pitch: number, sampleRate: number): string {
   return `asetrate=${Math.round(sr * ratio)},aresample=${sr},atempo=${back}`;
 }
 
-const WM_POS: Record<string, { x: string; y: string }> = {
+// ffmpeg 9 dropped overlay's short constants (w/tw/th): only main_w /
+// main_h / overlay_w / overlay_h survive there. drawtext keeps w/h for the
+// frame but renamed the text dims to text_w/text_h. Two vocabularies, one
+// set of keys; each consumer reads its own table.
+const WM_POS_TEXT: Record<string, { x: string; y: string }> = {
   tl: { x: '24', y: '24' },
-  tr: { x: 'w-tw-24', y: '24' },
-  bl: { x: '24', y: 'h-th-24' },
-  br: { x: 'w-tw-24', y: 'h-th-24' },
+  tr: { x: 'w-text_w-24', y: '24' },
+  bl: { x: '24', y: 'h-text_h-24' },
+  br: { x: 'w-text_w-24', y: 'h-text_h-24' },
 };
-export const WM_POS_KEYS = Object.keys(WM_POS);
+const WM_POS_OVERLAY: Record<string, { x: string; y: string }> = {
+  tl: { x: '24', y: '24' },
+  tr: { x: 'main_w-overlay_w-24', y: '24' },
+  bl: { x: '24', y: 'main_h-overlay_h-24' },
+  br: { x: 'main_w-overlay_w-24', y: 'main_h-overlay_h-24' },
+};
+export const WM_POS_KEYS = Object.keys(WM_POS_TEXT);
 
 // drawtext rides the TAIL of the video chain (after scale/burn). textfile
 // (not text=) sidesteps every escaping nightmare; paths are quoted, and
 // backslashes become slashes for the filter parser.
 export function watermarkSegment(opts: { fontFile: string; textFile: string; size: number; pos: string }): string {
-  const pos = WM_POS[opts.pos] || WM_POS.br;
+  const pos = WM_POS_TEXT[opts.pos] || WM_POS_TEXT.br;
   const font = opts.fontFile.replace(/\\/g, '/');
   const text = opts.textFile.replace(/\\/g, '/');
   return (
@@ -782,6 +795,9 @@ export interface FilterKnobs {
   denoise?: number;
   sharpen?: number;
   pitch?: { value: number; sampleRate: number };
+  // Image overlay watermark: input 1 lands on top of the whole linear chain
+  // (so burn and the text watermark render BELOW the picture).
+  overlay?: { pos: string; width?: number };
 }
 
 export function buildArgs(
@@ -869,7 +885,12 @@ export function buildArgs(
   const fxParts = [eq, denoise, sharpen].filter(Boolean) as string[];
   if (
     supportsVideoTune(kind, format) &&
-    (geoParts.length > 0 || tailParts.length > 0 || fxParts.length > 0 || Number(fps) > 0 || Number(width) > 0)
+    (geoParts.length > 0 ||
+      tailParts.length > 0 ||
+      fxParts.length > 0 ||
+      Boolean(filters?.overlay) ||
+      Number(fps) > 0 ||
+      Number(width) > 0)
   ) {
     if (format === 'gif') {
       const f = Number(fps) > 0 ? Math.min(30, Math.max(1, Math.round(Number(fps)))) : 12;
@@ -890,7 +911,31 @@ export function buildArgs(
         );
       parts.push(...fxParts);
       parts.push(...tailParts);
-      args.push('-vf', parts.join(','));
+      const overlay = filters?.overlay;
+      if (overlay) {
+        // The image rides input 1 (plan.extraInputs); the whole linear chain
+        // runs first, then the overlay lands on top of it. Subtitle burn and
+        // the text watermark stay INSIDE the linear chain, so the stacking
+        // order is burn < text < image. An empty chain still needs a filter
+        // between the labels, hence the null placeholder.
+        const pos = WM_POS_OVERLAY[overlay.pos] || WM_POS_OVERLAY.br;
+        const w = Math.round(Number(overlay.width));
+        const clamped = Math.min(7680, Math.max(16, w));
+        const scaleSeg = w > 0 ? `[1:v]scale=${clamped}:-1[mcwm];` : '';
+        const wmRef = w > 0 ? '[mcwm]' : '[1:v]';
+        const chain = parts.length ? parts.join(',') : 'null';
+        args.push(
+          '-filter_complex',
+          `${scaleSeg}[0:v]${chain}[mcbase];[mcbase]${wmRef}overlay=${pos.x}:${pos.y}[mcv]`,
+          '-map',
+          '[mcv]',
+        );
+        // A labeled -map drops ffmpeg's automatic stream pick; put audio back
+        // explicitly. Recipes that drop audio (-an, e.g. single-frame) skip it.
+        if (!args.includes('-an')) args.push('-map', '0:a?');
+      } else {
+        args.push('-vf', parts.join(','));
+      }
     }
   }
   return args;

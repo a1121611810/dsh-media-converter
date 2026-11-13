@@ -465,6 +465,11 @@ export interface JsonBody {
   loudnorm?: unknown;
   watermarkText?: unknown;
   watermarkPos?: unknown;
+  // WP2: image overlay watermark — an absolute path inside the allowed
+  // directories (planFor enforces the fence), png/jpg/webp, not GIF or
+  // track-picked outputs. Renders above the linear chain.
+  watermarkImage?: unknown;
+  watermarkImageWidth?: unknown;
   burn?: unknown;
   burnFile?: string;
   at?: unknown;
@@ -1491,6 +1496,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           ...trimArgs(trim),
           '-i',
           attempt.input || upload.path,
+          // Image overlay watermark rides a second input (plan.extraInputs).
+          ...(attempt.extraInputs || []).flatMap((extra) => ['-i', extra]),
           ...attempt.args,
           ...threadArgs(attempt.threads),
           '-progress',
@@ -2177,6 +2184,13 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     const entry = actionFor(mode) ?? actionFor('convert');
     if (!entry?.plan) throw new Error(`不支持的输出格式: ${String(body.format || '')}`);
     if (!features.includes(entry.id)) throw new Error('该功能已停用');
+    if (body.watermarkImage !== undefined && body.watermarkImage !== null && String(body.watermarkImage).trim()) {
+      // The plan layer checks type/existence; the directory fence lives here,
+      // the one place every channel (route / tool / PTC) funnels through.
+      if (!browseAllowed(String(body.watermarkImage))) {
+        throw new Error('水印图片必须在允许的目录内（家目录/Volumes/临时目录/输出目录）');
+      }
+    }
     return entry.plan(upload, body, threads, hwBackend);
   };
 
@@ -2846,6 +2860,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       pitch: Number(a.pitch || 0) || undefined,
       watermarkText: a.watermarkText !== undefined ? String(a.watermarkText) : undefined,
       watermarkPos: a.watermarkPos !== undefined ? String(a.watermarkPos) : undefined,
+      watermarkImage: a.watermarkImage !== undefined ? String(a.watermarkImage) : undefined,
+      watermarkImageWidth: Number(a.watermarkImageWidth || 0) || undefined,
       burn: a.burn !== undefined && a.burn !== null ? Number(a.burn) : undefined,
       at: Number(a.at || 0),
       stream: Number(a.stream || 0),
@@ -2964,7 +2980,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
         '③extract-audio 抽音轨、④extract-video 抽画面（不重编码，可带 stream 选类型内第几条轨）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）；⑦concat 合并多个同类型文件（paths[]，mode=copy 直接拷贝/encode 重编码）；⑧split-chapters 按章节分割为多个文件（默认 copy 关键帧裁剪，mode=encode 精确重编码，返回 files[]）。' +
-        'convert 可带 trim（秒，{start,end}）裁剪；视频转视频可带 videoTrack、带音频的输出可带 audioTrack（类型内轨序号，1=第二条，0 或不填走默认轨；显式选轨将禁用直接拷贝）；软件编码可选 codec（hevc=libx265、av1=libsvtav1，仅 mp4/mov/mkv，配 hardware=false 或缺省；缺编码器时任务报错，其它容器回退 H.264），指定 codec 而不填 hardware 视同请求 GPU 硬编（h264/hevc，hevc 限 mp4/mov/mkv/ts）；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale，x265/svt-av1 映射各自 CRF）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）；⑨snapshot 截图（at=秒处取帧，format=png/jpg）；convert 还可带 crop（宽:高[:x[:y]]、偶数）/rotate（90/180/270）/flip（h|v）做画面几何，remux:true 仅换封装，speed（0.25–4）变速，loudnorm:true 响度归一，watermarkText 与 watermarkPos（tl/tr/bl/br）文字水印，burn（字幕轨序号）烧录；画质滤镜 brightness（-1–1）/contrast（0.25–2）/saturation（0–3，eq）、denoise（1–8，hqdn3d）、sharpen（0.25–2，unsharp）仅视频目标，pitch（0.5–2）变调不变速（需源文件有已知采样率），均强制重编码不走 GPU。产物写在输出目录，返回新文件路径。',
+        'convert 可带 trim（秒，{start,end}）裁剪；视频转视频可带 videoTrack、带音频的输出可带 audioTrack（类型内轨序号，1=第二条，0 或不填走默认轨；显式选轨将禁用直接拷贝）；软件编码可选 codec（hevc=libx265、av1=libsvtav1，仅 mp4/mov/mkv，配 hardware=false 或缺省；缺编码器时任务报错，其它容器回退 H.264），指定 codec 而不填 hardware 视同请求 GPU 硬编（h264/hevc，hevc 限 mp4/mov/mkv/ts）；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale，x265/svt-av1 映射各自 CRF）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）；⑨snapshot 截图（at=秒处取帧，format=png/jpg）；convert 还可带 crop（宽:高[:x[:y]]、偶数）/rotate（90/180/270）/flip（h|v）做画面几何，remux:true 仅换封装，speed（0.25–4）变速，loudnorm:true 响度归一，watermarkText 与 watermarkPos（tl/tr/bl/br）文字水印，watermarkImage（绝对路径，png/jpg/webp）图片水印叠在最上层，burn（字幕轨序号）烧录；画质滤镜 brightness（-1–1）/contrast（0.25–2）/saturation（0–3，eq）、denoise（1–8，hqdn3d）、sharpen（0.25–2，unsharp）仅视频目标，pitch（0.5–2）变调不变速（需源文件有已知采样率），均强制重编码不走 GPU。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
         properties: {
@@ -3095,7 +3111,16 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           watermarkPos: {
             type: 'string',
             enum: ['tl', 'tr', 'bl', 'br'],
-            description: '水印位置：tl 左上 / tr 右上 / bl 左下 / br 右下（默认 br）；仅水印生效。',
+            description: '水印位置：tl 左上 / tr 右上 / bl 左下 / br 右下（默认 br）；文字与图片水印都生效。',
+          },
+          watermarkImage: {
+            type: 'string',
+            description:
+              '图片水印的绝对路径（png/jpg/webp）：叠在画面最上层（filter_complex overlay），需位于允许的目录（家目录/Volumes/临时目录/输出目录）；仅视频目标，不适用于 GIF，暂不支持选轨；强制重编码。',
+          },
+          watermarkImageWidth: {
+            type: 'number',
+            description: '图片水印的显示宽度（像素 16–7680，等比缩放；0 或省略用图片原始宽度）。',
           },
           burn: {
             type: 'number',

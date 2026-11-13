@@ -2842,6 +2842,51 @@ const toolFx = await media.execute(
 );
 assert.ok(fs.existsSync(toolFx.file), 'tool brightness lands');
 
+// --- WP2: 图片水印 e2e -------------------------------------------------------
+const wmBadge = path.join(outDir, 'wm-badge.png');
+execFileSync(ffmpeg, [
+  '-y',
+  '-loglevel',
+  'error',
+  '-f',
+  'lavfi',
+  '-i',
+  'color=red:size=24x24',
+  '-frames:v',
+  '1',
+  wmBadge,
+]);
+const overlaid = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', watermarkImage: wmBadge, watermarkPos: 'tl' }),
+});
+assert.equal(overlaid.data.ok, true, JSON.stringify(overlaid.data));
+const overlaidDone = await waitJob(overlaid.data.job);
+// 与 WP1 对照组同参数重编码输出相比：overlay 必须真的改变画面。
+assert.notEqual(frameMd5Of(overlaidDone.out), frameMd5Of(fxCtlDone.out), '图片水印必须真的画进画面');
+// 目录围栏负向：允许目录之外的系统路径必须被拒（planFor 单漏斗）。
+const fenced = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', watermarkImage: '/etc/hosts' }),
+});
+assert.equal(fenced.data.ok, false, '目录外水印图片必须被拒');
+assert.match(fenced.data.error, /允许的目录/);
+// 扩展名负向：不是图片的文件必须被拒。
+const notImage = path.join(outDir, 'wm-not-image.txt');
+fs.writeFileSync(notImage, 'x');
+const badWmExt = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', watermarkImage: notImage }),
+});
+assert.equal(badWmExt.data.ok, false, '非图片水印必须被拒');
+assert.match(badWmExt.data.error, /必须是 png\/jpg\/webp/);
+// 工具通道同旋钮：e2e 一把。
+const toolOverlay = await media.execute(
+  { path: clip, action: 'convert', format: 'mp4', watermarkImage: wmBadge },
+  exec,
+);
+assert.ok(fs.existsSync(toolOverlay.file), 'tool image watermark lands');
+
 // 滤镜探测必须如实报告：用独立的 -filters 探测做真值，和 /status 对照
 //（假绿防线：只读 /status 的快照测不出“状态谎报无滤镜”的突变）。
 const filtersText = spawnSync(ffmpeg, ['-hide_banner', '-filters'], { encoding: 'utf8' }).stdout || '';

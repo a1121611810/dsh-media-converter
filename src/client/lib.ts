@@ -76,6 +76,16 @@ export interface ConvertRequest {
   watermarkPos?: string;
   burn?: number;
   at?: number;
+  // WP1: picture tuning (video-only) and constant-tempo pitch.
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+  denoise?: number;
+  sharpen?: number;
+  pitch?: number;
+  // WP2: image overlay watermark (absolute path in allowed dirs; host fences it).
+  watermarkImage?: string;
+  watermarkImageWidth?: number;
   mode?: 'extract-audio' | 'extract-video' | 'subtitle' | 'meta' | 'snapshot';
   stream?: number;
   tags?: Record<string, string>;
@@ -695,6 +705,9 @@ export function presetExtrasUnsupported(extras: {
   denoise?: unknown;
   sharpen?: unknown;
   pitch?: unknown;
+  // WP2: the overlay image is a local path, not a portable preset value.
+  watermarkImage?: unknown;
+  watermarkImageWidth?: unknown;
 }): boolean {
   return Object.values(extras).some((v) => v !== undefined && v !== null && v !== false && v !== '' && v !== 0);
 }
