@@ -857,6 +857,23 @@ async function savePreset() {
   }
 }
 
+// WP4: drop one watch folder from the queue page (the save restarts the watchers).
+async function removeWatchDir(dir: string): Promise<void> {
+  const rest = (status.value?.watchDirs || []).filter((item) => item !== dir);
+  const saved = await readJson<{ ok: true } | ErrorResponse>(
+    await fetch('/api/media-convert/config', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ watchDirs: rest.join(',') }),
+    }),
+  );
+  if (!saved.ok) {
+    detailError.value = saved.error;
+    return;
+  }
+  await fetchStatus();
+}
+
 const containerRows = computed(() =>
   meta.value
     ? [
@@ -2524,6 +2541,28 @@ watch([action, panelOpen], async () => {
             >
               {{ confirmClear ? t('queue.confirmClear') : t('queue.clear') }}
             </button>
+          </div>
+
+          <div v-if="(status?.watchDirs || []).length" class="mc-toolbar">
+            <span class="mc-muted">{{ t('watch.label') }}</span>
+            <span
+              v-for="dir in status?.watchDirs || []"
+              :key="dir"
+              class="mc-muted"
+              style="display: inline-flex; align-items: center; gap: 2px"
+            >
+              {{ dir }}
+              <button
+                type="button"
+                class="mc-btn mc-btn-ghost"
+                style="padding: 0 6px"
+                :disabled="busy"
+                :aria-label="t('watch.remove')"
+                @click="removeWatchDir(dir)"
+              >
+                ×
+              </button>
+            </span>
           </div>
 
           <BatchCard

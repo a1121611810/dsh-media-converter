@@ -3409,6 +3409,68 @@ await waitJob(allowedPreset.data.job);
 await call('config', { method: 'POST', body: JSON.stringify({ features: '' }) });
 await call('config', { method: 'POST', body: JSON.stringify({ extensions: '' }) });
 
+// --- WP4: watch folder -------------------------------------------------------
+const waitForQueueRow = async (name, ms) => {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const q = await call('queue');
+    const hit = (q.data.items || []).find((item) => item.upload && item.upload.name === name);
+    if (hit) return hit;
+    if (Date.now() > deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+};
+const watchDir = path.join(os.tmpdir(), 'mt-watch-' + Date.now().toString(36));
+fs.mkdirSync(watchDir, { recursive: true });
+// Save-time validation: disallowed root and a plain file are both refused
+// (fail-loud config beats a watcher that can never start).
+const badWatch = await call('config', { method: 'POST', body: JSON.stringify({ watchDirs: '/etc' }) });
+assert.equal(badWatch.data.ok, false, 'a disallowed watch dir is refused');
+assert.match(badWatch.data.error, /监视目录/);
+const watchAsFile = path.join(watchDir, 'not-a-dir.mp4');
+fs.writeFileSync(watchAsFile, 'x');
+const fileWatch = await call('config', { method: 'POST', body: JSON.stringify({ watchDirs: watchAsFile }) });
+assert.equal(fileWatch.data.ok, false, 'a file path is not a watch dir');
+assert.match(fileWatch.data.error, /不是目录/);
+const setWatch = await call('config', { method: 'POST', body: JSON.stringify({ watchDirs: watchDir }) });
+assert.equal(setWatch.data.ok, true, JSON.stringify(setWatch.data));
+const watchStatus = await call('status');
+assert.deepEqual(watchStatus.data.watchDirs, [path.resolve(watchDir)], '/status reports the watched dirs');
+// Startup alignment: media already inside the dir registers on watcher start.
+const preexisting = path.join(watchDir, 'preexisting.mp4');
+fs.copyFileSync(clip, preexisting);
+const preRow = await waitForQueueRow('preexisting.mp4', 15000);
+assert.ok(preRow, 'the startup scan registers existing media');
+// A dropped media file lands in the queue after the debounce window.
+const watchedDrop = path.join(watchDir, 'watched-drop.mp4');
+fs.copyFileSync(clip, watchedDrop);
+const dropRow = await waitForQueueRow('watched-drop.mp4', 15000);
+assert.ok(dropRow, 'a dropped file lands in the queue');
+// Non-media drops stay out (negative: the ignore path is real, not a race).
+fs.writeFileSync(path.join(watchDir, 'notes.txt'), 'hi');
+await new Promise((resolve) => setTimeout(resolve, 4000));
+const txtQueue = await call('queue');
+assert.ok(
+  !(txtQueue.data.items || []).some((item) => item.upload && item.upload.name === 'notes.txt'),
+  'non-media files are ignored',
+);
+// One row per watched path (dedupe, not duplicates).
+const dropRows = (await call('queue')).data.items.filter(
+  (item) => item.upload && item.upload.name === 'watched-drop.mp4',
+);
+assert.equal(dropRows.length, 1, 'one queue row per watched path');
+// Clearing the config stops watching: later drops stay out.
+await call('config', { method: 'POST', body: JSON.stringify({ watchDirs: '' }) });
+const clearedWatch = await call('status');
+assert.deepEqual(clearedWatch.data.watchDirs, [], 'cleared watch dirs');
+fs.copyFileSync(clip, path.join(watchDir, 'late.mp4'));
+await new Promise((resolve) => setTimeout(resolve, 4000));
+const lateQueue = await call('queue');
+assert.ok(
+  !(lateQueue.data.items || []).some((item) => item.upload && item.upload.name === 'late.mp4'),
+  'unwatched drops stay out of the queue',
+);
+
 // The save applies to the running instance: the very next status read serves
 // the new values, with no restart and no reload.
 const after = await call('status');
@@ -3705,6 +3767,22 @@ for (let attempt = 0; attempt < 50 && fs.existsSync(expiredOwnedFile); attempt +
 }
 assert.ok(!fs.existsSync(expiredOwnedFile), 'an owned copy is deleted from disk');
 assert.ok(fs.existsSync(expiredRegisteredFile), "a file registered by path is the user's own and survives");
+
+// WP4: a watch-folder row is exempt from the TTL sweep — the queue entry IS
+// the feature, and the file is the user's own on-disk media.
+const watchedDirForPrune = path.join(pruneDir, 'watched');
+fs.mkdirSync(watchedDirForPrune, { recursive: true });
+const watchedRowFile = path.join(watchedDirForPrune, 'watched.mp4');
+fs.writeFileSync(watchedRowFile, 'x');
+const plainRowFile = path.join(pruneDir, 'plain-expired.mp4');
+fs.writeFileSync(plainRowFile, 'x');
+const watchPruneMap = new Map([
+  ['u-watched', fakeUpload('u-watched', NOW - 24 * 3600_000, false, watchedRowFile)],
+  ['u-plain', fakeUpload('u-watched-plain', NOW - 24 * 3600_000, false, plainRowFile)],
+]);
+const prunedWatch = pruneUploads(watchPruneMap, new Map(), 2 * 3600_000, NOW, [watchedDirForPrune]);
+assert.deepEqual(prunedWatch, ['u-plain'], 'the TTL sweep skips watch-folder rows');
+assert.ok(watchPruneMap.has('u-watched'), 'a watched row survives a far-past stamp');
 assert.ok(fs.existsSync(keptRunningFile), 'the running job keeps its source on disk');
 fs.rmSync(pruneDir, { recursive: true, force: true });
 

@@ -129,6 +129,16 @@ export function isInsideDir(dir: string, file: string, platform = process.platfo
   return rel !== '' && !rel.startsWith('..') && !p.isAbsolute(rel);
 }
 
+// True when `file` equals one of `dirs` or sits inside any of them. The watch
+// folder TTL exemption and the ghost-row sweep both decide through this.
+export function isPathInsideAny(dirs: string[], file: string, platform = process.platform): boolean {
+  const resolved = pathFor(platform).resolve(file);
+  return dirs.some((dir) => {
+    const root = pathFor(platform).resolve(dir);
+    return resolved === root || isInsideDir(root, resolved, platform);
+  });
+}
+
 // A file name every file system accepts: no separators, no control characters,
 // and none of the names Windows reserves for devices.
 export function safeBaseName(raw: string, platform = process.platform): string {

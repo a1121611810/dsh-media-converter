@@ -84,6 +84,7 @@ import {
   ffmpegCandidates,
   imageioPatterns,
   isInsideDir,
+  isPathInsideAny,
   pickBackend,
   probeCandidates,
   revealCommand,
@@ -192,6 +193,9 @@ export interface Config {
   queueLimit: number;
   extensions: string;
   nameTemplate: string;
+  // Comma-separated absolute paths watched for new media files (≤8, each
+  // inside the allowed directories). Empty disables watching.
+  watchDirs: string;
 }
 
 export const Config = Schema.object({
@@ -206,6 +210,7 @@ export const Config = Schema.object({
   queueLimit: Schema.number().default(2000).volatile(),
   extensions: Schema.string().default('').volatile(),
   nameTemplate: Schema.string().default('').volatile(),
+  watchDirs: Schema.string().default('').volatile(),
 });
 
 // The action panel's module keys, in their built-in order. A configured
@@ -503,6 +508,8 @@ export interface JsonBody {
   queueLimit?: unknown;
   extensions?: unknown;
   nameTemplate?: unknown;
+  // WP4: comma-separated absolute paths watched for new media files (≤8).
+  watchDirs?: unknown;
   ids?: unknown;
   // Concat run: the ordered upload ids and the chosen level ('copy'|'encode').
   concatIds?: unknown;
@@ -761,6 +768,7 @@ const statusPayload = (
   softwareCodecs: Record<string, string[]>,
   filters: { drawtext: boolean; subtitles: boolean; scale: boolean },
   extensions: ReturnType<typeof statusOf>,
+  watchDirs: string[],
 ) => ({
   ok: true as const,
   ffmpegPath,
@@ -780,6 +788,7 @@ const statusPayload = (
   softwareCodecs,
   filters,
   extensions,
+  watchDirs,
 });
 export type StatusResponse = ReturnType<typeof statusPayload>;
 
@@ -849,11 +858,15 @@ export const pruneUploads = (
   jobs: Map<string, Job>,
   ttlMs: number,
   now: number,
+  watched: string[] = [],
 ): string[] => {
   const pruned: string[] = [];
   for (const [id, upload] of uploads) {
     if (now - upload.at <= ttlMs) continue;
     if ([...jobs.values()].some((job) => job.uploadId === id && job.state === 'running')) continue;
+    // A watch folder row points at the user's own file on disk; the queue
+    // entry IS the feature, so the TTL sweep must never evict it.
+    if (watched.length && isPathInsideAny(watched, upload.path)) continue;
     uploads.delete(id);
     if (upload.owned) fs.rm(upload.path, { force: true }, () => {});
     pruned.push(id);
@@ -1117,6 +1130,195 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
   // saved value must not take the whole plugin down — and strictly at save.
   let extensionManifests: ExtensionManifest[] = [];
   let extensionEntries: ExtensionEntry[] = [];
+  // Resolved watch folders (browse-allowed, de-duplicated). The TTL exemption
+  // and the ghost sweep both read this.
+  let watchedDirs: string[] = [];
+
+  // Probe + register absolute media paths (owned: false — the user's own
+  // files, never deleted). Shared by the /register route and the watch
+  // folders. A re-seen path only refreshes its TTL stamp. Answers in path
+  // order; skips are diagnostics, not failures.
+  const registerPaths = async (
+    files: string[],
+    bin: string,
+  ): Promise<{ uploads: UploadResponse[]; skipped: { path: string; reason: string }[] }> => {
+    const uploadsOut: { path: string; payload: UploadResponse }[] = [];
+    const skipped: { path: string; reason: string }[] = [];
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(4, files.length) }, async () => {
+      for (;;) {
+        const index = cursor;
+        cursor += 1;
+        if (index >= files.length) return;
+        const file = path.resolve(files[index]);
+        if (!browseAllowed(file)) {
+          skipped.push({ path: file, reason: '不在允许的目录' });
+          continue;
+        }
+        const name = path.basename(file);
+        const kind = kindByExt(extOf(name));
+        if (kind !== 'video' && kind !== 'audio' && kind !== 'image') {
+          skipped.push({ path: file, reason: '不是媒体文件' });
+          continue;
+        }
+        const stat = await fsp.stat(file).catch(() => null);
+        if (!stat || !stat.isFile()) {
+          skipped.push({ path: file, reason: '文件不存在' });
+          continue;
+        }
+        const existing = [...uploads.values()].find((item) => item.path === file);
+        if (existing) {
+          existing.at = Date.now();
+          uploadsOut.push({
+            path: file,
+            payload: uploadPayload(
+              existing.id,
+              existing.name,
+              existing.kind,
+              existing.duration,
+              existing.size,
+              existing.streams,
+              existing.meta,
+            ),
+          });
+          continue;
+        }
+        const result = await probeFile(file, bin, ffprobe);
+        if (!result) {
+          skipped.push({ path: file, reason: '无法识别的媒体文件' });
+          continue;
+        }
+        const upload: Upload = {
+          id: `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+          name,
+          path: file,
+          owned: false,
+          kind: result.kind,
+          duration: result.duration,
+          size: stat.size,
+          mTimeMs: stat.mtimeMs,
+          streams: result.streams,
+          meta: result.meta,
+          at: Date.now(),
+        };
+        uploads.set(upload.id, upload);
+        uploadsOut.push({
+          path: file,
+          payload: uploadPayload(
+            upload.id,
+            upload.name,
+            upload.kind,
+            upload.duration,
+            upload.size,
+            upload.streams,
+            upload.meta,
+          ),
+        });
+      }
+    });
+    await Promise.all(workers);
+    persist();
+    uploadsOut.sort((a, b) => a.path.localeCompare(b.path));
+    return { uploads: uploadsOut.map((entry) => entry.payload), skipped };
+  };
+
+  // --- watch folders ----------------------------------------------------------
+  // fs.watch per configured directory; new media files register themselves
+  // into the queue (owned: false). Debounced 1.5s, burst-capped, recursive
+  // where the platform allows (macOS/Windows) with a flat fallback elsewhere.
+  // The whole block sits above resolveConfig so a config save can restart the
+  // watchers; the first scan defers to a macrotask, by which time persist()
+  // below exists.
+  const WATCH_MAX_DIRS = 8;
+  const WATCH_BURST = 64;
+  let watchDisposers: Array<() => void> = [];
+  const watchDebounce = new Map<string, NodeJS.Timeout>();
+  const watchBurst = new Map<string, { count: number; resetAt: number }>();
+  const stopWatchers = (): void => {
+    for (const dispose of watchDisposers) dispose();
+    watchDisposers = [];
+    // Pending debounces must not fire after a restart/unload: an ingest into
+    // a dir that is no longer watched would still plant a queue row.
+    for (const timer of watchDebounce.values()) clearTimeout(timer);
+    watchDebounce.clear();
+    watchBurst.clear();
+  };
+  const ingestWatched = async (file: string): Promise<void> => {
+    const stat = await fsp.stat(file).catch(() => null);
+    if (!stat || !stat.isFile()) return; // a deletion is not our business
+    const kind = kindByExt(extOf(path.basename(file)));
+    if (kind !== 'video' && kind !== 'audio' && kind !== 'image') return;
+    if (!ffmpeg) return;
+    await registerPaths([file], ffmpeg);
+  };
+  const scanWatched = async (): Promise<void> => {
+    if (!ffmpeg) return;
+    for (const dir of watchedDirs) {
+      const found: string[] = [];
+      const walk = async (current: string, depth: number): Promise<void> => {
+        if (depth > 4) return;
+        const entries = await fsp.readdir(current, { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+          if (entry.name.startsWith('.')) continue;
+          const full = path.join(current, entry.name);
+          if (entry.isDirectory()) await walk(full, depth + 1);
+          else if (entry.isFile()) {
+            const kind = kindByExt(extOf(entry.name));
+            if (kind === 'video' || kind === 'audio' || kind === 'image') found.push(full);
+          }
+          if (found.length >= 2000) return;
+        }
+      };
+      await walk(dir, 0);
+      await registerPaths(found.slice(0, 2000), ffmpeg);
+      // Ghost sweep: a watched row whose file vanished drops out.
+      for (const [id, upload] of uploads) {
+        if (isPathInsideAny([dir], upload.path) && !(await fsp.stat(upload.path).catch(() => null))) {
+          uploads.delete(id);
+        }
+      }
+    }
+    persist();
+  };
+  const refreshWatchers = (): void => {
+    stopWatchers();
+    for (const dir of watchedDirs) {
+      const attach = (recursive: boolean): boolean => {
+        try {
+          const watcher = fs.watch(dir, { recursive }, (_event, name) => {
+            if (!name || String(name).startsWith('.')) return;
+            const full = path.join(dir, String(name));
+            const now = Date.now();
+            const burst = watchBurst.get(dir) || { count: 0, resetAt: now + 10_000 };
+            if (now > burst.resetAt) {
+              burst.count = 0;
+              burst.resetAt = now + 10_000;
+            }
+            burst.count += 1;
+            watchBurst.set(dir, burst);
+            if (burst.count > WATCH_BURST) return;
+            const old = watchDebounce.get(full);
+            if (old) clearTimeout(old);
+            watchDebounce.set(
+              full,
+              setTimeout(() => {
+                watchDebounce.delete(full);
+                void ingestWatched(full).catch(() => {});
+              }, 1500),
+            );
+          });
+          watchDisposers.push(() => watcher.close());
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      // Linux lacks recursive fs.watch: fall back to the top level silently.
+      if (!attach(true)) attach(false);
+    }
+    const timer = setTimeout(() => void scanWatched().catch(() => {}), 0);
+    timer.unref();
+  };
   const resolveConfig = (raw: Partial<Config>) => {
     // A configured '~/Movies/x' means the home directory, not a folder literally
     // named '~' under the working directory.
@@ -1144,6 +1346,16 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     }
     extensionManifests = parsedExtensions.ok ? parsedExtensions.manifests : [];
     extensionEntries = entriesOf(extensionManifests);
+    // Watch folders: the save route validates loudly; here a hand-edited
+    // profile only gets the browse-allowed subset.
+    const watchTokens = String(unwrap(raw.watchDirs) || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, WATCH_MAX_DIRS)
+      .map((item) => path.resolve(item.replace(/^~(?=$|[/\\])/, os.homedir())));
+    watchedDirs = [...new Set(watchTokens)].filter((dir) => browseAllowed(dir));
+    refreshWatchers();
     features = resolveFeatures(unwrap(raw.features), [
       ...ACTIONS.map((entry) => entry.id),
       ...extensionEntries.map((entry) => entry.ref),
@@ -3238,7 +3450,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
     const pruneTimer = setInterval(
       () => {
         const now = Date.now();
-        pruneUploads(uploads, jobs, uploadTtlMs, now);
+        pruneUploads(uploads, jobs, uploadTtlMs, now, watchedDirs);
         // Finished jobs are only kept so the poll that reads them still works.
         for (const [id, job] of jobs) {
           if (job.state !== 'running' && now - job.at > JOB_TTL_MS) jobs.delete(id);
@@ -3311,6 +3523,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
                 scale: build ? build.filters.includes('scale') : false,
               },
               statusOf(extensionManifests),
+              watchedDirs,
             ),
           );
         },
@@ -3354,6 +3567,21 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             if (body.persistState !== undefined) {
               if (typeof body.persistState !== 'boolean') throw new Error('persistState 必须是布尔值');
               patch.persistState = body.persistState;
+            }
+            if (body.watchDirs !== undefined) {
+              if (typeof body.watchDirs !== 'string') throw new Error('watchDirs 必须是字符串');
+              const dirs = String(body.watchDirs)
+                .split(',')
+                .map((item) => item.trim())
+                .filter(Boolean);
+              if (dirs.length > 8) throw new Error('watchDirs 最多 8 个目录');
+              for (const dir of dirs) {
+                const resolved = path.resolve(dir.replace(/^~(?=$|[/\\])/, os.homedir()));
+                if (!browseAllowed(resolved)) throw new Error('监视目录只能在家目录、/Volumes 或临时目录内');
+                const stat = await fsp.stat(resolved).catch(() => null);
+                if (!stat || !stat.isDirectory()) throw new Error(`监视目录不存在或不是目录：${dir}`);
+              }
+              patch.watchDirs = body.watchDirs;
             }
             if (body.uploadTtlMinutes !== undefined) {
               const minutes = Number(body.uploadTtlMinutes);
@@ -3595,87 +3823,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
             }
             const files = [...new Set(requested)].slice(0, 2000);
             if (!files.length) return json(res, 200, errorPayload('没有可添加的媒体文件'));
-            const uploadsOut: { path: string; payload: UploadResponse }[] = [];
-            const skipped: { path: string; reason: string }[] = [];
-            // The probe is the only slow part; four at a time turns a folder of
-            // a few hundred files into a few seconds without flooding ffmpeg.
-            let cursor = 0;
-            const workers = Array.from({ length: Math.min(4, files.length) }, async () => {
-              for (;;) {
-                const index = cursor;
-                cursor += 1;
-                if (index >= files.length) return;
-                const file = path.resolve(files[index]);
-                if (!browseAllowed(file)) {
-                  skipped.push({ path: file, reason: '不在允许的目录' });
-                  continue;
-                }
-                const name = path.basename(file);
-                const kind = kindByExt(extOf(name));
-                if (kind !== 'video' && kind !== 'audio' && kind !== 'image') {
-                  skipped.push({ path: file, reason: '不是媒体文件' });
-                  continue;
-                }
-                const stat = await fsp.stat(file).catch(() => null);
-                if (!stat || !stat.isFile()) {
-                  skipped.push({ path: file, reason: '文件不存在' });
-                  continue;
-                }
-                const existing = [...uploads.values()].find((item) => item.path === file);
-                if (existing) {
-                  uploadsOut.push({
-                    path: file,
-                    payload: uploadPayload(
-                      existing.id,
-                      existing.name,
-                      existing.kind,
-                      existing.duration,
-                      existing.size,
-                      existing.streams,
-                      existing.meta,
-                    ),
-                  });
-                  continue;
-                }
-                const result = await probeFile(file, bin, ffprobe);
-                if (!result) {
-                  skipped.push({ path: file, reason: '无法识别的媒体文件' });
-                  continue;
-                }
-                const upload: Upload = {
-                  id: `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-                  name,
-                  path: file,
-                  owned: false,
-                  kind: result.kind,
-                  duration: result.duration,
-                  size: stat.size,
-                  mTimeMs: stat.mtimeMs,
-                  streams: result.streams,
-                  meta: result.meta,
-                  at: Date.now(),
-                };
-                uploads.set(upload.id, upload);
-                uploadsOut.push({
-                  path: file,
-                  payload: uploadPayload(
-                    upload.id,
-                    upload.name,
-                    upload.kind,
-                    upload.duration,
-                    upload.size,
-                    upload.streams,
-                    upload.meta,
-                  ),
-                });
-              }
-            });
-            await Promise.all(workers);
-            persist();
-            // Four workers finish in any order; the panel shows the rows in
-            // the order it receives them, so answer in path order.
-            uploadsOut.sort((a, b) => a.path.localeCompare(b.path));
-            json(res, 200, { ok: true, uploads: uploadsOut.map((entry) => entry.payload), skipped });
+            const { uploads: regOut, skipped } = await registerPaths(files, bin);
+            return json(res, 200, { ok: true, uploads: regOut, skipped });
           } catch (err) {
             json(res, 200, errorPayload(errorText(err)));
           }
@@ -4362,6 +4511,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       }),
     ];
     return () => {
+      stopWatchers();
       persist();
       clearInterval(stateTimer);
       clearTimeout(resumeTimer);

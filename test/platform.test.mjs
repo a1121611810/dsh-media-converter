@@ -9,6 +9,7 @@ import {
   hardwareBackendsFor,
   imageioPatterns,
   isInsideDir,
+  isPathInsideAny,
   pickBackend,
   probeCandidates,
   revealCommand,
@@ -103,6 +104,11 @@ assert.deepEqual(revealCommand('/tmp/out/a.mp4', 'linux'), { command: 'xdg-open'
 
 // --- staying inside a directory --------------------------------------------
 // A prefix check alone is defeated by a '..' segment.
+assert.equal(isPathInsideAny(['/watch/a', '/watch/b'], '/watch/a/x.mp4'), true, '子目录命中');
+assert.equal(isPathInsideAny(['/watch/a'], '/watch/a'), true, '目录自身命中');
+assert.equal(isPathInsideAny(['/watch/a'], '/watch/ab/x.mp4'), false, '前缀相似的兄弟目录不命中');
+assert.equal(isPathInsideAny(['/watch/a'], '/etc/passwd'), false, '无关路径不命中');
+assert.equal(isPathInsideAny([], '/watch/a/x.mp4'), false, '空目录表不命中');
 assert.equal(isInsideDir('/out/box', '/out/box/a.mp4'), true);
 assert.equal(isInsideDir('/out/box', '/out/box/sub/a.mp4'), true);
 assert.equal(isInsideDir('/out/box', '/out/box/../secret.txt'), false);

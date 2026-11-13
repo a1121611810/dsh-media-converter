@@ -777,6 +777,20 @@ const MUTANTS = [
     expect: "features 含 'x:wechat-image/wx-webp' 时必须放行该预设；突变后 token 被丢 → WP3 恢复用例红",
   },
   {
+    id: 'V8',
+    name: '监视目录 TTL 豁免被摘除（监视行被清扫）',
+    source: 'index.ts',
+    test: 'test/host.test.mjs',
+    apply: (s) =>
+      replaceOnce(
+        s,
+        'if (watched.length && isPathInsideAny(watched, upload.path)) continue;',
+        'if (watched.length && false) continue;',
+      ),
+    distAnchor: 'watched.length && false',
+    expect: '监视目录内的行必须豁免 TTL 清扫；突变后被清 → pruneUploads 纯测红',
+  },
+  {
     id: 'F3',
     name: 'features 未知 token 不再丢弃',
     source: 'lib/actions.ts',
