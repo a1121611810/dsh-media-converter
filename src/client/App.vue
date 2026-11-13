@@ -307,6 +307,14 @@ const loudnormOn = ref(false);
 const wmText = ref('');
 const wmPos = ref('br');
 const burnTrack = ref(-1);
+// WP1 knobs: eq/denoise/sharpen are video-only; pitch shifts audio at constant
+// tempo. Like every tuned knob they reset with the format.
+const fxBrightness = ref(0);
+const fxContrast = ref(1);
+const fxSaturation = ref(1);
+const fxDenoise = ref(0);
+const fxSharpen = ref(0);
+const pitch = ref(1);
 const snapAt = ref(0);
 const snapFormat = ref('png');
 const trimStart = ref('');
@@ -748,6 +756,14 @@ const showBurn = computed(
     status.value?.filters?.subtitles === true &&
     Boolean(meta.value && meta.value.subtitles.length),
 );
+// WP1 picture tuning: video-in/video-out only (an mp3/m4a target has no picture).
+const showVideoFx = computed(
+  () =>
+    (currentAction.value?.id.startsWith('fmt:') || currentAction.value?.id === 'trim') &&
+    file.value?.kind === 'video' &&
+    format.value !== 'mp3' &&
+    format.value !== 'm4a',
+);
 // A stale encoder pick must not ride into the next format: reset on change.
 watch(format, () => {
   swCodec.value = 'h264';
@@ -760,6 +776,12 @@ watch(format, () => {
   wmText.value = '';
   wmPos.value = 'br';
   burnTrack.value = -1;
+  fxBrightness.value = 0;
+  fxContrast.value = 1;
+  fxSaturation.value = 1;
+  fxDenoise.value = 0;
+  fxSharpen.value = 0;
+  pitch.value = 1;
 });
 
 // Save the current form state as a macro in the reserved per-kind pack; the
@@ -777,6 +799,12 @@ async function savePreset() {
       loudnorm: loudnormOn.value,
       watermarkText: wmText.value.trim() || undefined,
       burn: burnTrack.value >= 0 ? true : undefined,
+      brightness: fxBrightness.value || undefined,
+      contrast: fxContrast.value !== 1 ? fxContrast.value : undefined,
+      saturation: fxSaturation.value !== 1 ? fxSaturation.value : undefined,
+      denoise: fxDenoise.value || undefined,
+      sharpen: fxSharpen.value || undefined,
+      pitch: pitch.value !== 1 ? pitch.value : undefined,
     })
   ) {
     presetMessage.value = t('preset.noTuned');
@@ -2018,6 +2046,12 @@ function convert() {
       remux: remuxOnly.value || undefined,
       speed: speed.value !== 1 ? speed.value : undefined,
       loudnorm: loudnormOn.value || undefined,
+      brightness: fxBrightness.value || undefined,
+      contrast: fxContrast.value !== 1 ? fxContrast.value : undefined,
+      saturation: fxSaturation.value !== 1 ? fxSaturation.value : undefined,
+      denoise: fxDenoise.value || undefined,
+      sharpen: fxSharpen.value || undefined,
+      pitch: pitch.value !== 1 ? pitch.value : undefined,
       watermarkText: wmText.value.trim() || undefined,
       watermarkPos: wmPos.value,
       burn: burnTrack.value >= 0 ? burnTrack.value : undefined,
@@ -2066,6 +2100,12 @@ function applyTrim() {
       remux: remuxOnly.value || undefined,
       speed: speed.value !== 1 ? speed.value : undefined,
       loudnorm: loudnormOn.value || undefined,
+      brightness: fxBrightness.value || undefined,
+      contrast: fxContrast.value !== 1 ? fxContrast.value : undefined,
+      saturation: fxSaturation.value !== 1 ? fxSaturation.value : undefined,
+      denoise: fxDenoise.value || undefined,
+      sharpen: fxSharpen.value || undefined,
+      pitch: pitch.value !== 1 ? pitch.value : undefined,
       watermarkText: wmText.value.trim() || undefined,
       watermarkPos: wmPos.value,
       burn: burnTrack.value >= 0 ? burnTrack.value : undefined,
@@ -2926,6 +2966,88 @@ watch([action, panelOpen], async () => {
                 <input type="checkbox" v-model="loudnormOn" :disabled="busy" @change="resetResult" />
                 {{ t('fx.loudnorm') }}
               </label>
+              <span class="mc-muted">{{ t('fx.pitch') }}</span>
+              <input
+                class="mc-name-input"
+                style="width: 64px"
+                type="number"
+                min="0.5"
+                max="2"
+                step="0.05"
+                v-model.number="pitch"
+                :disabled="busy"
+                :aria-label="t('fx.pitch')"
+                @input="resetResult"
+              />
+              <span class="mc-muted">{{ t('fx.pitchHint') }}</span>
+            </div>
+            <div v-if="showVideoFx" class="mc-row">
+              <span class="mc-muted">{{ t('fx.brightness') }}</span>
+              <input
+                class="mc-name-input"
+                style="width: 56px"
+                type="number"
+                min="-1"
+                max="1"
+                step="0.05"
+                v-model.number="fxBrightness"
+                :disabled="busy"
+                :aria-label="t('fx.brightness')"
+                @input="resetResult"
+              />
+              <span class="mc-muted">{{ t('fx.contrast') }}</span>
+              <input
+                class="mc-name-input"
+                style="width: 56px"
+                type="number"
+                min="0.25"
+                max="2"
+                step="0.05"
+                v-model.number="fxContrast"
+                :disabled="busy"
+                :aria-label="t('fx.contrast')"
+                @input="resetResult"
+              />
+              <span class="mc-muted">{{ t('fx.saturation') }}</span>
+              <input
+                class="mc-name-input"
+                style="width: 56px"
+                type="number"
+                min="0"
+                max="3"
+                step="0.25"
+                v-model.number="fxSaturation"
+                :disabled="busy"
+                :aria-label="t('fx.saturation')"
+                @input="resetResult"
+              />
+              <span class="mc-muted">{{ t('fx.denoise') }}</span>
+              <input
+                class="mc-name-input"
+                style="width: 56px"
+                type="number"
+                min="1"
+                max="8"
+                step="1"
+                v-model.number="fxDenoise"
+                :disabled="busy"
+                :aria-label="t('fx.denoise')"
+                @input="resetResult"
+              />
+              <span class="mc-muted">{{ t('fx.sharpen') }}</span>
+              <input
+                class="mc-name-input"
+                style="width: 56px"
+                type="number"
+                min="0.25"
+                max="2"
+                step="0.25"
+                v-model.number="fxSharpen"
+                :disabled="busy"
+                :aria-label="t('fx.sharpen')"
+                @input="resetResult"
+              />
+              <span class="mc-muted">{{ t('fx.fxHint') }}</span>
             </div>
             <div v-if="showWatermark" class="mc-row">
               <span class="mc-muted">{{ t('wm.text') }}</span>

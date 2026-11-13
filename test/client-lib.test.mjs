@@ -640,6 +640,27 @@ ok(presetExtrasUnsupported({ flip: 'h' }), true, 'flip 拦截');
 ok(presetExtrasUnsupported({ remux: true }), true, 'remux 拦截');
 ok(presetExtrasUnsupported({ speed: 2 }), true, 'speed 拦截');
 ok(presetExtrasUnsupported({ loudnorm: true }), true, 'loudnorm 拦截');
+ok(presetExtrasUnsupported({ brightness: 0.2 }), true, '亮度拦截');
+ok(presetExtrasUnsupported({ denoise: 2 }), true, '降噪拦截');
+ok(presetExtrasUnsupported({ pitch: 1.5 }), true, '变调拦截');
+ok(
+  presetExtrasUnsupported({
+    crop: undefined,
+    rotate: 0,
+    flip: '',
+    remux: false,
+    loudnorm: false,
+    watermarkText: '',
+    burn: undefined,
+    brightness: 0,
+    denoise: 0,
+    sharpen: 0,
+  }),
+  false,
+  'WP1 全默认不拦截（假值组：0/空串/false/undefined）',
+);
+ok(presetExtrasUnsupported({ contrast: 1.5 }), true, 'contrast 非默认拦截');
+ok(presetExtrasUnsupported({ saturation: 0 }), false, 'saturation 0 按假值不计（客户端不发送）');
 ok(presetExtrasUnsupported({ watermarkText: 'x' }), true, '水印拦截');
 ok(presetExtrasUnsupported({ burn: true }), true, '烧录拦截');
 ok(presetExtrasUnsupported({ rotate: 0 }), false, 'rotate 0 不拦截');

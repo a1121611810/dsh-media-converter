@@ -688,6 +688,13 @@ export function presetExtrasUnsupported(extras: {
   loudnorm?: unknown;
   watermarkText?: unknown;
   burn?: unknown;
+  // WP1: tuned picture/audio knobs have the same nowhere-to-go problem.
+  brightness?: unknown;
+  contrast?: unknown;
+  saturation?: unknown;
+  denoise?: unknown;
+  sharpen?: unknown;
+  pitch?: unknown;
 }): boolean {
   return Object.values(extras).some((v) => v !== undefined && v !== null && v !== false && v !== '' && v !== 0);
 }

@@ -468,6 +468,16 @@ export interface JsonBody {
   burn?: unknown;
   burnFile?: string;
   at?: unknown;
+  // WP1 knobs: picture tuning (eq brightness/contrast/saturation, hqdn3d
+  // denoise, unsharp sharpen) is video-only; pitch (0.5–2) shifts audio pitch
+  // at constant tempo and needs a known source sample rate. Like every tuned
+  // knob, any of them disables the copy fast path and the GPU path.
+  brightness?: unknown;
+  contrast?: unknown;
+  saturation?: unknown;
+  denoise?: unknown;
+  sharpen?: unknown;
+  pitch?: unknown;
   // An extension preset reference ('x:<manifest>/<action>'); when set, the
   // plan comes from the extension table instead of the built-in recipe.
   preset?: unknown;
@@ -2826,6 +2836,14 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       // R5: speed/loudnorm/watermark/burn/snapshot.
       speed: Number(a.speed || 0) || undefined,
       loudnorm: a.loudnorm === true ? true : undefined,
+      // WP1: picture tuning (video-only) and constant-tempo pitch; both force
+      // a re-encode. 0/absent means "keep the recipe/source".
+      brightness: Number(a.brightness || 0) || undefined,
+      contrast: Number(a.contrast || 0) || undefined,
+      saturation: Number(a.saturation || 0) || undefined,
+      denoise: Number(a.denoise || 0) || undefined,
+      sharpen: Number(a.sharpen || 0) || undefined,
+      pitch: Number(a.pitch || 0) || undefined,
       watermarkText: a.watermarkText !== undefined ? String(a.watermarkText) : undefined,
       watermarkPos: a.watermarkPos !== undefined ? String(a.watermarkPos) : undefined,
       burn: a.burn !== undefined && a.burn !== null ? Number(a.burn) : undefined,
@@ -2946,7 +2964,7 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       description:
         '本机媒体处理（ffmpeg，文件不出本机）。支持：①probe 查看时长/分辨率/编码/音轨/字幕轨/标签；②convert 转格式（视频 mp4/mov/mkv/webm/avi/flv/wmv/ts/ogv/gif，音频 mp3/m4a/aac/wav/flac/ogg/opus/aiff，图片 png/jpg/webp/gif/bmp/tiff/avif）；' +
         '③extract-audio 抽音轨、④extract-video 抽画面（不重编码，可带 stream 选类型内第几条轨）；⑤subtitle 导出内嵌字幕（srt/ass/vtt，默认 srt）；⑥rewrite-tags 改写标题/作者/专辑/备注/日期/流派（另存新文件）；⑦concat 合并多个同类型文件（paths[]，mode=copy 直接拷贝/encode 重编码）；⑧split-chapters 按章节分割为多个文件（默认 copy 关键帧裁剪，mode=encode 精确重编码，返回 files[]）。' +
-        'convert 可带 trim（秒，{start,end}）裁剪；视频转视频可带 videoTrack、带音频的输出可带 audioTrack（类型内轨序号，1=第二条，0 或不填走默认轨；显式选轨将禁用直接拷贝）；软件编码可选 codec（hevc=libx265、av1=libsvtav1，仅 mp4/mov/mkv，配 hardware=false 或缺省；缺编码器时任务报错，其它容器回退 H.264），指定 codec 而不填 hardware 视同请求 GPU 硬编（h264/hevc，hevc 限 mp4/mov/mkv/ts）；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale，x265/svt-av1 映射各自 CRF）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）；⑨snapshot 截图（at=秒处取帧，format=png/jpg）；convert 还可带 crop（宽:高[:x[:y]]、偶数）/rotate（90/180/270）/flip（h|v）做画面几何，remux:true 仅换封装，speed（0.25–4）变速，loudnorm:true 响度归一，watermarkText 与 watermarkPos（tl/tr/bl/br）文字水印，burn（字幕轨序号）烧录。产物写在输出目录，返回新文件路径。',
+        'convert 可带 trim（秒，{start,end}）裁剪；视频转视频可带 videoTrack、带音频的输出可带 audioTrack（类型内轨序号，1=第二条，0 或不填走默认轨；显式选轨将禁用直接拷贝）；软件编码可选 codec（hevc=libx265、av1=libsvtav1，仅 mp4/mov/mkv，配 hardware=false 或缺省；缺编码器时任务报错，其它容器回退 H.264），指定 codec 而不填 hardware 视同请求 GPU 硬编（h264/hevc，hevc 限 mp4/mov/mkv/ts）；软件编码的视频（mp4/mov/mkv/flv/ts 映射 x264 CRF，webm 映射 vp9 CRF，avi/wmv/ogv 映射 qscale，x265/svt-av1 映射各自 CRF）与图片 jpg/webp 可带 quality（1-100，90=默认），GPU 硬编时映射为目标码率倍率；转 mp3/m4a/aac/opus 可带 bitrate（kbps，32-320；音频文件与视频转音频均有效；GPU 硬编的视频转视频 mp4/mov/mkv/flv/ts 控制输出音轨，软件编码的视频转视频仍保留源音轨）；音频编码目标（音频文件转 mp3/m4a/aac/opus/wav/flac/ogg/aiff，或视频转 mp3/m4a）可带 channels（1=单声道，2=立体声）与 sampleRate（采样率 Hz，8000-96000，如 22050；0 或不填保留源）；视频转 gif 可带 fps（1-30）与 width（≥16 像素，0 或不填用默认 12fps/640px）；⑨snapshot 截图（at=秒处取帧，format=png/jpg）；convert 还可带 crop（宽:高[:x[:y]]、偶数）/rotate（90/180/270）/flip（h|v）做画面几何，remux:true 仅换封装，speed（0.25–4）变速，loudnorm:true 响度归一，watermarkText 与 watermarkPos（tl/tr/bl/br）文字水印，burn（字幕轨序号）烧录；画质滤镜 brightness（-1–1）/contrast（0.25–2）/saturation（0–3，eq）、denoise（1–8，hqdn3d）、sharpen（0.25–2，unsharp）仅视频目标，pitch（0.5–2）变调不变速（需源文件有已知采样率），均强制重编码不走 GPU。产物写在输出目录，返回新文件路径。',
       parameters: {
         type: 'object',
         properties: {
@@ -3043,6 +3061,31 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
           loudnorm: {
             type: 'boolean',
             description: 'true=单遍响度归一化（EBU R128：-16 LUFS、TP -1.5）；与变速同用时排在 atempo 之后。',
+          },
+          brightness: {
+            type: 'number',
+            description: '画面亮度 -1–1（0=不变，负值调暗）：eq 滤镜，仅视频目标，强制重编码。',
+          },
+          contrast: {
+            type: 'number',
+            description: '画面对比度 0.25–2（1=不变）：eq 滤镜，仅视频目标，强制重编码。',
+          },
+          saturation: {
+            type: 'number',
+            description: '画面饱和度 0–3（1=不变，0=黑白）：eq 滤镜，仅视频目标，强制重编码。',
+          },
+          denoise: {
+            type: 'number',
+            description: '画面降噪 1–8（hqdn3d，越大越强）：仅视频目标，强制重编码。',
+          },
+          sharpen: {
+            type: 'number',
+            description: '画面锐化 0.25–2（unsharp，越大越强）：仅视频目标，强制重编码。',
+          },
+          pitch: {
+            type: 'number',
+            description:
+              '变调 0.5–2（1=不变，>1 升调）：变速不变（asetrate+aresample+atempo），需源文件有已知采样率，音频/带音频输出有效，强制重编码。',
           },
           watermarkText: {
             type: 'string',

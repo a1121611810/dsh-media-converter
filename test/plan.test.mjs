@@ -11,6 +11,10 @@ import {
   concatListText,
   copyArgs,
   loudnormSegment,
+  eqSegment,
+  denoiseSegment,
+  sharpenSegment,
+  pitchSegment,
   snapshotPlan,
   speedSegments,
   watermarkSegment,
@@ -1103,3 +1107,84 @@ assert.throws(
 );
 assert.throws(() => convertEntry.plan(trackUpload(1), { format: 'mp4', burn: 0 }, 0, null), /这条字幕轨不存在/);
 console.log('plan: R5 用例 ok');
+
+// --- WP1：基础画面滤镜 + 变调 ------------------------------------------------
+assert.equal(eqSegment({ brightness: 0.2 }), 'eq=brightness=0.2');
+assert.equal(eqSegment({ brightness: -0.5 }), 'eq=brightness=-0.5', '负亮度必须保留（V1 靶子）');
+assert.equal(eqSegment({ brightness: 0, contrast: 1, saturation: 1 }), null, '全默认不成段');
+assert.equal(
+  eqSegment({ brightness: 5, contrast: 0.1, saturation: -1 }),
+  'eq=brightness=1:contrast=0.25:saturation=0',
+  'clamp',
+);
+assert.equal(eqSegment({ contrast: 1.5, saturation: 2 }), 'eq=contrast=1.5:saturation=2', '只带非默认键');
+assert.equal(denoiseSegment(4), 'hqdn3d=4');
+assert.equal(denoiseSegment(99), 'hqdn3d=8', '降噪上限');
+assert.equal(sharpenSegment(1), 'unsharp=5:5:1');
+assert.equal(sharpenSegment(99), 'unsharp=5:5:2', '锐化上限');
+assert.equal(pitchSegment(1.5, 44100), 'asetrate=66150,aresample=44100,atempo=0.667');
+assert.equal(pitchSegment(3, 48000), 'asetrate=96000,aresample=48000,atempo=0.5', 'pitch 上限 2');
+assert.equal(pitchSegment(0.1, 48000), 'asetrate=24000,aresample=48000,atempo=2', 'pitch 下限 0.5');
+assert.throws(() => pitchSegment(1.2, 0), /采样率/);
+// 链序：eq/hqdn3d/unsharp 在 scale 之后、烧录/水印 tail 之前；-af 里 pitch 在 loudnorm 之后。
+const fxArgs = buildArgs('video', 'mp4', 90, 0, 0, 0, 0, 0, undefined, undefined, {
+  eq: { brightness: 0.1 },
+  denoise: 2,
+  sharpen: 0.5,
+  extraVf: ['drawtext=foo'],
+});
+const fxVf = fxArgs[fxArgs.indexOf('-vf') + 1];
+assert.ok(
+  fxVf.startsWith('eq=brightness=0.1,hqdn3d=2,unsharp=5:5:0.5,drawtext=foo'),
+  '画质段在水印 tail 之前：' + fxVf,
+);
+const afArgs = buildArgs('audio', 'mp3', 90, 0, 0, 0, 0, 0, undefined, undefined, {
+  loudnorm: true,
+  pitch: { value: 1.2, sampleRate: 44100 },
+});
+assert.equal(
+  afArgs[afArgs.indexOf('-af') + 1],
+  'loudnorm=I=-16:TP=-1.5:LRA=11,asetrate=52920,aresample=44100,atempo=0.833',
+);
+// 注册表层：画质滤镜/变调禁拷贝、禁 GPU、remux 拒绝、误用目标抛错、无采样率抛错。
+const eqPlan = convertEntry.plan(trackUpload(1), { format: 'mp4', brightness: 0.2 }, 0, null);
+assert.ok(!eqPlan.copy, '画质滤镜强制重编码');
+const pitchUp = trackUpload(1);
+pitchUp.meta.audio.sampleRate = 44100;
+const pitchPlan = convertEntry.plan(pitchUp, { format: 'mp3', pitch: 1.5 }, 0, null);
+assert.ok(!pitchPlan.copy, '变调强制重编码');
+assert.ok(pitchPlan.args.includes('asetrate=66150,aresample=44100,atempo=0.667'), '变调段进音频链');
+assert.throws(
+  () => convertEntry.plan(trackUpload(1), { format: 'mp3', brightness: 0.2 }, 0, null),
+  /画质滤镜仅对视频目标有效/,
+  '视频转音频带画质滤镜必须报错',
+);
+assert.throws(
+  () => convertEntry.plan(trackUpload(0, 0), { format: 'png', denoise: 2 }, 0, null),
+  /画质滤镜仅对视频目标有效/,
+  '图片目标带画质滤镜必须报错',
+);
+assert.throws(
+  () => convertEntry.plan(trackUpload(1), { format: 'mp4', pitch: 1.2 }, 0, null),
+  /没有可用采样率/,
+  '采样率未知时变调必须报错而非静默',
+);
+assert.throws(
+  () => convertEntry.plan(trackUpload(1), { format: 'mp4', remux: true, sharpen: 1 }, 0, null),
+  /remux（仅换封装）不支持画质滤镜/,
+);
+assert.throws(
+  () => convertEntry.plan(pitchUp, { format: 'mp4', remux: true, pitch: 1.2 }, 0, null),
+  /remux（仅换封装）不支持变调/,
+);
+const gpuEq = convertEntry.plan(trackUpload(1), { format: 'mp4', brightness: 0.2, hardware: true }, 0, {
+  id: 'videotoolbox',
+  label: 'Apple VideoToolbox',
+  encoder: 'h264_videotoolbox',
+  hevcEncoder: 'hevc_videotoolbox',
+  hwaccel: 'videotoolbox',
+  decodeArgs: [],
+  rateArgs: [],
+});
+assert.ok(!gpuEq.hardware, '画质滤镜请求不走 GPU 路径');
+console.log('plan: WP1 滤镜/变调用例 ok');

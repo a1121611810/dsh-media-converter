@@ -30,7 +30,7 @@ import {
   supportsVideoTune,
   watermarkSegment,
 } from './plan.js';
-import type { ConvertPlan, HwBackend, MediaKind } from './plan.js';
+import type { ConvertPlan, FilterKnobs, HwBackend, MediaKind } from './plan.js';
 import { fontCandidates, fontDirCandidates } from './platform.js';
 
 // Scratch files (watermark text) land in the same temp dir the Host uses;
@@ -88,6 +88,31 @@ function convertPlan(
   if (upload.kind !== 'video' && (geometry || body.crop || body.rotate || body.flip)) {
     throw new Error('画面几何仅对视频目标有效');
   }
+  // WP1 knobs validate here so every channel (panel, tool, batch) fails
+  // identically on malformed input instead of drifting per caller.
+  // Only a non-default ask counts: an explicit brightness:0 (or a contrast /
+  // saturation at its default) changes nothing and must keep the copy path.
+  const eqDefaults = [0, 1, 1];
+  const eqAsked = [body.brightness, body.contrast, body.saturation].some(
+    (value, index) => Number.isFinite(Number(value)) && Number(value) !== eqDefaults[index],
+  );
+  const denoiseAsked = Number(body.denoise) > 0;
+  const sharpenAsked = Number(body.sharpen) > 0;
+  if (eqAsked || denoiseAsked || sharpenAsked) {
+    if (upload.kind !== 'video' || kindByExt(format) !== 'video') {
+      throw new Error('画质滤镜仅对视频目标有效');
+    }
+  }
+  const pitchValue = Number(body.pitch);
+  const pitchAsked = Number.isFinite(pitchValue) && pitchValue > 0 && pitchValue !== 1;
+  let pitch: { value: number; sampleRate: number } | null = null;
+  if (pitchAsked) {
+    if (upload.kind === 'image' || kindByExt(format) === 'image') throw new Error('变调不适用于图片目标');
+    const rate = upload.meta.audio && upload.meta.audio.sampleRate;
+    if (!rate) throw new Error('该文件没有可用采样率，无法变调');
+    pitch = { value: pitchValue, sampleRate: rate };
+  }
+  const fxTuned = eqAsked || denoiseAsked || sharpenAsked || pitchAsked;
   // An explicit remux is a pure container rewrite: it wins over every tuned
   // knob (a copy has nothing to tune) and never re-encodes — anything that
   // would change the streams is rejected instead of silently dropped.
@@ -95,6 +120,8 @@ function convertPlan(
     if (trim) throw new Error('remux（仅换封装）不支持裁剪');
     if (vtrack > 0 || atrack > 0) throw new Error('remux（仅换封装）不支持选轨');
     if (geometry) throw new Error('remux（仅换封装）不支持画面几何');
+    if (eqAsked || denoiseAsked || sharpenAsked) throw new Error('remux（仅换封装）不支持画质滤镜');
+    if (pitchAsked) throw new Error('remux（仅换封装）不支持变调');
     return { ext: format, kind: kindByExt(format), args: forceRemuxArgs(format), copy: true };
   }
   // R5 knobs: speed / loudnorm / watermark / burn are all real re-encode
@@ -102,10 +129,20 @@ function convertPlan(
   // watermark text rides a scratch file (textfile=, never text=) that the
   // caller cleans via plan.scratch; burn reuses the subtitle file the route
   // extracted beforehand (body.burnFile).
-  const filters: { speed?: number; loudnorm?: boolean; extraVf?: string[]; extraAf?: string[] } = {};
+  const filters: FilterKnobs = {};
   const scratch: string[] = [];
   if (Number(body.speed) > 0 && Number(body.speed) !== 1) filters.speed = Number(body.speed);
   if (body.loudnorm === true) filters.loudnorm = true;
+  if (eqAsked) {
+    filters.eq = {
+      brightness: Number(body.brightness),
+      contrast: Number(body.contrast),
+      saturation: Number(body.saturation),
+    };
+  }
+  if (denoiseAsked) filters.denoise = Number(body.denoise);
+  if (sharpenAsked) filters.sharpen = Number(body.sharpen);
+  if (pitch) filters.pitch = pitch;
   const wmText = String(body.watermarkText || '').trim();
   // Validated now, written only on the software path below: a throw anywhere
   // in between (burn checks, the copy/hw gates, buildArgs' own clamps) must
@@ -131,7 +168,7 @@ function convertPlan(
     filters.extraVf = [burnSegment(body.burnFile, fontsDir), ...(filters.extraVf ?? [])];
   }
   const filtersTuned = Boolean(
-    filters.speed || filters.loudnorm || wmText || (filters.extraVf && filters.extraVf.length),
+    filters.speed || filters.loudnorm || wmText || (filters.extraVf && filters.extraVf.length) || fxTuned,
   );
   // An explicit quality choice means "re-encode to this quality": a container
   // copy would silently drop it. Rounded, so 89.6/90.4 (which buildArgs rounds

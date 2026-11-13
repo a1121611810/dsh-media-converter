@@ -2795,6 +2795,53 @@ const normed = await call('convert', {
 assert.equal(normed.data.ok, true, JSON.stringify(normed.data));
 await waitJob(normed.data.job);
 
+// --- WP1: 基础画面滤镜 + 变调 ------------------------------------------------
+// eq 帧哈希对照：只断言「任务成功」挡不住「eq 静默空转」——对照组同参数重编码
+// （channels:2 不动视频编码参数，与上面的水印对照同标准），md5 必须不同。
+const tinted = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', brightness: 0.6, denoise: 2, sharpen: 0.5 }),
+});
+assert.equal(tinted.data.ok, true, JSON.stringify(tinted.data));
+const tintedDone = await waitJob(tinted.data.job);
+const fxCtl = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp4', channels: 2 }),
+});
+assert.equal(fxCtl.data.ok, true, JSON.stringify(fxCtl.data));
+const fxCtlDone = await waitJob(fxCtl.data.job);
+const frameMd5Of = (file) =>
+  spawnSync(ffmpeg, ['-loglevel', 'error', '-i', file, '-map', '0:v:0', '-frames:v', '1', '-f', 'md5', '-'], {
+    encoding: 'utf8',
+  }).stdout.trim();
+assert.notEqual(frameMd5Of(tintedDone.out), frameMd5Of(fxCtlDone.out), '画质滤镜必须真的作用于画面');
+
+// 变调的核心承诺是变速不变：2s 源变调后时长仍在原窗口内。
+const repitched = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: clipUpload.data.id, format: 'mp3', pitch: 1.5 }),
+});
+assert.equal(repitched.data.ok, true, JSON.stringify(repitched.data));
+const repitchedDone = await waitJob(repitched.data.job);
+const repitchedMeta = parseMeta(
+  spawnSync(ffmpeg, ['-hide_banner', '-i', repitchedDone.out], { encoding: 'utf8' }).stderr,
+);
+assert.ok(Math.abs(repitchedMeta.duration - 2) < 0.6, `变调后时长应保持，实际 ${repitchedMeta.duration}`);
+
+// 图片目标带画质滤镜：宿主必须拒（负向，报错而非静默忽略）。
+const badFx = await call('convert', {
+  method: 'POST',
+  body: JSON.stringify({ id: skipUpload.data.id, format: 'png', brightness: 0.2 }),
+});
+assert.equal(badFx.data.ok, false, '图片目标带画质滤镜必须被拒');
+assert.match(badFx.data.error, /画质滤镜仅对视频目标有效/);
+// 工具通道同旋钮：e2e 一把。
+const toolFx = await media.execute(
+  { path: clip, action: 'convert', format: 'mp4', brightness: 0.2, pitch: undefined },
+  exec,
+);
+assert.ok(fs.existsSync(toolFx.file), 'tool brightness lands');
+
 // 滤镜探测必须如实报告：用独立的 -filters 探测做真值，和 /status 对照
 //（假绿防线：只读 /status 的快照测不出“状态谎报无滤镜”的突变）。
 const filtersText = spawnSync(ffmpeg, ['-hide_banner', '-filters'], { encoding: 'utf8' }).stdout || '';

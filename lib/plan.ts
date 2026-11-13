@@ -330,6 +330,51 @@ export function loudnormSegment(): string {
   return 'loudnorm=I=-16:TP=-1.5:LRA=11';
 }
 
+// eq knobs ride the chain AFTER scale but BEFORE burn/overlay/text watermark:
+// picture tuning renders below any overlaid content. An all-default ask is a
+// no-op (null), so untouched requests never grow a filter chain.
+export interface EqTune {
+  brightness?: number;
+  contrast?: number;
+  saturation?: number;
+}
+
+export function eqSegment(tune: EqTune): string | null {
+  const round3 = (v: number) => String(Math.round(v * 1000) / 1000);
+  const parts: string[] = [];
+  const b = Number(tune.brightness);
+  if (Number.isFinite(b) && b !== 0) parts.push(`brightness=${round3(Math.min(1, Math.max(-1, b)))}`);
+  const c = Number(tune.contrast);
+  if (Number.isFinite(c) && c !== 1) parts.push(`contrast=${round3(Math.min(2, Math.max(0.25, c)))}`);
+  const s = Number(tune.saturation);
+  if (Number.isFinite(s) && s !== 1) parts.push(`saturation=${round3(Math.min(3, Math.max(0, s)))}`);
+  return parts.length ? `eq=${parts.join(':')}` : null;
+}
+
+// hqdn3d's single positional value is luma spatial strength: 1 light .. 8 heavy.
+export function denoiseSegment(level: number): string {
+  return `hqdn3d=${Math.min(8, Math.max(1, Math.round(Number(level) || 4)))}`;
+}
+
+// unsharp luma amount: 0.25 light .. 2 strong. ffmpeg allows more; quality
+// breaks first, so the clamp keeps the slider honest.
+export function sharpenSegment(amount: number): string {
+  const v = Math.min(2, Math.max(0.25, Number(amount)));
+  return `unsharp=5:5:${String(Math.round(v * 100) / 100)}`;
+}
+
+// Pitch without speed: asetrate moves pitch AND tempo together, aresample pulls
+// the stream back to the source rate, atempo=1/p cancels the tempo change.
+// atempo accepts 0.5–2 per instance, so pitch clamps to the same window.
+export function pitchSegment(pitch: number, sampleRate: number): string {
+  const p = Math.min(2, Math.max(0.5, Number(pitch)));
+  const sr = Math.round(Number(sampleRate));
+  if (!(sr > 0)) throw new Error('该文件没有可用采样率，无法变调');
+  const ratio = Math.round(p * 1000) / 1000;
+  const back = Math.round((1 / ratio) * 1000) / 1000;
+  return `asetrate=${Math.round(sr * ratio)},aresample=${sr},atempo=${back}`;
+}
+
 const WM_POS: Record<string, { x: string; y: string }> = {
   tl: { x: '24', y: '24' },
   tr: { x: 'w-tw-24', y: '24' },
@@ -726,6 +771,19 @@ export function forceRemuxArgs(format: string): string[] {
   return args;
 }
 
+// The tuned-filter knobs buildArgs understands; the registry validates them
+// per channel before they ever reach an ffmpeg arg.
+export interface FilterKnobs {
+  speed?: number;
+  loudnorm?: boolean;
+  extraVf?: string[];
+  extraAf?: string[];
+  eq?: EqTune;
+  denoise?: number;
+  sharpen?: number;
+  pitch?: { value: number; sampleRate: number };
+}
+
 export function buildArgs(
   kind: MediaKind,
   format: string,
@@ -737,7 +795,7 @@ export function buildArgs(
   sampleRate?: number,
   codec?: unknown,
   geometry?: VideoGeometry,
-  filters?: { speed?: number; loudnorm?: boolean; extraVf?: string[]; extraAf?: string[] },
+  filters?: FilterKnobs,
 ): string[] {
   const table = kind === 'audio' ? AUDIO : kind === 'image' ? IMAGE : VIDEO;
   // An explicit software pick swaps the recipe; an unsupported combination
@@ -786,6 +844,9 @@ export function buildArgs(
   const afParts: string[] = [];
   if (speed) afParts.push(speed.af);
   if (loud) afParts.push(loud);
+  // Pitch rides after loudnorm; the segment ends back at the source rate, so a
+  // later -ar from applyAudioTune still lands on the right number.
+  if (filters?.pitch) afParts.push(pitchSegment(filters.pitch.value, filters.pitch.sampleRate));
   if (filters?.extraAf?.length) afParts.push(...filters.extraAf);
   // Recipes that drop audio (-an, e.g. gif/png single-frame) would leave the
   // -af chain applying to nothing; ffmpeg rejects that, so skip it.
@@ -800,16 +861,24 @@ export function buildArgs(
     else if (geo.flip === 'v') geoParts.push('vflip');
   }
   const tailParts = filters?.extraVf ?? [];
+  // Picture tuning renders BELOW overlays: after scale, before the burn /
+  // image-overlay / text-watermark tail.
+  const eq = kind === 'video' ? eqSegment(filters?.eq || {}) : null;
+  const denoise = Number(filters?.denoise) > 0 ? denoiseSegment(Number(filters?.denoise)) : '';
+  const sharpen = Number(filters?.sharpen) > 0 ? sharpenSegment(Number(filters?.sharpen)) : '';
+  const fxParts = [eq, denoise, sharpen].filter(Boolean) as string[];
   if (
     supportsVideoTune(kind, format) &&
-    (geoParts.length > 0 || tailParts.length > 0 || Number(fps) > 0 || Number(width) > 0)
+    (geoParts.length > 0 || tailParts.length > 0 || fxParts.length > 0 || Number(fps) > 0 || Number(width) > 0)
   ) {
     if (format === 'gif') {
       const f = Number(fps) > 0 ? Math.min(30, Math.max(1, Math.round(Number(fps)))) : 12;
       const w = Number(width) > 0 ? Math.min(7680, Math.max(16, Math.round(Number(width)))) : 640;
       const at = args.indexOf('-vf');
       if (at >= 0)
-        args[at + 1] = [...geoParts, `fps=${f},scale='min(${w},iw)':-2:flags=lanczos`, ...tailParts].join(',');
+        args[at + 1] = [...geoParts, `fps=${f},scale='min(${w},iw)':-2:flags=lanczos`, ...fxParts, ...tailParts].join(
+          ',',
+        );
     } else {
       const parts: string[] = [...geoParts];
       if (Number(fps) > 0) parts.push(`fps=${Math.min(30, Math.max(1, Math.round(Number(fps))))}`);
@@ -819,6 +888,7 @@ export function buildArgs(
         parts.push(
           `scale='trunc(min(${Math.min(7680, Math.max(16, Math.round(Number(width))))},iw)/2)*2':-2:flags=lanczos`,
         );
+      parts.push(...fxParts);
       parts.push(...tailParts);
       args.push('-vf', parts.join(','));
     }
