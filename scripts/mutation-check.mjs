@@ -1528,6 +1528,17 @@ const MUTANTS = [
     distAnchor: '!Number.isFinite(rates.video) &&',
     expect: '非数值 rate 必须整份拒收；突变后 video 投毒漏检 → state.test 投毒用例红',
   },
+  {
+    id: 'S1',
+    name: 'PTC 程序回到顶层 return（宿主按 REPL 语句求值时语法错）',
+    // 宿主有三种程序格式：function-body（async 函数体，顶层 return 合法）与
+    // repl / script（顶层 return 是语法错，只能用末尾表达式收尾）。这里把
+    // 末尾表达式改回顶层 return，等于复现 DSH 常驻 PTC 模式下的真实故障。
+    // 改的是字符串字面量，TS 照常编译 → 转红一定是断言红，不是假红。
+    apply: (s) => replaceOnce(s, "      'out;'", "      'return out;'"),
+    distAnchor: "'return out;'",
+    expect: 'PTC 程序必须以末尾表达式收尾（宿主可能按 REPL 语句求值）；突变后 host.test 的 REPL 求值用例红',
+  },
 ];
 
 function build() {

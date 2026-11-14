@@ -2777,7 +2777,8 @@ export function apply(ctx: HostContext, config?: Partial<Config>): void {
       `  const batch = plan.slice(i, i + ${wave});\n` +
       '  out.push(...await Promise.all(batch.map(async (p) => { try { return await media.convert(p); } catch (e) { return { id: p.id, error: String((e && e.message) || e) }; } })));\n' +
       '}\n' +
-      'return out;'
+      // Not `return`: the Host may run this as REPL statements, where a top-level return is a syntax error.
+      'out;'
     );
   };
 

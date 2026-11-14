@@ -7,7 +7,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Readable, Writable } from 'node:stream';
+import { Readable, Writable, PassThrough } from 'node:stream';
+import { start as startRepl } from 'node:repl';
 import { apply, inject, probeFfmpeg, pruneUploads, resolveGroups, runJobAttempts } from '../dist/index.js';
 import { formatEncoders, parseDuration, parseMeta } from '../dist/lib/plan.js';
 
@@ -876,6 +877,41 @@ assert.doesNotMatch(ptcProgram, /Promise\.all\(plan\.map/, 'a big plan is not on
 const waveMatch = ptcProgram.match(/i \+= (\d+)/);
 assert.ok(waveMatch, 'the plan runs in bounded waves');
 assert.ok(Number(waveMatch[1]) >= 4 && Number(waveMatch[1]) <= 32, `wave ${waveMatch[1]}`);
+// The Host may run this program as REPL statements (the persistent PTC
+// runtime does), where a top-level `return` is a syntax error. Evaluate the
+// very text the Host composed through the same REPL evaluator the Host uses,
+// so a function-body-only program cannot slip through unnoticed.
+const replEval = async (program, globals) => {
+  const input = new PassThrough();
+  const output = new Writable({
+    write(_c, _e, cb) {
+      cb();
+    },
+  });
+  const repl = startRepl({ input, output, terminal: false, prompt: '', useGlobal: false, ignoreUndefined: true });
+  Object.assign(repl.context, globals);
+  const outcome = await new Promise((resolve) => {
+    repl.eval(`${program}\n`, repl.context, 'ptc-repl', (error, value) => resolve({ error, value }));
+  });
+  repl.close();
+  input.destroy();
+  output.destroy();
+  return outcome;
+};
+const replCalls = [];
+const replOutcome = await replEval(ptcProgram, {
+  media: {
+    convert: async (row) => {
+      replCalls.push(row);
+      return { id: row.id, output: `/tmp/${row.id}` };
+    },
+  },
+});
+assert.ok(!replOutcome.error, `the PTC program must run as REPL statements: ${replOutcome.error?.message ?? ''}`);
+assert.ok(replCalls.length >= 1, 'the REPL program reaches the media binding');
+assert.equal(replCalls[0].id, upload.data.id, 'the REPL program carries the planned file');
+assert.ok(Array.isArray(replOutcome.value), 'the REPL program yields its result array');
+assert.equal(replOutcome.value.length, replCalls.length, 'one result per planned row');
 assert.match(ptcPrompt, /JSON/);
 assert.match(ptcPrompt, /每个文件恰好一条/);
 assert.match(ptcPrompt, new RegExp('id=' + upload.data.id));
