@@ -472,8 +472,12 @@ const MUTANTS = [
   {
     id: 'C1',
     name: '视频 fps/width 被旁路（-vf 永不重建/生成）',
-    // false && 仍读取 fps/width 与 supportsVideoTune，不会 TS6133；条件永假后
-    // gif 回配方 12fps/640px、普通视频容器拿不到 -vf。
+    // 条件恒假 ⇒ gif 回配方 12fps/640px、普通视频容器拿不到 -vf。
+    // 不能写 `false &&`：那让整块变成静态不可达，TS 在不可达代码里重置收窄，
+    // 块内的 `filters?.overlay` 立刻报 TS18048 → 构建失败 → 测试根本没跑，
+    // 那是假红不是真红（这个坑已在本仓 main 上复现，见 gotcha）。改成运行时
+    // 恒假但 TS 看不出来的 `String(fps).length < 0`：仍读 fps/width 与
+    // supportsVideoTune（不触发 TS6133），构建照常通过，行为照样被旁路。
     source: 'lib/plan.ts',
     test: 'test/plan.test.mjs',
     dist: 'dist/lib/plan.js',
@@ -483,11 +487,11 @@ const MUTANTS = [
         `  if (
     supportsVideoTune(kind, format) &&`,
         `  if (
-    false &&
-    supportsVideoTune(kind, format) &&`,
+    supportsVideoTune(kind, format) &&
+    String(fps).length < 0 &&`,
       ),
-    // dist 打印器把条件接在 if ( 同行：锚点只取这一小段（基线三份产物零命中）。
-    distAnchor: 'if (false &&',
+    // 锚点取突变引入的那一行：基线产物零命中，突变后唯一命中。
+    distAnchor: 'String(fps).length < 0',
     expect: '显式 fps/width 必须生成/重建 -vf（gif 与普通容器），突变后 gif 回默认、mp4 无滤镜 → 测试红',
   },
   {
